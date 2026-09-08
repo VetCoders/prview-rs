@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Private Rust API and Loctree workers require application-only arguments paired
+  with their environment requests and refuse nested launches. A library test
+  runner can no longer re-enter the full test suite through `current_exe()`.
+  MCP probes also reject test runners rather than treating `mcp` as a test filter.
+
 - A signal arriving after durable pack publication no longer relabels the
   completed run as exit 130, while an unchanged `--update` remains
   cancellation-sensitive. Crash-journal recovery refuses and quarantines
