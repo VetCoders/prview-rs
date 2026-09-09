@@ -2229,7 +2229,7 @@ pub(super) fn build_assets_section(diff: Option<&Diff>) -> String {
 
 /// Build the SARIF findings table section (B6).
 /// Enhanced version of build_findings_section with structured columns.
-pub(super) fn build_sarif_table_section(ctx: &DashboardContext) -> String {
+pub(super) fn build_sarif_table_section(ctx: &DashboardContext, repo_root: &Path) -> String {
     if ctx.findings.is_empty() {
         return String::new();
     }
@@ -2257,7 +2257,11 @@ pub(super) fn build_sarif_table_section(ctx: &DashboardContext) -> String {
         let clean_msg = &f.message;
 
         let file_cell = if let Some(fp) = file_path {
-            source_evidence_link(fp, line_num)
+            if let Some(path) = super::evidence::source_path(fp, repo_root) {
+                source_evidence_link(&path, line_num)
+            } else {
+                format!("<code>{}</code>", escape_html(fp))
+            }
         } else {
             i18n_template(
                 "message.generalSignal",

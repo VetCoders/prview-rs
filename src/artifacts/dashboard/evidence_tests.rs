@@ -89,7 +89,7 @@ fn findings_use_recorded_location_and_general_notes_remain_neutral() {
             in_diff: None,
         },
     ];
-    let html = build_sarif_table_section(&ctx);
+    let html = build_sarif_table_section(&ctx, Path::new("/repo"));
     assert!(html.contains("data-source-path=\"tests/test_parser.py\" data-source-line=\"17\""));
     assert!(!html.contains("data-source-path=\"src/wrong.py\""));
     assert!(html.contains("General signal; no code location"));

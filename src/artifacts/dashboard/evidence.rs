@@ -136,6 +136,18 @@ pub(super) fn relative_href(path: &str) -> String {
     href
 }
 
+/// Use the same repository-relative key for source links and committed blobs.
+/// External locations remain displayable, but never become source-reader keys.
+pub(super) fn source_path(path: &str, repo_root: &Path) -> Option<String> {
+    let normalized = crate::paths::normalize_to_repo_relative(path, repo_root);
+    if normalized.is_external
+        || crate::paths::validate_repo_relative_str(&normalized.display).is_err()
+    {
+        return None;
+    }
+    Some(normalized.display)
+}
+
 /// Source is pinned to the diff's committed target, never the ambient checkout.
 /// This is a committed reference, not the contents of any dirty-checkout overlay.
 pub(super) fn source_templates(
@@ -177,10 +189,11 @@ pub(super) fn source_templates(
     }
     let mut html = String::new();
     let mut remaining = PACK_LIMIT;
+    let paths: BTreeSet<_> = paths
+        .into_iter()
+        .filter_map(|path| source_path(&path, &config.repo_root))
+        .collect();
     for path in paths {
-        if crate::paths::validate_repo_relative_str(&path).is_err() {
-            continue;
-        }
         let Ok(entry) = tree.get_path(Path::new(&path)) else {
             continue;
         };
@@ -387,11 +400,17 @@ mod tests {
             check_name: "test".into(),
             check_id: "test".into(),
             message: "failed".into(),
-            file: Some("unchanged.rs".into()),
+            file: Some(dir.path().join("unchanged.rs").display().to_string()),
             line: Some(1),
             in_diff: None,
         };
+        let mut ctx = super::super::tests::mock_ctx();
+        ctx.findings = vec![finding.clone()];
+        let links = super::super::sections::build_sarif_table_section(&ctx, &config.repo_root);
+        assert!(links.contains("data-source-path=\"unchanged.rs\""));
         let html = source_templates(&config, &[diff], None, &[finding]);
+        assert!(html.contains("data-source-content=\"unchanged.rs\""));
+        assert!(source_path("../outside.rs", &config.repo_root).is_none());
         assert!(html.contains("committed evidence"));
         assert!(html.contains("data-content-encoding=\"json-string\""));
         assert!(!html.contains("ambient content"));

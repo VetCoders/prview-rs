@@ -495,7 +495,7 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
     let ownership_html = build_ownership_section(ctx);
     let breaking_html = build_breaking_section(ctx);
     let coverage_html = build_coverage_section(ctx);
-    let findings_html = build_sarif_table_section(ctx);
+    let findings_html = build_sarif_table_section(ctx, &config.repo_root);
     let assets_html = build_assets_section(diff);
     let i18n_html = build_i18n_section(ctx);
     let commits_html = build_commits_section(diff, config.pr_url.as_deref(), batch_count);

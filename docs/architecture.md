@@ -1608,6 +1608,10 @@ short check output stays inline, while longer output uses a bounded scroll area.
 The narrative copy control belongs to its content panel and preserves the original
 Markdown; manifest and integrity links belong to the artifact explorer panel.
 
+Absolute finding paths inside the repository are normalized to the same relative
+key for source links and committed-source templates. External paths remain plain
+locations and never request source from outside the repository.
+
 Failure cards, the failure summary and report JSON share diagnostic extraction.
 Pytest process noncompletion without a parsed diagnostic retains its exit code
 and unknown cause; passed test names and startup banners cannot become failure
