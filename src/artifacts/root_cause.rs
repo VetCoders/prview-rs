@@ -373,6 +373,14 @@ pub(crate) fn extract_pytest_root_cause(check: &CheckResult) -> Option<RootCause
         return None;
     }
 
+    if check.provenance.as_ref().and_then(|p| p.exit_code) == Some(-1) {
+        return Some(RootCause {
+            cause: "Process timed out".into(),
+            evidence: "PrView recorded a runner timeout (exit code -1).".into(),
+            hint: "Inspect the timeout budget and full Pytest log.".into(),
+        });
+    }
+
     static FAILURE_COUNT: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?:^|,\s*)[1-9][0-9]* (?:failed|errors?)\b")
             .expect("pytest failure summary regex")
@@ -447,6 +455,25 @@ mod tests {
                 cache_key: None,
             }),
         }
+    }
+
+    #[test]
+    fn pytest_recorded_timeout_precedes_progress_text() {
+        let mut check = interrupted_pytest();
+        check.provenance.as_mut().unwrap().exit_code = Some(-1);
+        let diagnostic = extract_root_cause(&check).unwrap();
+        assert_eq!(diagnostic.cause, "Process timed out");
+        assert!(findings::check_failure_excerpt(&check).contains("runner timeout"));
+        check.provenance.as_mut().unwrap().exit_code = Some(137);
+        check
+            .output
+            .push_str("\ntests/test_x.py::test_timed_out PASSED");
+        assert!(
+            extract_root_cause(&check)
+                .unwrap()
+                .cause
+                .contains("unknown")
+        );
     }
 
     #[test]

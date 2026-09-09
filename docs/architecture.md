@@ -1612,7 +1612,9 @@ Failure cards, the failure summary and report JSON share diagnostic extraction.
 Pytest process noncompletion without a parsed diagnostic retains its exit code
 and unknown cause; passed test names and startup banners cannot become failure
 excerpts or located findings. A diagnostic's source location remains an
-observation, not proof of the underlying cause.
+observation, not proof of the underlying cause. A recorded runner timeout
+(`exit_code: -1`) remains an explicit timeout for Pytest; timeout-like words in
+passed test names do not establish a timeout.
 Semgrep JSON excerpts summarize findings and scan warnings/errors, while the
 original log remains available. Incomplete public API analysis states its unknown
 regions and labels change counts as known facts; zero known changes cannot imply
