@@ -2758,8 +2758,9 @@ two artifacts of one run disagreeing about what "failure" meant. The field is
 additive and `report.json` stays `schema_version: "2.0"` — that major is
 unreleased, so no consumer has ever seen a 2.0 without it.
 
-Source-to-test matching uses language-compatible evidence (JavaScript and
-TypeScript may match each other; JavaScript cannot match a Rust test):
+Source-to-test matching uses language-compatible evidence: JavaScript/TypeScript,
+C/C++ (including headers), and Java/Kotlin each form a compatible family.
+Unrelated languages such as JavaScript and Rust cannot match each other:
 
 - High confidence: normalized source/test names in the corresponding module or
   mirrored test path. Test suffixes include `_test`, `_tests`, `.test`, `.spec`

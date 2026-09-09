@@ -625,7 +625,18 @@ fn compatible_test_language(source: &str, test: &str) -> bool {
             Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
         )
     };
-    source_ext.is_some() && (source_ext == test_ext || is_js_ts(source_ext) && is_js_ts(test_ext))
+    let is_c_cpp = |ext| {
+        matches!(
+            ext,
+            Some("c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx")
+        )
+    };
+    let is_jvm = |ext| matches!(ext, Some("java" | "kt" | "kts"));
+    source_ext.is_some()
+        && (source_ext == test_ext
+            || is_js_ts(source_ext) && is_js_ts(test_ext)
+            || is_c_cpp(source_ext) && is_c_cpp(test_ext)
+            || is_jvm(source_ext) && is_jvm(test_ext))
 }
 
 fn same_coverage_module(source_path: &str, test_path: &str) -> bool {
@@ -842,6 +853,26 @@ mod tests {
         assert_eq!(signal.total_source_files, 1);
         assert_eq!(signal.covered_count, 1);
         assert_eq!(signal.covered_files[0].2, CoverageMatchTier::High);
+    }
+
+    #[test]
+    fn coverage_matches_compatible_mixed_extension_language_families() {
+        for (source, test) in [
+            ("include/foo.hpp", "tests/foo_test.cpp"),
+            ("src/foo.c", "tests/foo_test.cpp"),
+            ("src/Foo.java", "tests/Foo_test.kt"),
+            ("src/Foo.kt", "tests/Foo_test.java"),
+        ] {
+            let source = mock_file_change(source, FileStatus::Modified, 2, 1);
+            let test = mock_file_change(test, FileStatus::Modified, 2, 1);
+            assert!(find_matching_test(&source, &[&test]).is_some());
+            if source.path.ends_with(".java") || source.path.ends_with(".kt") {
+                let contents = HashMap::from([(test.path.clone(), "import example.Foo;".into())]);
+                assert!(find_test_by_import(&source, &[&test], &contents).is_some());
+            }
+        }
+        assert!(!compatible_test_language("foo.hpp", "foo_test.rs"));
+        assert!(!compatible_test_language("Foo.java", "Foo_test.ts"));
     }
 
     #[test]
