@@ -161,7 +161,10 @@ async function runReaderGate() {
       assert(dialog.open, filePath + ' must open in the reader');
       assert.equal(doc.getElementById('evidence-title').textContent, filePath);
       assert(body.textContent.trim().length > 10, filePath + ' must have readable evidence');
-      assert(!body.textContent.includes('not embedded'), filePath + ' must be embedded');
+      // Reviewed source can itself contain the reader's unavailable-message text.
+      // Inspect the content structure instead of treating evidence as UI state.
+      assert(doc.querySelector('template[data-evidence-content="' + filePath + '"]'), filePath + ' must be embedded');
+      assert(body.querySelector('.evidence-line, article'), filePath + ' must render its embedded content');
       assert.equal(dom.window.location.pathname, '/dashboard.html');
       if (filePath.endsWith('.md')) {
         assert(body.querySelector('article'), 'Markdown should have a formatted view');
