@@ -196,6 +196,14 @@ async function runReaderGate() {
   formatted.innerHTML = '<ul><li><p>needle needle <a href="../PR_REVIEW.md">needle</a></p></li></ul><p>com<strong>plete</strong> a.* aX ŻÓŁĆ</p>';
   doc.body.append(formatted);
   for (const filePath of ['20_quality/long.log', '20_quality/original.log', '20_quality/original.json', '20_quality/legacy.log', '20_quality/search.md', '20_quality/not-embedded.log']) addLink(doc, filePath);
+  const sourceJson = '{"outer": {"nested": 1},\n"second": true}\n';
+  for (const sourcePath of ['src/config.json', 'src/diagnostic.sarif']) {
+    addTemplate(doc, 'data-source-content', sourcePath, sourceJson);
+    const link = doc.createElement('a');
+    link.dataset.sourcePath = sourcePath;
+    link.dataset.sourceLine = '2';
+    doc.body.append(link);
+  }
   await loaded;
   try {
     const dialog = doc.getElementById('evidence-dialog');
@@ -310,6 +318,16 @@ async function runReaderGate() {
     await assertDownload(longText, 'long.log', true);
     close();
 
+    for (const sourcePath of ['src/config.json', 'src/diagnostic.sarif']) {
+      click(doc.querySelector('[data-source-path="' + sourcePath + '"]'));
+      const selected = body.querySelector('.evidence-selected');
+      assert(selected, 'Located source line must be selected');
+      assert.equal(selected.dataset.line, '2');
+      assert.equal(selected.textContent, '"second": true}', 'JSON source must preserve committed line positions');
+      assert.equal(body.querySelectorAll('.evidence-line').length, 3);
+      await assertDownload(sourceJson, sourcePath.split('/').pop(), true);
+      close();
+    }
     const source = Array.from(doc.querySelectorAll('[data-source-path]')).find(item => doc.querySelector('template[data-source-content="' + item.dataset.sourcePath + '"]'));
     assert(source, 'Real fixture must expose at least one committed source');
     click(source);

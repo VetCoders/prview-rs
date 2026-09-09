@@ -87,7 +87,7 @@ function installEvidenceReader(t) {
             body.appendChild(article);
         } else if (content) {
             var text = content.text;
-            if (/\.(json|sarif)$/.test(path)) {
+            if (!source && /\.(json|sarif)$/.test(path)) {
                 try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (_) { /* Preserve original evidence. */ }
             }
             var pre = document.createElement('pre');

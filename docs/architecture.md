@@ -2950,7 +2950,9 @@ links. Manifest and sanity results are generated later and are not embedded.
 Source previews use blobs from the diff's committed target tree, never the
 ambient checkout. Changed files and Loctree candidate locations share this
 reader. A WIP overlay is visible in the diff and provenance, not substituted
-for committed source. Missing target blobs or files outside preview limits
+for committed source. JSON and SARIF source previews retain committed line
+boundaries; pretty-printing applies only to artifact views, so recorded source
+locations remain stable. Missing target blobs or files outside preview limits
 produce an explicit unavailable state.
 
 Panel labels preserve the scope of their evidence:
