@@ -436,7 +436,7 @@ job passed or failed.
 | `--json` | JSON output |
 | `--no-color` | Disable ANSI colors |
 | `--no-zip` | Skip ZIP creation |
-| `--no-dashboard` | Skip HTML dashboard generation |
+| `--no-dashboard` | Generate static `review.html` instead of the interactive `dashboard.html` |
 | `--soft-exit` | Always exit 0, whatever the checks found |
 | `--fail-on-warnings` | With `--ci`: also exit 1 when any check reports warnings |
 
@@ -653,9 +653,71 @@ $HOME/.prview/runs/my-repo/feature-x/20260225-185357/
 │   ├── tsc-trace.log         # (JS) optional module-resolution diagnostics
 │   ├── eslint-report.json    # (JS) ESLint result
 │   └── vitest-report.json    # (JS) Vitest result
-├── dashboard.html            # Visual HTML summary
+├── AI_INDEX.md               # Reading order; points to the selected HTML entry
+├── REVIEW_SUMMARY.md         # Consolidated review summary
+├── PR_REVIEW.md              # Review narrative and changed-file map
+├── report.json               # Machine-readable aggregate report
+├── dashboard.html           # Default human report and offline evidence reader
 └── artifacts.zip             # Everything zipped
 ```
+
+With `--no-dashboard`, the root contains `review.html` instead of
+`dashboard.html`. The static export is an explicit fallback, not a second
+default dashboard.
+
+### Read a pack in the browser
+
+Open `dashboard.html` from the extracted pack. Its reading path starts with
+what changed and what was checked, then leads to the failure summary,
+provenance and consolidated summary. Shortcuts provide the full diff, gate
+decision and reasons, narrative, and located tool observations. The artifacts
+explorer exposes the remaining evidence. `AI_INDEX.md` lists the selected HTML
+entry point and the important source artifacts; that list is a starting point,
+not a limit on the evidence available in the dashboard.
+
+Markdown, JSON, logs and diffs open inside the report, with text search and an
+original download. Markdown has a rendered view and source text. File and
+symbol links open source from the analyzed target commit, rather than whatever
+happens to be in the working directory when the HTML is opened. For a WIP run,
+that source preview is committed code; inspect the diff and provenance for the
+working-tree overlay.
+
+Embedded text is bounded to 2 MiB per file and 12 MiB for artifact text, with a
+separate 12 MiB budget for source previews. Long text is paged in windows of up
+to 5,000 lines; search applies to the visible page. Markdown up to 256 KiB and
+5,000 lines offers a formatted view; larger embedded Markdown opens as source
+text. Source downloads contain the committed target blob. Check provenance may
+identify a different scan substrate, so the reference is not proof that a check
+ran on that exact source. Files outside the embedding limits, binary
+files and other non-embedded artifacts remain available as original downloads.
+Keep the extracted pack together to use those relative links; copying only the
+HTML preserves embedded evidence but does not copy the original files.
+`MANIFEST.json` and `SANITY.json` are finalized after the dashboard and remain
+original downloads rather than embedded copies.
+
+The report distinguishes observations from conclusions:
+
+- **Tests for changed files** shows source-to-test matching, not measured line
+  or branch coverage. Finding a matching test file does not establish that the
+  changed behavior is tested or that its tests passed.
+- **Structural change risk** compares structural indicators. Its score is not
+  a probability of failure and does not include test results.
+- **Structural observations** exposes repository-wide Loctree candidates with
+  details and source links. Repeated export names are not proof of duplicate
+  implementations, and a missing detected import is not proof of unused code.
+- **Check duration** shows recorded durations alongside execution statuses.
+  Their sum is not the total report preparation time; zero seconds does not
+  establish that a check ran.
+- **Ownership** lists only people or teams declared by matching CODEOWNERS
+  rules in the analyzed target commit. If none are established, the report
+  says so; directory names are not substitutes for reviewers. Matching supports
+  root-anchored paths, bare names at any depth, directory rules, `*`, `?`, and
+  `**`. For example, `docs/*` covers immediate files, `/docs/` covers the root
+  documentation tree, and `docs/` can match that directory at any depth.
+  Negation, bracket ranges, escaped paths, and malformed patterns are skipped.
+- **Tool observations** retains source and location evidence. A traceback
+  location identifies where a failure was reported, not necessarily its cause.
+  General check signals remain general instead of gaining an invented line.
 
 ### Key artifacts
 

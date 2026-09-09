@@ -374,10 +374,8 @@ fn test_ownership_section_empty() {
     let mut ctx = mock_ctx();
     ctx.ownership_map = vec![];
     let html = build_ownership_section(&ctx);
-    assert!(
-        html.is_empty(),
-        "Empty ownership map should produce empty HTML"
-    );
+    assert!(html.contains("message.noConfirmedOwners"));
+    assert!(html.contains("No responsible people or teams were established"));
 }
 
 #[test]

@@ -431,11 +431,14 @@ fn extract_narrative_preview(pr_review_content: &str) -> String {
 }
 
 mod assets;
+mod evidence;
 mod sections;
 
 use assets::{css, js};
 use sections::*;
 
+#[cfg(test)]
+mod evidence_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -500,7 +503,10 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
     let flaky_html = build_flaky_section(ctx);
     let loctree_html = build_loctree_section(heuristics);
     let regression_details_html = build_regression_details_section(ctx, heuristics, regression);
-    let artifacts_html = build_artifacts_section(ctx);
+    let evidence_files = evidence::inventory(dir);
+    let artifacts_html = build_artifacts_section(ctx, &evidence_files);
+    let evidence_templates = evidence::templates(&evidence_files);
+    let source_templates = evidence::source_templates(config, diffs, heuristics, &ctx.findings);
     let breakdown = build_file_breakdown(diff);
 
     // --- Summaries for collapsible headers ---
@@ -560,7 +566,7 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
     let coverage_summary = match ctx.coverage.pct {
         Some(pct) => i18n_template(
             "summary.coveragePct",
-            &format!("{}% coverage", pct),
+            &format!("{}% of files have matching test changes", pct),
             &[("pct", pct.to_string())],
         ),
         // Nothing was measured (no changed source files) — say so, do not
@@ -979,7 +985,7 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
             );
         }
     }
-    if !ctx.ownership_map.is_empty() {
+    if !ownership_html.is_empty() {
         let _ = write!(
             nav,
             "<a href=\"#section-ownership\" data-i18n=\"nav.ownership\">Ownership</a>"
@@ -1101,6 +1107,7 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
 	    <div class="container">
 	        <div class="tier-one-stack top-section-anchor" id="section-overview">
 	            {header}
+                {reading_path}
 	            {merge_decision_card}
 	            {action_center}
 	            <div class="tier-one-grid">
@@ -1149,6 +1156,9 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
             <div class="diff-modal-body" id="diff-modal-body"></div>
         </div>
     </div>
+    {evidence_modal}
+    {evidence_templates}
+    {source_templates}
     {report_script}
     <script>{js}</script>
 </body>
@@ -1184,5 +1194,9 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
         regression_details = regression_details_html,
         artifacts = artifacts_html,
         report_script = report_script,
+        reading_path = evidence::reading_path(&evidence_files),
+        evidence_modal = evidence::modal(),
+        evidence_templates = evidence_templates,
+        source_templates = source_templates,
     )
 }

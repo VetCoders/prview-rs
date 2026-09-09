@@ -707,11 +707,21 @@ fn health_without_repo_has_null_deps_repo() {
 
 #[test]
 fn health_with_repo_reports_profile() {
+    let fixture = fixture_repo();
+    std::fs::write(
+        fixture.path().join("Cargo.toml"),
+        "[package]\nname = \"health-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(fixture.path().join("src")).unwrap();
+    std::fs::write(fixture.path().join("src/lib.rs"), "pub fn example() {}\n").unwrap();
+    run_git(fixture.path(), &["add", "Cargo.toml", "src/lib.rs"]);
+    run_git(fixture.path(), &["commit", "-m", "add Rust fixture"]);
     let mut s = McpSession::start(&[]);
-    let result = s.call_tool("health", serde_json::json!({"repo": repo_root()}));
+    let result = s.call_tool("health", serde_json::json!({"repo": fixture.path()}));
     assert!(!is_error(&result));
     let body = tool_body(&result);
-    // prview-rs is a Rust crate → profile Rust, cargo probed.
+    // The fixture is Rust-only, independent of this repository's UI assets.
     assert_eq!(body["deps_repo"]["profile"], "Rust");
     assert!(body["deps_repo"]["tools"]["cargo"].is_boolean());
 }

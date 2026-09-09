@@ -102,7 +102,9 @@ pub(crate) fn extract_root_cause(check: &CheckResult) -> Option<RootCause> {
 
     // Vitest / tests (JS)
     if name_lower.contains("vitest")
-        || (name_lower.contains("test") && !name_lower.contains("cargo"))
+        || (name_lower.contains("test")
+            && !name_lower.contains("cargo")
+            && !name_lower.contains("pytest"))
     {
         return extract_vitest_root_cause(output);
     }
@@ -362,18 +364,60 @@ pub(crate) fn extract_vitest_root_cause(output: &str) -> Option<RootCause> {
 }
 
 pub(crate) fn extract_pytest_root_cause(output: &str) -> Option<RootCause> {
-    let summary = output.lines().find(|l| {
-        l.contains("failed") && l.contains("passed")
-            || l.starts_with("FAILED")
-            || l.contains("error")
-    });
-    let first_failure = output
+    let summary = output
         .lines()
-        .find(|l| l.starts_with("FAILED") || l.contains("ERRORS"));
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            line.starts_with('=')
+                && (line.contains(" failed") || line.contains(" error"))
+                && line.contains(" in ")
+        })
+        .map(|line| line.trim_matches('=').trim());
 
     Some(RootCause {
-        cause: summary.unwrap_or("Pytest failures").to_string(),
-        evidence: first_failure.unwrap_or("").to_string(),
-        hint: "Run pytest -x to reproduce first failure".into(),
+        cause: summary
+            .unwrap_or("Pytest did not complete successfully")
+            .to_string(),
+        evidence: findings::pytest_failure_excerpt(output).unwrap_or_default(),
+        hint: "Inspect the reported test failure and its inputs in the full Pytest log before choosing a fix."
+            .into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pytest_dispatch_reports_python_evidence_and_final_summary() {
+        let check = CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "===== test session starts =====\n\
+                tests/test_parser.py::test_roundtrip FAILED\n\
+                ===== FAILURES =====\n\
+                _____ test_roundtrip _____\n\
+                E   AssertionError: unexpected message\n\
+                tests/test_parser.py:42: AssertionError\n\
+                ===== short test summary info =====\n\
+                FAILED tests/test_parser.py::test_roundtrip\n\
+                ===== 1 failed, 12 passed in 0.10s ====="
+                .to_string(),
+            cached: false,
+            provenance: None,
+        };
+        let diagnostic = extract_root_cause(&check).expect("diagnostic");
+        assert_eq!(diagnostic.cause, "1 failed, 12 passed in 0.10s");
+        assert!(
+            diagnostic
+                .evidence
+                .contains("AssertionError: unexpected message")
+        );
+        assert!(diagnostic.evidence.contains("tests/test_parser.py:42"));
+        assert!(!diagnostic.evidence.contains("test session starts"));
+        assert!(!diagnostic.hint.contains("cargo"));
+        assert!(!diagnostic.hint.contains("Run test suite"));
+    }
 }

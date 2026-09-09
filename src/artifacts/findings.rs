@@ -398,6 +398,8 @@ pub(super) fn generate_inline_findings(
             );
 
             dashboard_findings.push(DashboardFinding {
+                file: None,
+                line: None,
                 level: "note",
                 check_name: "Cargo audit baseline".to_string(),
                 check_id: "cargo_audit_baseline".to_string(),
@@ -445,6 +447,8 @@ pub(super) fn generate_inline_findings(
                 );
 
                 dashboard_findings.push(DashboardFinding {
+                    file: None,
+                    line: None,
                     level: finding.sarif_level,
                     check_name: check.name.clone(),
                     check_id: check_id.clone(),
@@ -487,6 +491,47 @@ pub(super) fn generate_inline_findings(
 
         // Dispatch to structured parsers first.
         match check_id.as_str() {
+            "heuristics_loctree" => {
+                // A repository-wide summary is not a diagnostic at a source line.
+                // Preserve it as context without inventing an inline location.
+                dashboard_findings.push(DashboardFinding {
+                    file: None,
+                    line: None,
+                    level: "note",
+                    check_name: check.name.clone(),
+                    check_id: check_id.clone(),
+                    message: check.output.trim().to_string(),
+                    in_diff: None,
+                });
+                continue;
+            }
+            "pytest" => {
+                let parsed = parse_pytest_failures(&check.output);
+                if parsed.is_empty() {
+                    dashboard_findings.push(DashboardFinding {
+                        file: None,
+                        line: None,
+                        level: "note",
+                        check_name: check.name.clone(),
+                        check_id: check_id.clone(),
+                        message: pytest_failure_excerpt(&check.output).unwrap_or_else(|| {
+                            "Pytest did not complete successfully. See the full check log for details."
+                                .to_string()
+                        }),
+                        in_diff: None,
+                    });
+                } else {
+                    tool_findings_sets.push(ToolFindings {
+                        source: "pytest",
+                        tool_name: "Pytest",
+                        check_id: check_id.clone(),
+                        findings: parsed,
+                    });
+                }
+                // Never attach an arbitrary path found in startup output to a
+                // test failure whose traceback did not provide a location.
+                continue;
+            }
             "eslint" => {
                 let parsed = parsers::eslint::parse_eslint_output(&check.output);
                 if !parsed.is_empty() {
@@ -579,6 +624,8 @@ pub(super) fn generate_inline_findings(
         let sarif_location = if let Some((ref file, line_num)) = extracted {
             let in_diff_val = is_in_diff(file);
             dashboard_findings.push(DashboardFinding {
+                file: Some(file.clone()),
+                line: Some(line_num),
                 level,
                 check_name: check.name.clone(),
                 check_id: check_id.clone(),
@@ -593,6 +640,8 @@ pub(super) fn generate_inline_findings(
             })
         } else {
             dashboard_findings.push(DashboardFinding {
+                file: None,
+                line: None,
                 level,
                 check_name: check.name.clone(),
                 check_id: check_id.clone(),
@@ -630,6 +679,7 @@ pub(super) fn generate_inline_findings(
         // TOOLING-08: explicit introduced (touched by this PR) vs preexisting
         // (inherited) split over the *reported* findings.
         let mut preexisting_count = 0usize;
+        let mut unclassified_count = 0usize;
         let mut emitted_count = 0usize;
 
         for finding in &tool_set.findings {
@@ -657,20 +707,32 @@ pub(super) fn generate_inline_findings(
                 }));
             }
 
-            let in_diff = is_in_diff(&finding.file);
-            if in_diff {
-                in_diff_count += 1;
-            } else {
-                preexisting_count += 1;
-            }
-            let classification = if in_diff { "introduced" } else { "preexisting" };
+            // A test can fail because of inputs or its environment. Its
+            // traceback location alone cannot classify the failure's origin.
+            let in_diff = (tool_set.source != "pytest").then(|| is_in_diff(&finding.file));
+            let classification = match in_diff {
+                Some(true) => {
+                    in_diff_count += 1;
+                    "introduced"
+                }
+                Some(false) => {
+                    preexisting_count += 1;
+                    "preexisting"
+                }
+                None => {
+                    unclassified_count += 1;
+                    "unclassified"
+                }
+            };
 
             dashboard_findings.push(DashboardFinding {
+                file: Some(finding.file.clone()),
+                line: Some(finding.line),
                 level: finding.level,
                 check_name: tool_set.tool_name.to_string(),
                 check_id: tool_set.check_id.clone(),
                 message: finding.message.clone(),
-                in_diff: Some(in_diff),
+                in_diff,
             });
 
             let mut location = json!({
@@ -714,6 +776,7 @@ pub(super) fn generate_inline_findings(
                     "in_diff_count": in_diff_count,
                     "introduced_count": in_diff_count,
                     "preexisting_count": preexisting_count,
+                    "unclassified_count": unclassified_count,
                 }
             }));
         }
@@ -787,6 +850,99 @@ pub(super) fn is_pathish_candidate(candidate: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Extract located Pytest diagnostics only from its failure/error sections.
+/// A traceback location says where the failure was reported, not what caused it.
+fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static LOCATION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(\S+\.py):([1-9][0-9]*):\s+(.+)$").expect("pytest location regex")
+    });
+    let mut findings = Vec::new();
+    let mut in_failures = false;
+    let mut test_name = String::new();
+    let mut evidence = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('=') && trimmed.ends_with('=') {
+            let section = trimmed.trim_matches('=').trim();
+            in_failures = matches!(section, "FAILURES" | "ERRORS");
+            evidence.clear();
+            continue;
+        }
+        if !in_failures {
+            continue;
+        }
+        if trimmed.starts_with("___") && trimmed.ends_with("___") {
+            test_name = trimmed.trim_matches('_').trim().to_string();
+            evidence.clear();
+            continue;
+        }
+        if let Some(detail) = trimmed.strip_prefix("E ") {
+            if evidence.len() < 6 && !detail.trim().is_empty() {
+                evidence.push(detail.trim().to_string());
+            }
+            continue;
+        }
+        let Some(caps) = LOCATION.captures(trimmed) else {
+            continue;
+        };
+        if caps[3].starts_with("in ") {
+            // Short tracebacks list frames before the error. Do not present
+            // an intermediate frame as the diagnostic's terminal location.
+            continue;
+        }
+        let Ok(line_number) = caps[2].parse::<u32>() else {
+            continue;
+        };
+        let detail = if evidence.is_empty() {
+            caps[3].to_string()
+        } else {
+            evidence.join("\n")
+        };
+        let context = if test_name.is_empty() {
+            "Pytest reported a failure".to_string()
+        } else {
+            format!("Pytest reported a failure in {test_name}")
+        };
+        findings.push(parsers::LintFinding {
+            file: caps[1].to_string(),
+            line: line_number,
+            column: None,
+            level: "error",
+            message: format!("{context}:\n{detail}"),
+            rule_id: None,
+            source: "pytest",
+        });
+        evidence.clear();
+    }
+    findings
+}
+
+/// A bounded diagnostic excerpt for human-facing test output. Startup and
+/// per-test progress are deliberately excluded; the complete log remains evidence.
+pub(super) fn pytest_failure_excerpt(output: &str) -> Option<String> {
+    let parsed = parse_pytest_failures(output);
+    if !parsed.is_empty() {
+        return Some(
+            parsed
+                .iter()
+                .take(3)
+                .map(|finding| format!("{}\n{}:{}", finding.message, finding.file, finding.line))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+    }
+    let summary: Vec<_> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("FAILED ") || line.starts_with("ERROR "))
+        .take(3)
+        .collect();
+    (!summary.is_empty()).then(|| summary.join("\n"))
 }
 
 /// Extract the first file:line reference from check output.
@@ -903,10 +1059,140 @@ pub(super) fn should_skip_inline_fallback_line(is_geiger: bool, line: &str) -> b
 
 #[cfg(test)]
 mod tests {
+    const PYTEST_FAILURE: &str = "================ test session starts ================\n\
+plugins: unrelated\n\
+tests/test_parser.py::test_roundtrip FAILED [100%]\n\
+================ FAILURES ================\n\
+________________ test_roundtrip ________________\n\
+>       assert refusals == []\n\
+E       AssertionError: unsupported message\n\
+E       assert ['AgentMessage'] == []\n\
+tests/test_parser.py:42: AssertionError\n\
+================ short test summary info ================\n\
+FAILED tests/test_parser.py::test_roundtrip\n\
+================ 1 failed, 12 passed ================\n";
+
+    #[test]
+    fn pytest_failure_uses_diagnostic_and_preserves_location() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::from_secs(1),
+            output: PYTEST_FAILURE.to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        let summary = super::generate_inline_findings(
+            tmp.path(),
+            &checks,
+            &[one_file_diff("tests/test_parser.py")],
+            None,
+            None,
+        )
+        .expect("findings");
+        assert_eq!(summary.findings_count, 1);
+        let finding = &summary.dashboard_findings[0];
+        assert_eq!(finding.file.as_deref(), Some("tests/test_parser.py"));
+        assert_eq!(finding.line, Some(42));
+        assert_eq!(
+            finding.in_diff, None,
+            "a changed test file is not proof of origin"
+        );
+        assert!(
+            finding
+                .message
+                .contains("AssertionError: unsupported message")
+        );
+        assert!(!finding.message.contains("test session starts"));
+        assert!(!finding.message.contains("caused by"));
+        let sarif: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("INLINE_FINDINGS.sarif")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"],
+            42
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["classification"],
+            "unclassified"
+        );
+        let excerpt = super::pytest_failure_excerpt(PYTEST_FAILURE).expect("excerpt");
+        assert!(excerpt.contains("tests/test_parser.py:42"));
+        assert!(!excerpt.contains("plugins:"));
+    }
+
+    #[test]
+    fn pytest_never_borrows_startup_location_for_unlocated_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "plugins/helper.py:19: loaded\nFAILED tests/test_parser.py::test_roundtrip"
+                .to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        let summary = super::generate_inline_findings(tmp.path(), &checks, &[], None, None)
+            .expect("findings");
+        assert_eq!(summary.findings_count, 0);
+        assert_eq!(summary.dashboard_findings[0].file, None);
+        assert_eq!(summary.dashboard_findings[0].line, None);
+        assert!(summary.dashboard_findings[0].message.starts_with("FAILED "));
+        assert!(!tmp.path().join("INLINE_FINDINGS.sarif").exists());
+    }
+
+    #[test]
+    fn pytest_keeps_each_failure_paired_with_its_own_evidence() {
+        let output = "===== FAILURES =====\n\
+            _____ test_one _____\n\
+            E   AssertionError: first failure\n\
+            tests/test_one.py:12: AssertionError\n\
+            _____ test_two _____\n\
+            E   ValueError: second failure\n\
+            tests/test_two.py:34: ValueError\n\
+            ===== short test summary info =====";
+        let findings = super::parse_pytest_failures(output);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].file, "tests/test_one.py");
+        assert_eq!(findings[0].line, 12);
+        assert!(findings[0].message.contains("first failure"));
+        assert!(!findings[0].message.contains("second failure"));
+        assert_eq!(findings[1].file, "tests/test_two.py");
+        assert_eq!(findings[1].line, 34);
+        assert!(findings[1].message.contains("second failure"));
+        assert!(!findings[1].message.contains("first failure"));
+    }
+
+    #[test]
+    fn loctree_summary_is_general_context_not_an_inline_finding() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "heuristics_loctree".to_string(),
+            status: crate::checks::CheckStatus::Warnings,
+            duration: std::time::Duration::ZERO,
+            output: "9 dead exports; 8 unused symbols".to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        let summary = super::generate_inline_findings(tmp.path(), &checks, &[], None, None)
+            .expect("findings");
+        assert_eq!(summary.findings_count, 0);
+        assert_eq!(summary.dashboard_findings.len(), 1);
+        assert_eq!(summary.dashboard_findings[0].level, "note");
+        assert_eq!(summary.dashboard_findings[0].file, None);
+        assert_eq!(summary.dashboard_findings[0].message, checks[0].output);
+        assert!(!tmp.path().join("INLINE_FINDINGS.sarif").exists());
+    }
+
     use super::*;
 
     fn err(in_diff: Option<bool>) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "Semgrep".to_string(),
             check_id: "semgrep_scan".to_string(),
@@ -935,6 +1221,8 @@ mod tests {
         in_diff: Option<bool>,
     ) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level,
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),
@@ -946,6 +1234,8 @@ mod tests {
     #[test]
     fn baseline_metadata_is_not_an_operator_finding() {
         let metadata = DashboardFinding {
+            file: None,
+            line: None,
             level: "note",
             check_name: "Cargo audit baseline".to_string(),
             check_id: "cargo_audit_baseline".to_string(),
@@ -1060,6 +1350,8 @@ mod tests {
         // still gate — unlike a baseline-signal semgrep out-of-diff row, which
         // does not (proven by inline_gate_ignores_preexisting_only_errors).
         let cargo_test_row = DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "Cargo Test".to_string(),
             check_id: "cargo_test".to_string(),
@@ -1333,6 +1625,8 @@ mod tests {
     #[test]
     fn inline_gate_warns_on_new_warnings_only() {
         let warn = DashboardFinding {
+            file: None,
+            line: None,
             level: "warning",
             check_name: "Semgrep".to_string(),
             check_id: "semgrep_scan".to_string(),

@@ -21,6 +21,9 @@ pub(crate) struct DashboardFinding {
     pub check_id: String,
     pub message: String,
     pub in_diff: Option<bool>,
+    /// Source location reported by the tool, never inferred from a log filename.
+    pub file: Option<String>,
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1840,6 +1843,8 @@ mod tests {
 
     fn out_of_diff_finding(check_id: &str) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),
@@ -1850,6 +1855,8 @@ mod tests {
 
     fn in_diff_finding(check_id: &str) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),
@@ -1905,6 +1912,8 @@ mod tests {
 
     fn unlocated_finding(check_id: &str) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),

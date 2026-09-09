@@ -1266,7 +1266,7 @@ code, pre { font-family: var(--mono); }
 }
 .time-budget-row {
     display: grid;
-    grid-template-columns: 180px 1fr 80px;
+    grid-template-columns: minmax(100px, 180px) minmax(60px, 1fr) minmax(110px, auto);
     align-items: center;
     gap: 12px;
     font-size: 13px;
@@ -1287,6 +1287,7 @@ code, pre { font-family: var(--mono); }
     overflow: hidden;
 }
 .time-budget-bar {
+    display: block;
     height: 100%;
     border-radius: 4px;
     transition: width 0.4s ease;
@@ -1976,6 +1977,31 @@ body.author-mode .section-noise  { display: none; }
     margin: 16px 0;
 }
 
+/* Evidence navigation and long diagnostic text stay inside the viewport. */
+.reading-path h2 { font-size: 17px; margin: 0 0 6px; }
+.reading-path p { color: var(--muted); margin: 0 0 12px; }
+.reading-steps, .evidence-shortcuts { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+.reading-path a { color: var(--accent); }
+.evidence-shortcuts { margin-top: 12px; font-size: 12px; }
+.evidence-dialog { width: min(1100px, 94vw); max-height: 90vh; padding: 20px; border: 1px solid var(--line); border-radius: 14px; color: var(--fg); background: var(--surface); }
+.evidence-dialog::backdrop { background: #000a; }
+.evidence-dialog header, .evidence-tools { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.evidence-dialog h2 { font-size: 16px; overflow-wrap: anywhere; }
+.evidence-dialog p { color: var(--muted); overflow-wrap: anywhere; }
+.evidence-tools { justify-content: flex-start; margin-bottom: 14px; }
+.evidence-dialog button, .evidence-tools input { color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.evidence-dialog a { color: var(--accent); }
+#evidence-body { overflow: auto; max-height: 65vh; }
+#evidence-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.evidence-line { display: block; counter-increment: evidence-line; }
+.evidence-line::before { content: attr(data-line); display: inline-block; width: 5ch; margin-right: 12px; color: var(--muted); user-select: none; }
+.evidence-match, .evidence-selected { background: rgba(220,180,50,.2); }
+.card, .section, .main-content, .check-detail { min-width: 0; }
+.card pre, .narrative-rendered pre, .check-output, .check-command, .blocker-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+.narrative-rendered, .checks-table td, .header-stats { overflow-wrap: anywhere; }
+.narrative-rendered table { display: block; max-width: 100%; overflow-x: auto; }
+@media (max-width: 700px) { .time-budget-row { grid-template-columns: minmax(90px, 1fr) minmax(60px, 1fr) minmax(75px, 1fr); } .evidence-dialog { padding: 12px; } }
+
 /* === Dashboard v2: Hero stats row === */
 .header-stats {
     font-size: 13px;
@@ -2005,6 +2031,7 @@ pub(super) fn js() -> &'static str {
                 JS_BETWEEN_LOCALES,
                 pl_json.as_str(),
                 JS_SUFFIX,
+                include_str!("evidence.js"),
             ]
             .concat()
         })
@@ -2052,27 +2079,29 @@ const JS_SUFFIX: &str = r##"
             return match[1] + ' ' + polishPlural(breakingCount, 'zmiana łamiąca', 'zmiany łamiące', 'zmian łamiących');
         }
         match = trimmed.match(/^(\d+)%\s+coverage heuristic$/);
-        if (match) return 'heurystyka pokrycia ' + match[1] + '%';
+        if (match) return match[1] + '% plików z dopasowanymi zmianami w testach';
         match = trimmed.match(/^(\d+)\s+inline finding(?:s)?$/);
         if (match) {
             var inlineCount = Number(match[1]);
-            return match[1] + ' ' + polishPlural(inlineCount, 'znalezisko inline', 'znaleziska inline', 'znalezisk inline');
+            return match[1] + ' ' + polishPlural(inlineCount, 'uwaga do kodu', 'uwagi do kodu', 'uwag do kodu');
         }
         // MERGE_GATE runtime caveats. Tool names (Semgrep, Clippy,
         // heuristics_loctree, ...) stay original; only the formulaic wrapper
         // is localized. Unknown shapes fall through to EN below.
         match = trimmed.match(/^(.+) returned warnings$/);
         if (match) return match[1] + ': ostrzeżenia';
-        match = trimmed.match(/^(.+) skipped: (.+)$/);
+        match = trimmed.match(/^(.+) skipped: ([\s\S]+)$/);
         if (match) {
             var skipReasonMap = {
                 'lint disabled': 'lint wyłączony',
                 'tests disabled': 'testy wyłączone',
-                'security disabled': 'security wyłączone'
+                'security disabled': 'analiza bezpieczeństwa wyłączona'
             };
             var skipReason = skipReasonMap[match[2].trim()] || match[2];
-            return match[1] + ' pominięty: ' + skipReason;
+            return match[1] + ' — pominięto: ' + skipReason;
         }
+        match = trimmed.match(/^(.+) returned failed$/);
+        if (match) return match[1] + ': niepowodzenie';
         match = trimmed.match(/^(.+) needs manual review$/);
         if (match) return match[1] + ' wymaga ręcznego przeglądu';
         return trimmed;
@@ -2090,18 +2119,18 @@ const JS_SUFFIX: &str = r##"
         if (currentLang !== 'pl') return reason;
         var text = (reason || '').trim();
         var match;
-        if (text === 'All quality gates passed') return 'Wszystkie bramki jakości przeszły';
+        if (text === 'All quality gates passed') return 'Wszystkie wymagane kontrole zakończyły się powodzeniem';
         match = text.match(/^Quality gates passed, but (\d+) review signal(?:s)? need attention$/);
         if (match) {
             var reviewCount = Number(match[1]);
-            return 'Bramki jakości przeszły, ale ' + match[1] + ' ' + polishPlural(reviewCount, 'sygnał wymaga uwagi', 'sygnały wymagają uwagi', 'sygnałów wymaga uwagi');
+            return 'Kontrole zakończyły się powodzeniem, ale ' + match[1] + ' ' + polishPlural(reviewCount, 'sygnał wymaga uwagi', 'sygnały wymagają uwagi', 'sygnałów wymaga uwagi');
         }
-        match = text.match(/^(\d+) quality check(?:s)? failed$/);
+        match = text.match(/^(\d+) quality check(?:s)? failed([\s\S]*)$/);
         if (match) {
-            var checkCount = Number(match[1]);
-            return 'Nie przeszły ' + match[1] + ' ' + polishPlural(checkCount, 'check jakości', 'checki jakości', 'checków jakości');
+            var detail = match[2].replace(/pre-existing/g, 'wcześniej istniejących').replace(/introduced/g, 'wprowadzonych').replace(/unclassified/g, 'bez ustalonego pochodzenia').replace(/warning signals?/g, 'sygnałów ostrzegawczych');
+            return 'Niepowodzenie kontroli jakości: ' + match[1] + detail;
         }
-        if (text === 'Merge not recommended') return 'Merge nie jest rekomendowany';
+        if (text === 'Merge not recommended') return 'Scalenie nie jest zalecane';
         match = text.match(/^(\d+) blocking issue(?:s)? found: (.+)$/);
         if (match) {
             var blockDetailCount = Number(match[1]);
@@ -2136,21 +2165,21 @@ const JS_SUFFIX: &str = r##"
         if (match) return 'maks. churn kodu ' + match[1] + ' (+' + match[2] + ')';
         match = text.match(/^(\d+) code churn \(\+(\d+)\)$/);
         if (match) return 'churn kodu: ' + match[1] + ' (+' + match[2] + ')';
-        match = text.match(/^(\d+) untested code files \(\+(\d+)\): (.+)$/);
+        match = text.match(/^(\d+) untested code files \(\+(\d+)\)(?:: (.+))?$/);
         if (match) {
             var untestedCount = Number(match[1]);
-            return match[1] + ' ' + polishPlural(untestedCount, 'plik kodu bez testów', 'pliki kodu bez testów', 'plików kodu bez testów') + ' (+' + match[2] + '): ' + match[3];
+            return match[1] + ' ' + polishPlural(untestedCount, 'plik bez dopasowanych zmian w testach', 'pliki bez dopasowanych zmian w testach', 'plików bez dopasowanych zmian w testach') + ' (+' + match[2] + ')' + (match[3] ? ': ' + match[3] : '');
         }
         match = text.match(/^(\d+) query-in-loop files \(\+(\d+)\): (.+)$/);
         if (match) return match[1] + ' plików z query-in-loop (+' + match[2] + '): ' + match[3];
         match = text.match(/^(\d+) clone\/collect-in-loop files \(\+(\d+)\): (.+)$/);
         if (match) return match[1] + ' plików z clone/collect-in-loop (+' + match[2] + '): ' + match[3];
         match = text.match(/^(\d+) exact twins \(\+(\d+)\): (.+)$/);
-        if (match) return match[1] + ' dokładne duplikaty (+' + match[2] + '): ' + match[3];
-        match = text.match(/^(\d+) dead exports \(\+(\d+)\): (.+)$/);
-        if (match) return match[1] + ' martwe eksporty (+' + match[2] + '): ' + match[3];
-        match = text.match(/^(\d+) cycles \(\+(\d+)\): (.+)$/);
-        if (match) return match[1] + ' cykle (+' + match[2] + '): ' + match[3];
+        if (match) return match[1] + ' par symboli o tej samej nazwie (+' + match[2] + '): ' + match[3];
+        match = text.match(/^(\+?\d+) dead exports \(\+(\d+)\)(?:: (.+))?$/);
+        if (match) return match[1] + ' kandydatów na nieużywane eksporty (+' + match[2] + ')' + (match[3] ? ': ' + match[3] : '');
+        match = text.match(/^(\+?\d+) cycles \(\+(\d+)\)(?:: (.+))?$/);
+        if (match) return match[1] + ' cykli (+' + match[2] + ')' + (match[3] ? ': ' + match[3] : '');
         return text;
     }
 
@@ -2324,8 +2353,8 @@ const JS_SUFFIX: &str = r##"
         });
     });
 
-    // -- Filter chips --
-    document.querySelectorAll('.filter-chip').forEach(function(chip) {
+    // -- File filter chips (artifact filters have their own listener) --
+    document.querySelectorAll('.filter-chip:not(.artifact-kind-chip)').forEach(function(chip) {
         chip.addEventListener('click', function() {
             this.classList.toggle('active');
             applyFileFilters();
@@ -2683,6 +2712,8 @@ const JS_SUFFIX: &str = r##"
         });
     }
 
+    installEvidenceReader(t);
+
     // -- Artifacts Explorer: copy path button --
     document.querySelectorAll('.artifact-copy-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -2765,7 +2796,7 @@ const JS_SUFFIX: &str = r##"
                 var covLabel = (ratio === null || ratio === undefined)
                     ? 'not measured'
                     : Math.round(ratio * 100) + '%';
-                comment += '**Coverage heuristic:** ' + covLabel + ' (' + quality.coverage.matched + '/' + quality.coverage.total + ')\n\n';
+                comment += '**Source/test file matching:** ' + covLabel + ' (' + quality.coverage.matched + '/' + quality.coverage.total + ')\n\n';
             }
 
             var hotspots = (diff.files || [])

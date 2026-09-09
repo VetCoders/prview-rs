@@ -6,6 +6,43 @@ use super::*;
 // Section builders
 // ---------------------------------------------------------------------------
 
+/// Navigate using recorded source locations; the dashboard resolves available evidence.
+fn source_evidence_link(path: &str, line: Option<usize>) -> String {
+    let suffix = line.map(|value| format!(":{value}")).unwrap_or_default();
+    let line_attr = line
+        .map(|value| format!(r#" data-source-line="{value}""#))
+        .unwrap_or_default();
+    format!(
+        r##"<a href="#section-files" data-source-path="{path}"{line_attr}><code>{path}{suffix}</code></a>"##,
+        path = escape_html(path)
+    )
+}
+
+fn structural_scope_note() -> &'static str {
+    r#"<p class="evidence-note" data-i18n="message.structuralRiskScope">Structural change indicators only. This score is not a probability and does not include test results.</p>"#
+}
+
+fn check_output_excerpt(check: &CheckResult) -> String {
+    if check.name.to_ascii_lowercase().contains("pytest")
+        && let Some(excerpt) = super::super::findings::pytest_failure_excerpt(&check.output)
+    {
+        return excerpt;
+    }
+    let lines: Vec<_> = check.output.lines().collect();
+    let failure = lines.iter().position(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("error:") || lower.contains("failed") || lower.contains("caused by:")
+    });
+    let start = failure.unwrap_or_else(|| lines.len().saturating_sub(12));
+    lines
+        .iter()
+        .skip(start)
+        .take(12)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(super) fn build_files_summary_widget(diff: Option<&Diff>) -> String {
     let breakdown = build_file_breakdown(diff);
     if breakdown.total == 0 {
@@ -960,6 +997,17 @@ pub(super) fn build_action_center(
                     &[],
                 ),
             );
+        } else if passed_count < checks.len() {
+            push_chip(
+                &mut chips,
+                "#section-checks",
+                "chip-warning",
+                i18n_template(
+                    "message.checksNotExecuted",
+                    "Some checks were not executed; inspect their status",
+                    &[],
+                ),
+            );
         } else {
             push_chip(
                 &mut chips,
@@ -1041,7 +1089,7 @@ pub(super) fn build_action_center(
                     "alert-warning"
                 },
                 r#"<span data-i18n="section.coverage">Coverage</span>"#.to_string(),
-                escape_html(&format!("{}%", cov_pct)),
+                escape_html(&format!("{}/{}", cov.covered_count, cov.total_source)),
                 i18n_template(
                     "message.changedCodeWithoutMatchingTests",
                     "Changed code without matching tests",
@@ -1057,8 +1105,11 @@ pub(super) fn build_action_center(
                     r#"<span class="chip-ok-check">&#x2713;</span> {}"#,
                     i18n_template(
                         "chip.coverageOk",
-                        "Coverage: {pct}%",
-                        &[("pct", cov_pct.to_string())],
+                        "Test matches: {covered}/{total}",
+                        &[
+                            ("covered", cov.covered_count.to_string()),
+                            ("total", cov.total_source.to_string())
+                        ],
                     )
                 ),
             );
@@ -1086,7 +1137,7 @@ pub(super) fn build_action_center(
                 ),
                 i18n_template(
                     "message.structureChangedNotably",
-                    "Structure changed in notable ways",
+                    "Repository signals to inspect; not necessarily introduced by this PR",
                     &[],
                 ),
             );
@@ -1110,13 +1161,13 @@ pub(super) fn build_action_center(
             "alert-warning",
             r#"<span data-i18n="section.findings">Findings</span>"#.to_string(),
             i18n_template(
-                "count.inline",
-                &format!("{} inline", ctx.findings.len()),
+                "count.findings",
+                &format!("{} findings", ctx.findings.len()),
                 &[("count", ctx.findings.len().to_string())],
             ),
             i18n_template(
                 "message.analysisFlaggedChangedLines",
-                "Lint / analysis flagged changed lines",
+                "Results reported by tools; inspect source and evidence",
                 &[],
             ),
         );
@@ -1211,6 +1262,8 @@ pub(super) fn build_regression_score_widget(
         sev = escape_html(severity_str),
         score = score,
     );
+
+    html.push_str(structural_scope_note());
 
     // Score reasons
     if !reg.score.score_reasons.is_empty() {
@@ -1335,7 +1388,7 @@ pub(super) fn build_checks_section(checks: &[CheckResult], ctx: &DashboardContex
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("reason unavailable");
             format!(
-                r#"<div class="check-meta" style="margin-top:4px;font-size:11px;color:var(--faint)">Not executed by this PrView run. Reason: {}. External CI status not included.</div>"#,
+                r#"<div class="check-meta" style="margin-top:4px;font-size:11px;color:var(--faint)"><span data-i18n="message.notExecutedHere">Not executed by this PrView run. External CI status not included.</span> {}</div>"#,
                 escape_html(reason),
             )
         } else {
@@ -1346,7 +1399,7 @@ pub(super) fn build_checks_section(checks: &[CheckResult], ctx: &DashboardContex
             rows,
             r#"<tr class="check-row{ec}" data-check-id="{idx}" id="check-{anchor}">
     <td><div class="check-name-cell">{arrow}<span class="check-icon {skey}">{icon}</span> {name}{blocking}</div>{prov}{skip_note}</td>
-    <td><span class="badge {bc}">{status}</span></td>
+    <td><span class="badge {bc}" data-i18n="status.{skey}">{status}</span></td>
     <td style="text-align:right; font-family:var(--mono); font-size:12px; color:var(--muted)">{dur}</td>
 </tr>"#,
             ec = expandable_class,
@@ -1361,17 +1414,18 @@ pub(super) fn build_checks_section(checks: &[CheckResult], ctx: &DashboardContex
             skip_note = runtime_skip_html,
             bc = check_badge_class(check.status),
             status = escape_html(status_str),
-            dur = escape_html(&duration),
+            dur = duration,
         );
 
         if has_output {
             let open_class = if is_problem { " open" } else { "" };
             let _ = write!(
                 rows,
-                r#"<tr class="check-output{oc}" id="check-output-{idx}"><td colspan="3"><div class="check-output-inner"><pre>{output}</pre></div></td></tr>"#,
+                r#"<tr class="check-output{oc}" id="check-output-{idx}"><td colspan="3"><div class="check-output-inner"><pre>{output}</pre><details><summary data-i18n="button.fullCheckOutput">Full check output</summary><pre>{full_output}</pre></details></div></td></tr>"#,
                 oc = open_class,
                 idx = idx,
-                output = escape_html(check.output.trim()),
+                output = escape_html(&check_output_excerpt(check)),
+                full_output = escape_html(check.output.trim()),
             );
         }
     }
@@ -1810,10 +1864,12 @@ pub(super) fn build_files_section(diff: Option<&Diff>, ctx: &DashboardContext) -
 
 pub(super) fn build_ownership_section(ctx: &DashboardContext) -> String {
     if ctx.ownership_map.is_empty() {
-        return String::new();
+        return String::from(
+            r#"<div class="section" id="section-ownership"><div class="section-header"><span class="section-title" data-i18n="section.ownership">Code responsibility</span></div><div class="card"><p data-i18n="message.noConfirmedOwners">No responsible people or teams were established from CODEOWNERS for these files.</p></div></div>"#,
+        );
     }
 
-    // Group files by owner
+    // Group files by explicitly declared CODEOWNERS owner
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (path, owner) in &ctx.ownership_map {
         groups.entry(owner.clone()).or_default().push(path.clone());
@@ -1824,7 +1880,7 @@ pub(super) fn build_ownership_section(ctx: &DashboardContext) -> String {
     }
 
     let mut content = String::new();
-    content.push_str(r#"<p style="color:var(--muted);font-size:12px;margin-bottom:12px" data-i18n="message.fileOwnershipHint">File ownership from CODEOWNERS or path-based module detection. Use this to identify who to ping for review.</p>"#);
+    content.push_str(r#"<p style="color:var(--muted);font-size:12px;margin-bottom:12px" data-i18n="message.fileOwnershipHint">People or teams declared by matching CODEOWNERS rules. Directory names are not treated as owners.</p>"#);
 
     for (owner, files) in &groups {
         let file_count = files.len();
@@ -2006,7 +2062,7 @@ pub(super) fn build_coverage_section(ctx: &DashboardContext) -> String {
 
     let mut uncovered_html = String::new();
     if !cov.uncovered.is_empty() {
-        uncovered_html.push_str(r#"<details style="margin-top:12px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">"#);
+        uncovered_html.push_str(r#"<details open style="margin-top:12px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">"#);
         uncovered_html.push_str(&i18n_template(
             "message.filesWithoutTests",
             &format!("Files without test changes ({})", cov.uncovered.len()),
@@ -2019,7 +2075,7 @@ pub(super) fn build_coverage_section(ctx: &DashboardContext) -> String {
                 uncovered_html,
                 r#"<div class="coverage-file"><span style="color:var(--faint)">{}</span> <span>{}</span></div>"#,
                 escape_html(&f.status.to_string()),
-                escape_html(&f.path),
+                source_evidence_link(&f.path, None),
             );
         }
         uncovered_html.push_str("</div></details>");
@@ -2027,7 +2083,7 @@ pub(super) fn build_coverage_section(ctx: &DashboardContext) -> String {
 
     let mut covered_html = String::new();
     if !cov.covered.is_empty() {
-        covered_html.push_str(r#"<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">"#);
+        covered_html.push_str(r#"<details open style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">"#);
         covered_html.push_str(&i18n_template(
             "message.filesWithMatchingTests",
             &format!("Files with matching test changes ({})", cov.covered.len()),
@@ -2040,9 +2096,9 @@ pub(super) fn build_coverage_section(ctx: &DashboardContext) -> String {
                 covered_html,
                 r#"<div class="coverage-file"><span>{} {}</span> <span style="color:var(--faint)">&#x2194;</span> <span>{} {}</span></div>"#,
                 escape_html(&p.src_status.to_string()),
-                escape_html(&p.src_path),
+                source_evidence_link(&p.src_path, None),
                 escape_html(&p.test_status.to_string()),
-                escape_html(&p.test_path),
+                source_evidence_link(&p.test_path, None),
             );
         }
         covered_html.push_str("</div></details>");
@@ -2056,7 +2112,7 @@ pub(super) fn build_coverage_section(ctx: &DashboardContext) -> String {
     </div>
     <div class="card">
         <div class="coverage-summary">
-            <span class="coverage-pct" style="color:{color}">{pct}%</span>
+            <span class="coverage-pct" style="color:{color}">{matched}/{total}</span>
             <div class="coverage-detail">
                 <div>{coverage_detail}</div>
                 <div style="color:var(--faint);font-size:12px">{coverage_note}{non_code_note}</div>
@@ -2067,7 +2123,8 @@ pub(super) fn build_coverage_section(ctx: &DashboardContext) -> String {
     </div>
 </div>"#,
         color = pct_color,
-        pct = cov_pct,
+        matched = cov.covered_count,
+        total = cov.total_source,
         coverage_detail = i18n_template(
             "message.coverageDetail",
             &format!(
@@ -2177,32 +2234,34 @@ pub(super) fn build_sarif_table_section(ctx: &DashboardContext) -> String {
 
     let mut rows = String::new();
     for f in &ctx.findings {
-        let badge_class = if f.level == "error" {
-            "badge-error"
-        } else {
-            "badge-warning"
-        };
-        let severity_text = if f.level == "error" {
-            i18n_template("label.error", "Error", &[])
-        } else {
-            i18n_template("label.warning", "Warning", &[])
+        let (badge_class, severity_text) = match f.level {
+            "error" => ("badge-error", i18n_template("label.error", "Error", &[])),
+            "warning" => (
+                "badge-warning",
+                i18n_template("label.warning", "Warning", &[]),
+            ),
+            _ => (
+                "badge-muted",
+                i18n_template("label.information", "Information", &[]),
+            ),
         };
 
         // Extract rule_id-like info from check_name (e.g. "cargo_clippy" -> "clippy")
-        let rule_id = f.check_name.replace(' ', "_").to_lowercase();
+        let rule_id = &f.check_name;
 
         // Extract file path and line from message if available (pattern: "path:line:")
-        let (file_path, line_num, clean_msg) = extract_finding_location(&f.message);
+        let file_path = f.file.as_deref();
+        let line_num = f.line.map(|line| line as usize);
+        let clean_msg = &f.message;
 
         let file_cell = if let Some(fp) = file_path {
-            let line_suffix = line_num.map(|l| format!(":{}", l)).unwrap_or_default();
-            format!(
-                r#"<span style="font-family:var(--mono);font-size:11px">{}{}</span>"#,
-                escape_html(fp),
-                line_suffix
-            )
+            source_evidence_link(fp, line_num)
         } else {
-            r#"<span style="color:var(--faint)">-</span>"#.to_string()
+            i18n_template(
+                "message.generalSignal",
+                "General signal; no code location",
+                &[],
+            )
         };
 
         let _ = write!(
@@ -2213,11 +2272,11 @@ pub(super) fn build_sarif_table_section(ctx: &DashboardContext) -> String {
     <td>{file}</td>
     <td style="font-size:12px">{msg}</td>
 </tr>"#,
-            rule = escape_html(&rule_id),
+            rule = escape_html(rule_id),
             bc = badge_class,
             sev = severity_text,
             file = file_cell,
-            msg = escape_html(&clean_msg),
+            msg = escape_html(clean_msg),
         );
     }
 
@@ -2229,7 +2288,7 @@ pub(super) fn build_sarif_table_section(ctx: &DashboardContext) -> String {
     </div>
     <div class="card" style="padding:0;overflow:hidden">
         <table class="checks-table">
-            <thead><tr><th data-i18n="label.rule">Rule</th><th data-i18n="label.severity">Severity</th><th data-i18n="label.file">File</th><th data-i18n="label.message">Message</th></tr></thead>
+            <thead><tr><th data-i18n="label.source">Source</th><th data-i18n="label.severity">Severity</th><th data-i18n="label.file">File</th><th data-i18n="label.message">Message</th></tr></thead>
             <tbody>{rows}</tbody>
         </table>
     </div>
@@ -2245,6 +2304,7 @@ pub(super) fn build_sarif_table_section(ctx: &DashboardContext) -> String {
 
 /// Try to extract file path and line number from a finding message.
 /// Common patterns: "src/foo.rs:42: message" or "at src/foo.rs:42"
+#[cfg(test)]
 pub(super) fn extract_finding_location(message: &str) -> (Option<&str>, Option<usize>, String) {
     // Pattern: "path:line: rest" or "path:line:col: rest"
     let trimmed = message.trim();
@@ -2567,52 +2627,108 @@ pub(super) fn build_loctree_section(heuristics: Option<&HeuristicsResult>) -> St
     <span class="lang-count">{files}f / {loc}L</span>
 </div>"#,
             hue = hue,
-            lang = escape_html(lang),
+            lang = if lang.trim().is_empty() {
+                i18n_template("label.unknownLanguage", "Unknown language", &[])
+            } else {
+                escape_html(lang)
+            },
             pct = pct,
             files = format_number(stats.files),
             loc = format_number(stats.loc),
         );
     }
 
-    let mut issues_html = String::new();
-    let issue_items: Vec<(usize, &str, &str)> = vec![
-        (
+    let mut issues_html = String::from(
+        r#"<p data-i18n="message.repositorySignalsScope">Loctree signals for the whole analyzed repository, not only this PR. Candidates require verification.</p>"#,
+    );
+    let baseline = h.regression.as_ref();
+    let delta_note = |delta: Option<i64>| -> String {
+        delta.map(|value| format!(r#"<span class="badge badge-muted"><span data-i18n="label.baselineCountDelta">Count change vs base</span>: {value:+}</span>"#))
+            .unwrap_or_default()
+    };
+    if !loctree.dead_exports.is_empty() {
+        let _ = write!(
+            issues_html,
+            r#"<details class="issue-card"><summary><strong>{}</strong> <span data-i18n="label.deadExports">Potentially unused exports</span> {}</summary><ul>"#,
             loctree.dead_exports.len(),
-            "label.deadExports",
-            "Dead exports",
-        ),
-        (
-            loctree.cycles.len(),
-            "message.cyclesLabel",
-            "Circular imports",
-        ),
-        (
-            loctree.twins.dead_parrots.len(),
-            "message.unusedSymbolsLabel",
-            "Unused symbols",
-        ),
-        (
-            loctree.twins.exact_twins.len(),
-            "message.exactTwinsLabel",
-            "Exact twins",
-        ),
-    ];
-
-    let any_issues = issue_items.iter().any(|(c, _, _)| *c > 0);
-    if any_issues {
-        for (count, key, label) in &issue_items {
-            if *count > 0 {
-                let _ = write!(
-                    issues_html,
-                    r#"<div class="issue-card"><span class="issue-count warn">{count}</span><span data-i18n="{key}">{label}</span></div>"#,
-                    count = count,
-                    key = key,
-                    label = label,
-                );
-            }
+            delta_note(baseline.map(|reg| reg.dead_exports_delta))
+        );
+        for item in &loctree.dead_exports {
+            let confidence = match item.confidence.as_str() {
+                "high" => i18n_template("label.high", "high", &[]),
+                "medium" => i18n_template("label.medium", "medium", &[]),
+                "low" => i18n_template("label.low", "low", &[]),
+                other => escape_html(other),
+            };
+            let _ = write!(
+                issues_html,
+                r#"<li>{} — <code>{}</code> <span class="badge badge-muted"><span data-i18n="label.confidence">Confidence</span>: {}</span></li>"#,
+                source_evidence_link(&item.file, item.line),
+                escape_html(&item.symbol),
+                confidence
+            );
         }
-    } else {
-        issues_html.push_str(r#"<div class="issue-card clean"><span class="issue-count ok">0</span><span data-i18n="label.noIssuesDetected">No issues detected</span></div>"#);
+        issues_html.push_str("</ul></details>");
+    }
+    if !loctree.cycles.is_empty() {
+        let _ = write!(
+            issues_html,
+            r#"<details class="issue-card"><summary><strong>{}</strong> <span data-i18n="message.cyclesLabel">Circular imports</span> {}</summary><ol>"#,
+            loctree.cycles.len(),
+            delta_note(baseline.map(|reg| reg.cycles_delta))
+        );
+        for cycle in &loctree.cycles {
+            let chain = cycle
+                .files
+                .iter()
+                .map(|path| source_evidence_link(path, None))
+                .collect::<Vec<_>>()
+                .join(" &rarr; ");
+            let _ = write!(issues_html, "<li>{chain}</li>");
+        }
+        issues_html.push_str("</ol></details>");
+    }
+    if !loctree.twins.dead_parrots.is_empty() {
+        let _ = write!(
+            issues_html,
+            r#"<details class="issue-card"><summary><strong>{}</strong> <span data-i18n="message.unusedSymbolsLabel">Potentially unused symbols</span> {}</summary><p data-i18n="message.unusedCandidateHint">No imports were detected; runtime use may exist.</p><ul>"#,
+            loctree.twins.dead_parrots.len(),
+            delta_note(baseline.map(|reg| reg.unused_symbols_delta()))
+        );
+        for item in &loctree.twins.dead_parrots {
+            let _ = write!(
+                issues_html,
+                "<li>{} — <code>{}</code> ({})</li>",
+                source_evidence_link(&item.file, (item.line > 0).then_some(item.line)),
+                escape_html(&item.symbol),
+                escape_html(&item.kind)
+            );
+        }
+        issues_html.push_str("</ul></details>");
+    }
+    if !loctree.twins.exact_twins.is_empty() {
+        let _ = write!(
+            issues_html,
+            r#"<details class="issue-card"><summary><strong>{}</strong> <span data-i18n="label.sameExportName">Repeated export name</span></summary><p data-i18n="message.sameExportNameHint">Matching exported names do not establish duplicate implementations.</p><ul>"#,
+            loctree.twins.exact_twins.len()
+        );
+        for pair in &loctree.twins.exact_twins {
+            let _ = write!(
+                issues_html,
+                "<li><code>{}</code>: {} &harr; {}</li>",
+                escape_html(&pair.symbol),
+                source_evidence_link(&pair.file_a, None),
+                source_evidence_link(&pair.file_b, None)
+            );
+        }
+        issues_html.push_str("</ul></details>");
+    }
+    if loctree.dead_exports.is_empty()
+        && loctree.cycles.is_empty()
+        && loctree.twins.dead_parrots.is_empty()
+        && loctree.twins.exact_twins.is_empty()
+    {
+        issues_html.push_str(r#"<p data-i18n="label.noIssuesDetected">No signals detected</p>"#);
     }
 
     format!(
@@ -2741,6 +2857,7 @@ pub(super) fn build_regression_details_section(
     }
 
     html.push_str("</div>"); // close tab-buttons
+    html.push_str(structural_scope_note());
 
     // --- Tab 1: Score ---
     if has_score {
@@ -2760,7 +2877,8 @@ pub(super) fn build_regression_details_section(
         for reason in reg.score.score_reasons.iter().take(5) {
             let _ = write!(
                 reasons_html,
-                r#"<div style="padding:3px 0;font-size:13px;color:var(--muted);font-family:var(--mono)">{}</div>"#,
+                r#"<div data-regression-reason="{}" style="padding:3px 0;font-size:13px;color:var(--muted);font-family:var(--mono)">{}</div>"#,
+                escape_html(reason),
                 escape_html(reason),
             );
         }
@@ -2818,12 +2936,12 @@ pub(super) fn build_regression_details_section(
                 let untested = if reg.tests.untested_critical_files.contains(&hs.file) {
                     i18n_template("label.yes", "YES", &[])
                 } else {
-                    "-".to_string()
+                    i18n_template("label.notFlagged", "Not flagged", &[])
                 };
                 let in_cycle = if reg.deps.top_cycles.iter().any(|c| c.contains(&hs.file)) {
                     i18n_template("label.yes", "YES", &[])
                 } else {
-                    "-".to_string()
+                    i18n_template("label.notFlagged", "Not flagged", &[])
                 };
                 let mut flags = Vec::new();
                 if reg.perf.suspected_files.iter().any(|s| s.file == hs.file) {
@@ -2833,7 +2951,7 @@ pub(super) fn build_regression_details_section(
                     flags.push("high-churn");
                 }
                 let flags_str = if flags.is_empty() {
-                    "-".to_string()
+                    i18n_template("label.notFlagged", "Not flagged", &[])
                 } else {
                     flags.join(", ")
                 };
@@ -2859,7 +2977,7 @@ pub(super) fn build_regression_details_section(
         let mut risk_rows = String::new();
         for rs in ctx.risk_scores.iter().take(8) {
             let factors = if rs.factors.is_empty() {
-                "-".to_string()
+                i18n_template("label.notFlagged", "Not flagged", &[])
             } else {
                 rs.factors.join(", ")
             };
@@ -3042,7 +3160,7 @@ pub(super) fn build_narrative_section(pr_review_content: &str) -> String {
         return String::new();
     }
 
-    let rendered = crate::mdrender::render(pr_review_content.trim(), &narrative_theme());
+    let rendered = super::evidence::offline_markdown(pr_review_content.trim());
 
     format!(
         r#"<div class="section" id="section-narrative">
@@ -3078,47 +3196,24 @@ pub(super) fn artifact_kind(path: &str) -> &'static str {
     }
 }
 
-pub(super) fn build_artifacts_section(ctx: &DashboardContext) -> String {
-    // Core artifacts (always present in the pack)
-    let core: Vec<(&str, &str)> = vec![
-        ("10_diff/full.patch", "Full Patch"),
-        ("20_quality/full-checks.log", "Full Checks Log"),
-        ("20_quality/checks-errors.log", "Checks Errors"),
-        ("20_quality/BREAKING_CHANGES.md", "Breaking Changes"),
-        ("20_quality/coverage-delta.txt", "Coverage Delta"),
-        ("30_context/INLINE_FINDINGS.sarif", "Inline Findings"),
-        ("30_context/changed-tests.txt", "Changed Tests"),
-        ("00_summary/MERGE_GATE.json", "Merge Gate (JSON)"),
-        ("00_summary/MERGE_GATE.md", "Merge Gate (MD)"),
-        ("00_summary/RUN.json", "Run Metadata"),
-        ("00_summary/MANIFEST.json", "Manifest"),
-        ("00_summary/SANITY.json", "Sanity Report"),
-        (
-            "20_quality/heuristics_loctree.log",
-            "Loctree Heuristics Log",
-        ),
-        (
-            "20_quality/heuristics_loctree.result.json",
-            "Loctree Heuristics Result",
-        ),
-        ("report.json", "Report Data"),
-        ("dashboard.html", "Dashboard"),
-        ("PR_REVIEW.md", "PR Review"),
-        ("AI_INDEX.md", "AI Review Index"),
-        ("artifacts.zip", "Download ZIP"),
-    ];
-
-    // Per-file diff patches from DashboardContext
-    let mut all_items: Vec<(String, String, &str)> = Vec::new(); // (path, label, kind)
-    for (path, label) in &core {
-        let kind = artifact_kind(path);
-        all_items.push((path.to_string(), label.to_string(), kind));
-    }
-    for patch in &ctx.per_file_diff_files {
-        let path = format!("10_diff/per-file-diffs/{}", patch);
-        let label = decode_patch_label(patch);
-        all_items.push((path, label, "PATCH"));
-    }
+pub(super) fn build_artifacts_section(
+    _ctx: &DashboardContext,
+    files: &[super::evidence::EvidenceFile],
+) -> String {
+    // Only advertise files present in this pack. Every text artifact opens in
+    // the offline reader, including per-file/per-commit patches and check logs.
+    let all_items: Vec<(String, String, &str)> = files
+        .iter()
+        .map(|file| {
+            let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
+            let label = if file.path.starts_with("10_diff/per-file-diffs/") {
+                decode_patch_label(filename)
+            } else {
+                filename.to_string()
+            };
+            (file.path.clone(), label, artifact_kind(&file.path))
+        })
+        .collect();
 
     let total = all_items.len();
 
@@ -3141,13 +3236,14 @@ pub(super) fn build_artifacts_section(ctx: &DashboardContext) -> String {
         let _ = write!(
             rows,
             r#"<tr class="artifact-row" data-kind="{kind}" data-path="{path}">
-    <td><a href="{path}" style="color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:12px" target="_blank">{label}</a></td>
+    <td><a href="{href}" style="color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:12px" data-evidence-path="{path}">{label}</a></td>
     <td><span class="badge badge-muted" style="font-size:10px">{kind}</span></td>
     <td style="font-family:var(--mono);font-size:11px;color:var(--faint)">{path}</td>
     <td><button class="btn-ghost artifact-copy-btn" data-i18n="button.copyShort" style="font-size:10px;padding:2px 6px">Copy</button></td>
 </tr>"#,
             kind = kind,
             path = escape_html(path),
+            href = super::evidence::relative_href(path),
             label = escape_html(label),
         );
     }
@@ -3158,6 +3254,8 @@ pub(super) fn build_artifacts_section(ctx: &DashboardContext) -> String {
         <span class="section-title" data-i18n="section.artifactsExplorer">Artifacts Explorer</span>
         <span class="section-count">{files_count}</span>
     </div>
+    <p data-i18n="evidence.lateFiles">Integrity records are finalized after this report. Open their original files.</p>
+    <p><a href="00_summary/MANIFEST.json" download>MANIFEST.json</a> · <a href="00_summary/SANITY.json" download>SANITY.json</a></p>
     <div class="card" style="padding:0;overflow:hidden">
         <div style="padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <input type="text" id="artifact-search" class="file-search" placeholder="Search artifacts..." data-i18n-placeholder="placeholder.searchArtifacts" style="max-width:260px" />
@@ -3274,34 +3372,9 @@ pub(super) fn build_merge_decision_card(ctx: &DashboardContext) -> String {
 // PRV-102: Top 3 Blockers
 // ---------------------------------------------------------------------------
 
-/// Suggest a debug command based on check name.
-pub(super) fn debug_hint_for_check(name: &str) -> &'static str {
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("clippy") {
-        "cargo clippy --fix"
-    } else if lower.contains("test") {
-        "cargo test -- --nocapture"
-    } else if lower.contains("check") && lower.contains("cargo") {
-        "cargo check 2>&1 | head -50"
-    } else if lower.contains("build") || lower.contains("compile") {
-        "cargo build 2>&1 | head -50"
-    } else if lower.contains("fmt") || lower.contains("format") {
-        "cargo fmt"
-    } else if lower.contains("eslint") || lower.contains("lint") {
-        "npx eslint --fix ."
-    } else if lower.contains("tsc") || lower.contains("typescript") {
-        "npx tsc --noEmit"
-    } else if lower.contains("ruff") {
-        "ruff check --fix ."
-    } else if lower.contains("mypy") {
-        "mypy --show-error-codes ."
-    } else if lower.contains("pytest") {
-        "pytest -x --tb=short"
-    } else if lower.contains("geiger") {
-        "cargo geiger --all-features"
-    } else {
-        "Re-run locally with verbose output"
-    }
+/// A failure is evidence to inspect, not an instruction to modify code or rerun a test.
+pub(super) fn debug_hint_for_check(_name: &str) -> &'static str {
+    "Inspect the failure evidence and its execution context before changing code."
 }
 
 pub(super) fn build_blockers_section(ctx: &DashboardContext, checks: &[CheckResult]) -> String {
@@ -3337,41 +3410,20 @@ pub(super) fn build_blockers_section(ctx: &DashboardContext, checks: &[CheckResu
         let status_badge_class = check_badge_class(check.status);
         let status_str = check.status.as_str();
 
-        // Extract first 2 non-empty lines from output as cause summary
-        let cause_lines: Vec<&str> = check
-            .output
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(2)
-            .collect();
-        let cause_html: String = cause_lines
-            .iter()
-            .map(|l| {
-                let end = l.floor_char_boundary(120);
-                escape_html(&l[..end])
-            })
-            .collect::<Vec<_>>()
-            .join("<br>");
-
+        let cause_html = escape_html(&check_output_excerpt(check));
         let log_link = if !gate_id.is_empty() {
             format!(
-                r#"<a href="20_quality/{}.log" data-i18n="message.viewFullLog">View full log</a>"#,
-                escape_html(gate_id)
+                r#"<a href="20_quality/{id}.log" data-evidence-path="20_quality/{id}.log" data-i18n="message.viewFullLog">View full log</a>"#,
+                id = escape_html(gate_id)
             )
         } else {
             String::new()
         };
-
-        let hint = debug_hint_for_check(&check.name);
-        let hint_html = if hint == "Re-run locally with verbose output" {
-            i18n_template(
-                "message.rerunLocallyVerbose",
-                "Re-run locally with verbose output",
-                &[],
-            )
-        } else {
-            escape_html(hint)
-        };
+        let hint_html = i18n_template(
+            "message.checkFailureEvidence",
+            debug_hint_for_check(&check.name),
+            &[],
+        );
 
         let _ = write!(
             cards,
@@ -3379,9 +3431,9 @@ pub(super) fn build_blockers_section(ctx: &DashboardContext, checks: &[CheckResu
     <div class="blocker-card-header">
         <span class="check-icon {skey}">{icon}</span>
         {name}
-        <span class="badge {bc}">{status}</span>
+        <span class="badge {bc}" data-i18n="status.{skey}">{status}</span>
     </div>
-    <div class="blocker-card-body">{cause}</div>
+    <pre class="blocker-card-body">{cause}</pre>
     <div class="blocker-card-footer">
         {log_link}
         <span class="blocker-debug-hint">{hint}</span>
@@ -3604,7 +3656,7 @@ pub(super) fn build_security_section(checks: &[CheckResult], ctx: &DashboardCont
         let _ = write!(
             cards_html,
             r#"<div class="security-card {card_class}">
-    <div class="security-card-header">{icon} {name} <span class="badge {bc}">{status}</span></div>
+    <div class="security-card-header">{icon} {name} <span class="badge {bc}" data-i18n="status.{skey}">{status}</span></div>
     <div class="security-card-metric">{metric}</div>
     {log_link}
 </div>"#,
@@ -3613,6 +3665,7 @@ pub(super) fn build_security_section(checks: &[CheckResult], ctx: &DashboardCont
             name = escape_html(&check.name),
             bc = check_badge_class(check.status),
             status = check.status.as_str(),
+            skey = check.status.as_str(),
             metric = metric_html,
             log_link = log_link,
         );
@@ -3835,8 +3888,14 @@ pub(super) fn build_time_budget(checks: &[CheckResult]) -> String {
     let mut rows = String::new();
     for (idx, check) in checks.iter().enumerate() {
         let pct = (check.duration.as_millis() as f64 / max_ms) * 100.0;
-        let dur_secs = check.duration.as_secs_f32();
-        let is_slowest = idx == slowest_idx && checks.len() > 1;
+        let duration_label = if check.status == CheckStatus::Skipped {
+            i18n_template("status.skipped", "Skipped", &[])
+        } else if check.duration.is_zero() {
+            i18n_template("label.notMeasured", "Not measured", &[])
+        } else {
+            format!("{:.1}s", check.duration.as_secs_f32())
+        };
+        let is_slowest = idx == slowest_idx && checks.len() > 1 && !check.duration.is_zero();
 
         let bar_class = if check.cached {
             "time-budget-bar tb-cached"
@@ -3861,14 +3920,17 @@ pub(super) fn build_time_budget(checks: &[CheckResult]) -> String {
         let _ = write!(
             rows,
             r#"<div class="time-budget-row">
-    <span class="time-budget-name" title="{name}">{name}</span>
+    <span class="time-budget-name" title="{name}">{name} <span class="badge {badge_class}" data-i18n="status.{status_key}">{status}</span></span>
     <span class="time-budget-bar-wrap"><span class="{bar_class}" style="width:{pct:.1}%"></span></span>
-    <span class="time-budget-duration">{dur:.1}s{cached}{slowest}</span>
+    <span class="time-budget-duration">{dur}{cached}{slowest}</span>
 </div>"#,
             name = escape_html(&check.name),
             bar_class = bar_class,
             pct = pct,
-            dur = dur_secs,
+            dur = duration_label,
+            badge_class = check_badge_class(check.status),
+            status = escape_html(check.status.as_str()),
+            status_key = check.status.as_str().to_ascii_lowercase(),
             cached = cached_label,
             slowest = slowest_label,
         );
@@ -3882,7 +3944,8 @@ pub(super) fn build_time_budget(checks: &[CheckResult]) -> String {
     </div>
     <div class="card">
         <div class="time-budget-chart">{rows}</div>
-        <div class="time-budget-total"><span data-i18n="label.total">Total</span>: {total:.1}s</div>
+        <div class="time-budget-total"><span data-i18n="label.recordedCheckTime">Recorded check time</span>: {total:.1}s</div>
+        <p data-i18n="message.checkTimeScope">Sum of recorded check durations, not total report preparation time. Zero duration does not prove execution.</p>
     </div>
 </div>"#,
         count_label = i18n_template(

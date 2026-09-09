@@ -23,16 +23,17 @@
 No dashboards to babysit. No "powerful insights." Just the things that would block the merge, surfaced early.
 
 ```text
-likely blocker in auth flow · coverage −2.1% · 1 breaking change in public API
+1 failed check · test changes matched for 3/4 source files · 1 public API change
 ```
 
 ## Why prview
 
-- **Signal, not noise** — high-signal review pack: `PR_REVIEW.md`, compact failure summaries, coverage delta, breaking changes.
+- **One human review entry point** — `dashboard.html` guides you through changes, check results, failure evidence and provenance, with an offline reader for the underlying artifacts.
+- **Signal, not noise** — high-signal review pack: `PR_REVIEW.md`, compact failure summaries, source-to-test matching, breaking changes.
 - **Merge decision support** — policy-aware `MERGE_GATE.json/.md` and optional per-finding `INLINE_FINDINGS.sarif`.
 - **Multi-language** — JavaScript/TypeScript, Rust, Python, or mixed repos.
 - **Fast** — native Rust binary, parallel checks, `git2` for git operations.
-- **Structural heuristics** — Loctree (universal: cycles, dead code, twins across Rust/JS/TS/Python).
+- **Structural heuristics** — Loctree candidates with files, symbols and source locations across Rust/JS/TS/Python; inspect the evidence before concluding that code is unused or duplicated.
 - **Made for agents** — a compact `AI_INDEX.md` entry point plus a native MCP server.
 - **Shell completions** — bash, zsh, fish, elvish, powershell.
 
@@ -82,9 +83,15 @@ Every run writes an artifact pack:
 - `AI_INDEX.md` — entry point for humans and agents
 - `PR_REVIEW.md` — the unified review narrative
 - `report.json` — machine-readable output
-- `dashboard.html` — interactive exploration
+- `dashboard.html` — the default human report and offline evidence reader
 - `00_summary/MERGE_GATE.json` — gate automation
 - `00_summary/PROVENANCE.json` — what the pack judged, and which tree each check read
+
+Open `dashboard.html` from the extracted pack to follow the review without
+searching folders for logs or JSON. The reader includes the most useful text
+artifacts; larger or binary files remain available as original downloads.
+`--no-dashboard` generates a simpler `review.html` instead. A run produces one
+of these HTML entry points, and `AI_INDEX.md` points to the selected one.
 
 ## Usage
 
@@ -204,13 +211,14 @@ step.
 | `AI_INDEX.md` | Compact entry point for human/agent review |
 | `PR_REVIEW.md` | Unified review narrative |
 | `report.json` | Machine-readable findings |
-| `dashboard.html` | Visual summary of the analysis |
+| `dashboard.html` | Default human report: guided review and an offline evidence reader |
+| `review.html` | Static review export, generated only with `--no-dashboard` |
 | `00_summary/MERGE_GATE.json` | Pass/fail gate for automation |
 | `00_summary/PROVENANCE.json` | Commits, working-tree state, and the tree each check scanned |
 | `20_quality/PUBLIC_API_DIFF.json` | Additive API contract: compatibility rows plus lossless repo-backed Rust delta |
 | `20_quality/BREAKING_CHANGES.json` | Lossless repo-backed Rust breaking/API delta (optional) |
 | `20_quality/BREAKING_CHANGES.md` | Human Rust API truth plus bounded JS/TS and env signals (optional) |
-| `INLINE_FINDINGS.sarif` | Per-finding annotations (optional) |
+| `30_context/INLINE_FINDINGS.sarif` | Tool observations with supported source locations (optional) |
 
 The merge decision is a single enum — `PASS`, `CONDITIONAL`, or `BLOCK` — so both humans and automation read one truth. See [`docs/contracts/merge_gate.md`](docs/contracts/merge_gate.md).
 

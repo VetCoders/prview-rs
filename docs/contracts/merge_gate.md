@@ -118,6 +118,22 @@ the harmless warnings-only exception.
 | `introduced_count` | integer | Findings this diff introduced (`in_diff == true`) |
 | `preexisting_count` | integer | Pre-existing whole-repo findings (`in_diff == false`) |
 
+Repository-wide Loctree summaries are general context, not source-line findings.
+They remain available with the check results and as dashboard notes, but do not
+create a SARIF result or increase `findings_count`. Likewise, a Pytest failure
+without a parsed traceback location stays a general check signal; PRView does
+not borrow a path from test progress or startup output to manufacture a location.
+These exclusions do not remove the original check's failed/warning status or
+its policy evaluation.
+
+Located Pytest findings preserve the error excerpt and the file and line
+reported by the traceback. This is the location where failure was reported,
+not proof of its cause or that the PR introduced it. Their `in_diff` is `null`
+and their SARIF `properties.classification` is `unclassified`, even when the
+reported test file changed. The complete Pytest log remains the evidence source;
+the dashboard and narrative use a compact diagnostic excerpt instead of test
+startup/progress output.
+
 `introduced_count + preexisting_count` may be less than `findings_count`: the
 split counts only operator findings with a known `in_diff` value, so the
 remainder has no trusted pre-existing proof. Schema 2.3 therefore does not

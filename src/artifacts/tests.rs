@@ -134,7 +134,7 @@ fn cancellation_injection_stops_every_artifact_generation_seam() {
     let publication_home = tempfile::tempdir().expect("publication home");
     let _publication_home =
         crate::config::override_test_prview_home(publication_home.path().to_path_buf());
-    assert_eq!(ArtifactGenerationSeam::ALL.len(), 22);
+    assert_eq!(ArtifactGenerationSeam::ALL.len(), 23);
     let unique_labels: std::collections::HashSet<_> = ArtifactGenerationSeam::ALL
         .iter()
         .map(|seam| seam.label())
@@ -582,19 +582,30 @@ async fn cancellation_during_shared_snapshot_cleanup_never_publishes_the_pack() 
     std::fs::set_permissions(&shim, permissions).unwrap();
 
     let governor = Arc::new(crate::governor::ResourceGovernor::new());
+    let (generation_complete, generation_finished) = std::sync::mpsc::channel();
     let canceller = {
         let governor = Arc::clone(&governor);
         let pids = pids.clone();
         std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // Allow the preceding pack generation to finish, but retain a
+            // finite fixture deadline and cancel owned work if it expires.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while crate::proc::read_published_unix_pids(&pids, 2).is_none() {
+                if std::time::Instant::now() >= deadline {
+                    governor.cancel();
+                    return Err("snapshot cleanup did not start within 30s");
+                }
                 assert!(
-                    std::time::Instant::now() < deadline,
-                    "snapshot cleanup never spawned its governed git child"
+                    matches!(
+                        generation_finished.try_recv(),
+                        Err(std::sync::mpsc::TryRecvError::Empty)
+                    ),
+                    "generation ended before snapshot cleanup published its governed git child"
                 );
                 std::thread::sleep(Duration::from_millis(5));
             }
             governor.cancel();
+            Ok(())
         })
     };
     let _git = crate::git::override_test_git_program(shim);
@@ -612,7 +623,10 @@ async fn cancellation_during_shared_snapshot_cleanup_never_publishes_the_pack() 
         })
     })
     .await;
-    canceller.join().unwrap();
+    // Also wake the observer if generation fails or skips cleanup: absence of
+    // the expected child must fail the test rather than leave the join waiting.
+    let _ = generation_complete.send(());
+    canceller.join().unwrap().expect("bounded cleanup observer");
 
     let error = result.expect_err("cancelled cleanup must abort before publication");
     assert!(crate::governor::is_cancellation(&error), "{error:#}");
@@ -702,6 +716,13 @@ fn artifact_generation_registry_is_exact_and_success_path_reaches_every_seam() {
     );
     assert!(!output_dir.join("00_summary/INCOMPLETE.json").exists());
     for relative in CANCELLED_GENERATION_SUCCESS_SURFACES {
+        if relative == "review.html" {
+            assert!(
+                !output_dir.join(relative).exists(),
+                "dashboard is the only default HTML"
+            );
+            continue;
+        }
         assert!(
             output_dir.join(relative).exists(),
             "positive control did not publish {relative}"
@@ -743,6 +764,13 @@ fn cancellation_after_durable_publication_commit_does_not_relabel_the_run() {
     );
     assert!(!output_dir.join("00_summary/INCOMPLETE.json").exists());
     for relative in CANCELLED_GENERATION_SUCCESS_SURFACES {
+        if relative == "review.html" {
+            assert!(
+                !output_dir.join(relative).exists(),
+                "dashboard is the only default HTML"
+            );
+            continue;
+        }
         assert!(
             output_dir.join(relative).exists(),
             "completed publication lost {relative} after its commit point"
@@ -2723,6 +2751,8 @@ fn merge_gate_surfaces_review_caveats_when_merge_needs_review() {
         status: "warnings".to_string(),
         findings_count: 1,
         dashboard_findings: vec![DashboardFinding {
+            file: None,
+            line: None,
             level: "warning",
             check_name: "heuristics_loctree".to_string(),
             check_id: "heuristics_loctree".to_string(),
@@ -2827,6 +2857,8 @@ fn build_review_caveats_include_orphaned_test_candidates() {
 fn merge_gate_splits_introduced_and_preexisting_inline_findings() {
     let config = create_test_config(PolicyConfig::default());
     let mk = |in_diff: bool| DashboardFinding {
+        file: None,
+        line: None,
         level: "warning",
         check_name: "Semgrep scan".to_string(),
         check_id: "semgrep_scan".to_string(),
@@ -3023,6 +3055,8 @@ fn merge_gate_reason_mentions_preexisting_failures_under_merge_with_review() {
         status: "warnings".to_string(),
         findings_count: 1,
         dashboard_findings: vec![DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "ESLint".to_string(),
             check_id: "eslint".to_string(),
@@ -4575,7 +4609,7 @@ fn generate_ai_index_writes_reading_order_and_verdict() {
     // Lists artifacts that exist.
     assert!(index.contains("00_summary/MERGE_GATE.json"));
     assert!(index.contains("report.json"));
-    assert!(index.contains("review.html"));
+    assert!(!index.contains("review.html"));
     // The HTML dashboard is a key human artifact and is listed when present
     // (PR #10 review by @gemini-code-assist).
     assert!(index.contains("dashboard.html"));
@@ -4672,6 +4706,7 @@ fn pr_review_counts_code_test_and_non_code_separately() {
     use crate::git::{DiffStats, FileChange, FileStatus};
     use crate::heuristics::{DeadParrot, HeuristicsResult, LoctreeAnalysis, TwinsAnalysis};
 
+    let commit_subject = "fix: preserve the complete and unusually long commit subject explaining the parser behavior | including the final words";
     let diffs = vec![Diff {
         base: "main".to_string(),
         target: "feature".to_string(),
@@ -4709,7 +4744,14 @@ fn pr_review_counts_code_test_and_non_code_separately() {
             deletions: 6,
             copied: 0,
         },
-        commits: vec![],
+        commits: vec![crate::git::CommitInfo {
+            id: "abcdef".to_string(),
+            short_id: "abcdef".to_string(),
+            author: "Author".to_string(),
+            email: "author@example.test".to_string(),
+            date: "2026-09-09".to_string(),
+            message: commit_subject.to_string(),
+        }],
     }];
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -4717,6 +4759,12 @@ fn pr_review_counts_code_test_and_non_code_separately() {
     let heuristics = HeuristicsResult {
         loctree: Some(LoctreeAnalysis {
             twins: TwinsAnalysis {
+                exact_twins: serde_json::from_value(serde_json::json!([{
+                    "file_a": "untouched/one.py",
+                    "file_b": "untouched/two.py",
+                    "symbol": "helper"
+                }]))
+                .expect("twin fixture"),
                 dead_parrots: vec![DeadParrot {
                     file: "src/lib.rs".to_string(),
                     symbol: "unused_helper".to_string(),
@@ -4751,7 +4799,11 @@ fn pr_review_counts_code_test_and_non_code_separately() {
     .expect("pr review");
     let content = std::fs::read_to_string(tmp.path().join("PR_REVIEW.md")).expect("read");
 
-    assert!(content.contains("**Code:** 1"));
+    assert!(content.contains(&commit_subject.replace('|', "\\|")));
+    assert!(!content.contains("low-risk"));
+    assert!(!content.contains("dedup wins"));
+    assert!(content.contains("| Code files (excluding tests) | 1 |"));
+    assert!(content.contains("**Code (excluding tests):** 1"));
     assert!(content.contains("**Tests:** 1"));
     assert!(content.contains("**Non-code:** 2"));
     assert!(content.contains("| Non-code files | 2 |"));
@@ -4761,7 +4813,7 @@ fn pr_review_counts_code_test_and_non_code_separately() {
             .contains("Hotspots: 1 file(s) crossed the hotspot threshold (`>=80` changed lines).")
     );
     assert!(content.contains("Top hotspots: `tests/integration.rs` (80)"));
-    assert!(content.contains("Loctree twins: 0 exact twin pair(s) and 1 unused symbol(s)."));
+    assert!(content.contains("Loctree twins: 1 exact twin pair(s) and 1 unused symbol(s)."));
 }
 
 #[test]
@@ -5193,7 +5245,7 @@ fn test_codeowners_pattern_directory_slash() {
 #[test]
 fn test_codeowners_pattern_directory_star() {
     assert!(codeowners_pattern_matches("docs/*", "docs/README.md"));
-    assert!(codeowners_pattern_matches("docs/*", "docs/api/index.html"));
+    assert!(!codeowners_pattern_matches("docs/*", "docs/api/index.html"));
     assert!(!codeowners_pattern_matches(
         "docs/*",
         "documentation/file.md"
@@ -5203,7 +5255,8 @@ fn test_codeowners_pattern_directory_star() {
 #[test]
 fn test_codeowners_pattern_exact_match() {
     assert!(codeowners_pattern_matches("Cargo.toml", "Cargo.toml"));
-    assert!(!codeowners_pattern_matches("Cargo.toml", "src/Cargo.toml"));
+    assert!(codeowners_pattern_matches("Cargo.toml", "src/Cargo.toml"));
+    assert!(!codeowners_pattern_matches("/Cargo.toml", "src/Cargo.toml"));
 }
 
 #[test]
@@ -6018,6 +6071,8 @@ fn preexisting_failures_do_not_block_gate() {
         findings_count: 2,
         dashboard_findings: vec![
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "ESLint".to_string(),
                 check_id: "eslint".to_string(),
@@ -6025,6 +6080,8 @@ fn preexisting_failures_do_not_block_gate() {
                 in_diff: Some(false),
             },
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Prettier".to_string(),
                 check_id: "prettier".to_string(),
@@ -6133,6 +6190,8 @@ fn introduced_failures_still_block_gate() {
         status: "warnings".to_string(),
         findings_count: 1,
         dashboard_findings: vec![DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "ESLint".to_string(),
             check_id: "eslint".to_string(),
@@ -6238,6 +6297,8 @@ fn mixed_failures_include_both_preexisting_and_introduced_in_output() {
         findings_count: 3,
         dashboard_findings: vec![
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "ESLint".to_string(),
                 check_id: "eslint".to_string(),
@@ -6245,6 +6306,8 @@ fn mixed_failures_include_both_preexisting_and_introduced_in_output() {
                 in_diff: Some(true),
             },
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "ESLint".to_string(),
                 check_id: "eslint".to_string(),
@@ -6252,6 +6315,8 @@ fn mixed_failures_include_both_preexisting_and_introduced_in_output() {
                 in_diff: Some(false),
             },
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Prettier".to_string(),
                 check_id: "prettier".to_string(),

@@ -627,6 +627,13 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         ..
     } = input;
 
+    // Dashboard notes retain general check context but are not SARIF results.
+    let sarif_findings_count = ctx
+        .findings
+        .iter()
+        .filter(|finding| super::findings::is_operator_finding(finding))
+        .count();
+
     let diff_merge_base = diffs
         .first()
         .map(|diff| diff.base_commit_id.clone())
@@ -655,7 +662,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
 
     // -- gate --
     let review_caveats = if ctx.review_caveats.is_empty() {
-        let mut generated = build_review_caveats(&ctx.breaking, &ctx.coverage, ctx.findings.len());
+        let mut generated =
+            build_review_caveats(&ctx.breaking, &ctx.coverage, sarif_findings_count);
         generated.extend(cargo_audit_review_caveats(input.checks));
         generated
     } else {
@@ -995,8 +1003,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
             changed_tests_path: "30_context/changed-tests.txt",
         },
         sarif: SarifSection {
-            findings_count: ctx.findings.len(),
-            sarif_path: if ctx.findings.is_empty() {
+            findings_count: sarif_findings_count,
+            sarif_path: if sarif_findings_count == 0 {
                 None
             } else {
                 Some("30_context/INLINE_FINDINGS.sarif")
@@ -1060,7 +1068,7 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                 files_changed_report: None,
                 findings_count_sarif: disk.findings_count_sarif,
                 findings_count_gate: disk.findings_count_gate,
-                findings_count_report: Some(ctx.findings.len()),
+                findings_count_report: Some(sarif_findings_count),
                 breaking_count_signal: None,
                 breaking_count_report: None,
                 skipped_checks_gate: None,
@@ -1980,6 +1988,90 @@ test result: FAILED. 0 passed; 1 failed
             non_code_count: 0,
             ghost_tests: vec![],
         }
+    }
+
+    fn report_with_general_notes(include_located_failure: bool) -> serde_json::Value {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context_dir = tmp.path().join("30_context");
+        let summary_dir = tmp.path().join("00_summary");
+        std::fs::create_dir_all(&context_dir).unwrap();
+        std::fs::create_dir_all(&summary_dir).unwrap();
+        let mut checks = vec![CheckResult {
+            name: "heuristics_loctree".into(),
+            status: CheckStatus::Warnings,
+            duration: std::time::Duration::ZERO,
+            output: "9 dead exports; 8 unused symbols".into(),
+            cached: false,
+            provenance: None,
+        }];
+        if include_located_failure {
+            checks.push(CheckResult {
+                name: "Pytest".into(),
+                status: CheckStatus::Failed,
+                duration: std::time::Duration::ZERO,
+                output: "===== FAILURES =====\n_____ test_parser _____\nE   AssertionError: unexpected input\ntests/test_parser.py:42: AssertionError\n".into(),
+                cached: false,
+                provenance: None,
+            });
+        }
+        let inline = crate::artifacts::findings::generate_inline_findings(
+            &context_dir,
+            &checks,
+            &[],
+            None,
+            None,
+        )
+        .expect("generate findings");
+        std::fs::write(
+            summary_dir.join("MERGE_GATE.json"),
+            serde_json::to_string(&serde_json::json!({
+                "inline_findings": {"findings_count": inline.findings_count}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        ctx.findings = inline.dashboard_findings;
+        let config = crate::config::test_config();
+        let target = ResolvedRef {
+            name: "feature/findings".into(),
+            commit_id: "deadbeef".into(),
+            is_remote: false,
+        };
+        let report = build_report(&ReportInput {
+            dir: tmp.path(),
+            config: &config,
+            diffs: &[],
+            checks: &checks,
+            resolved_target: &target,
+            resolved_bases: &[],
+            ctx: &ctx,
+            run_started_at: "2026-09-09T00:00:00Z",
+            heuristics: None,
+            regression: None,
+        });
+        serde_json::to_value(report).expect("serialize report")
+    }
+
+    #[test]
+    fn report_sarif_note_only_has_no_results_or_missing_artifact_link() {
+        let report = report_with_general_notes(false);
+        assert_eq!(report["quality"]["sarif"]["findings_count"], 0);
+        assert!(report["quality"]["sarif"]["sarif_path"].is_null());
+        assert_eq!(report["quality"]["consistency"]["consistent"], true);
+        let caveats = report["gate"]["review_caveats"].to_string();
+        assert!(!caveats.contains("inline"));
+    }
+
+    #[test]
+    fn report_sarif_mixed_notes_and_failures_count_only_emitted_results() {
+        let report = report_with_general_notes(true);
+        assert_eq!(report["quality"]["sarif"]["findings_count"], 1);
+        assert_eq!(
+            report["quality"]["sarif"]["sarif_path"],
+            "30_context/INLINE_FINDINGS.sarif"
+        );
+        assert_eq!(report["quality"]["consistency"]["consistent"], true);
     }
 
     #[test]

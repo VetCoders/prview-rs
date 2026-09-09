@@ -89,18 +89,18 @@ pub(crate) fn generate_ai_index(
 
     writeln!(md, "## Recommended reading order (human-first)\n")?;
     let mut step = 1;
-    if dir.join("dashboard.html").exists() {
+    if config.create_dashboard {
         writeln!(
             md,
-            "{}. `dashboard.html` — interactive human review dashboard.",
+            "{}. `dashboard.html` — start here: changes, checks and evidence in one offline view.",
             step
         )?;
         step += 1;
     }
-    if dir.join("review.html").exists() {
+    if !config.create_dashboard {
         writeln!(
             md,
-            "{}. `review.html` — standard portable human review export.",
+            "{}. `review.html` — static review export (dashboard disabled).",
             step
         )?;
         step += 1;
@@ -166,10 +166,10 @@ pub(crate) fn generate_ai_index(
     )?;
     writeln!(md, "- `30_context/` — contextual scanners and SARIF.")?;
     writeln!(md, "- `report.json` — machine-readable aggregate report.")?;
-    if dir.join("review.html").exists() {
+    if !config.create_dashboard {
         writeln!(md, "- `review.html` — standard browser review export.")?;
     }
-    if dir.join("dashboard.html").exists() {
+    if config.create_dashboard {
         writeln!(md, "- `dashboard.html` — browser review dashboard.")?;
     }
     writeln!(md)?;

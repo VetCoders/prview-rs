@@ -178,7 +178,7 @@ code, pre {{ font-family:var(--mono); }}
 </header>
 <section class="cards">
 <div class="card"><div class="k">Gate verdict</div><div class="v"><span class="badge {verdict_class}">{verdict}</span></div><div class="muted">{reason}</div></div>
-<div class="card"><div class="k">Primary HTML</div><div class="v">review.html</div><div class="muted">Always generated, even when dashboard is disabled.</div></div>
+<div class="card"><div class="k">Primary HTML</div><div class="v">review.html</div><div class="muted">Static export generated when the interactive dashboard is disabled.</div></div>
 </section>
 <nav>{dashboard_link}<a href="report.json">report.json</a><a href="00_summary/MERGE_GATE.json">MERGE_GATE.json</a>{inline_link}</nav>
 <details open><summary>Review Summary</summary><div class="body">{summary_html}</div></details>

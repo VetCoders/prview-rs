@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The default human handoff is a single `dashboard.html` with an offline reader
+  for Markdown, JSON, logs, patches, and target-commit source. `--no-dashboard`
+  selects the static `review.html` instead. Large text has bounded embedding
+  and paging; the pack retains original downloads.
+- Dashboard labels distinguish file/test matching from execution coverage,
+  structural scores from test outcomes, and repository-wide Loctree candidates
+  from changes introduced by a PR. Commit subjects remain complete, check
+  duration includes execution status, and declared owners come from the
+  target revision's CODEOWNERS. English and Polish descriptions are aligned.
+
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.
 
@@ -29,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with their environment requests and refuse nested launches. A library test
   runner can no longer re-enter the full test suite through `current_exe()`.
   MCP probes also reject test runners rather than treating `mcp` as a test filter.
+
+- Pytest failure excerpts preserve diagnostic locations without treating startup
+  text as an error or a traceback location as proof of causation. General
+  structural notes no longer inflate SARIF, merge-gate, or report counters.
+- CODEOWNERS patterns respect root anchoring and directory depth, and cached
+  check labels render as translated text rather than escaped HTML.
 
 - A signal arriving after durable pack publication no longer relabels the
   completed run as exit 130, while an unchanged `--update` remains

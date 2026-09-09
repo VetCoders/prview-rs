@@ -396,10 +396,11 @@ artifact_generation_seams! {
     ContextTools => "context tools",
     MergeGate => "merge gate",
     PrReview => "PR review",
-    ReportAndDashboard => "report and dashboard",
+    ReportJson => "report.json",
     ReviewHandoffSurfaces => "review handoff surfaces",
     Provenance => "provenance",
     RunJson => "RUN.json",
+    Dashboard => "dashboard",
     ManifestJson => "MANIFEST.json",
     SanityChecks => "SANITY checks",
     SharedSnapshotCleanup => "shared snapshot cleanup",
@@ -934,7 +935,8 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         .iter()
         .flat_map(|d| d.files.iter().map(|f| f.path.clone()))
         .collect();
-    let ownership_map = build_ownership_map(&config.repo_root, &file_paths);
+    let ownership_map =
+        build_ownership_map_at_revision(&repo, &resolved_target.commit_id, &file_paths);
     let dash_ctx = build_dashboard_context(DashboardContextInput {
         config,
         checks: &all_checks,
@@ -968,44 +970,18 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         regression: Some(&regression_report),
     })?;
     generate_consistency_check(&summary_dir, &out_dir, diffs)?;
-    if config.create_dashboard {
-        // Dashboard reads report.json for embedding
-        dashboard::generate(
-            &out_dir,
-            config,
-            diffs,
-            &all_checks,
-            heuristics,
-            &dash_ctx,
-            Some(&regression_report),
-        )?;
-        stage_timings.push(finish_timing(
-            emit_human_stdout,
-            "report.json + dashboard",
-            t,
-        ));
-    } else {
-        stage_timings.push(finish_timing(emit_human_stdout, "report.json", t));
-    }
-    ensure_generation_active(
-        governor,
-        &out_dir,
-        ArtifactGenerationSeam::ReportAndDashboard,
-    )?;
+    stage_timings.push(finish_timing(emit_human_stdout, "report.json", t));
+    ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::ReportJson)?;
 
-    // REVIEW_SUMMARY.md + review.html + AI_INDEX.md — consolidated human
-    // review, the always-present browser handoff, and the reading-order map
-    // (all run after primary artifacts exist so existence checks are accurate).
+    // One browser entry: dashboard by default, static review only when the
+    // dashboard is explicitly disabled. Both consume the same review evidence.
     let t = Instant::now();
     generate_review_summary(&out_dir)?;
-    generate_standard_review_html(&out_dir)?;
     generate_ai_index(&out_dir, config, diffs, &all_checks, &coverage_delta)?;
-    generate_standard_review_html(&out_dir)?;
-    stage_timings.push(finish_timing(
-        emit_human_stdout,
-        "REVIEW_SUMMARY + review.html + AI_INDEX",
-        t,
-    ));
+    if !config.create_dashboard {
+        generate_standard_review_html(&out_dir)?;
+    }
+    stage_timings.push(finish_timing(emit_human_stdout, "review handoff", t));
     ensure_generation_active(
         governor,
         &out_dir,
@@ -1029,7 +1005,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     stage_timings.push(finish_timing(emit_human_stdout, "PROVENANCE.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::Provenance)?;
 
-    // 00_summary/RUN.json — after all generators complete for accurate timing
+    // 00_summary/RUN.json — completed evidence stages; dashboard/publication follow
     let t = Instant::now();
     generate_run_json(RunJsonInput {
         dir: &summary_dir,
@@ -1050,6 +1026,22 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     })?;
     stage_timings.push(finish_timing(emit_human_stdout, "RUN.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::RunJson)?;
+
+    // Render only after the evidence it embeds is finalized, including the
+    // provenance and execution record. Manifest/sanity remain downloadable
+    // originals because embedding their own HTML hash would be self-referential.
+    if config.create_dashboard {
+        dashboard::generate(
+            &out_dir,
+            config,
+            diffs,
+            &all_checks,
+            heuristics,
+            &dash_ctx,
+            Some(&regression_report),
+        )?;
+    }
+    ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::Dashboard)?;
 
     // 00_summary/MANIFEST.json — runs LAST (hashes all files)
     let t = Instant::now();
@@ -2275,7 +2267,7 @@ fn governed_optional_output(command: Command, label: &str) -> Result<Option<std:
     }
 }
 
-fn collect_quick_wins(config: &Config, checks: &[CheckResult], exact_twins: usize) -> Vec<String> {
+fn collect_quick_wins(config: &Config, checks: &[CheckResult]) -> Vec<String> {
     use std::collections::HashSet;
 
     let mut wins = Vec::new();
@@ -2341,13 +2333,6 @@ fn collect_quick_wins(config: &Config, checks: &[CheckResult], exact_twins: usiz
                 break;
             }
         }
-    }
-
-    if exact_twins > 0 {
-        wins.push(format!(
-            "Inspect {} loctree exact twin pair(s) for low-risk extraction or dedup wins.",
-            exact_twins
-        ));
     }
 
     wins

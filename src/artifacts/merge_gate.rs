@@ -648,6 +648,8 @@ mod tests {
 
     fn semgrep_dashboard_finding(path: &str, in_diff: bool) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "Semgrep scan".to_string(),
             check_id: "semgrep_scan".to_string(),
@@ -1009,6 +1011,8 @@ mod tests {
             status: "failed".to_string(),
             findings_count: 1,
             dashboard_findings: vec![DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Cargo Test".to_string(),
                 check_id: "cargo_test".to_string(),
@@ -1110,6 +1114,8 @@ mod tests {
             status: "failed".to_string(),
             findings_count: 1,
             dashboard_findings: vec![DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Semgrep scan".to_string(),
                 check_id: "semgrep_scan".to_string(),
@@ -1535,6 +1541,8 @@ mod tests {
             status: "warnings".to_string(),
             findings_count: 1,
             dashboard_findings: vec![DashboardFinding {
+                file: None,
+                line: None,
                 level: "warning",
                 check_name: "Rustfmt".to_string(),
                 check_id: "rustfmt".to_string(),

@@ -1574,12 +1574,20 @@ remains the direct execution surface there.
 The core artifact generator. Builds the numbered directory layout
 (`00_summary/`, `10_diff/`, `20_quality/`, `30_context/`):
 
-- Root: `PR_REVIEW.md`, `dashboard.html`, `artifacts.zip`
+- Root: `AI_INDEX.md`, `REVIEW_SUMMARY.md`, `PR_REVIEW.md`, `report.json`, `dashboard.html` (or `review.html` with `--no-dashboard`), `artifacts.zip`
 - `00_summary/`: `RUN.json`, `PROVENANCE.json`, `FAILURES_SUMMARY.md`, `MANIFEST.json`, `SANITY.json`, `MERGE_GATE.json/md`, metadata
 - `10_diff/`: `full.patch`, `per-commit-diffs/` (batching + thematic labels), `per-file-diffs/` (hotspots)
 - `20_quality/`: per-check `*.result.json` + `*.log`, `full-checks.log`, `checks-errors.log`, `coverage-delta.txt`, `PUBLIC_API_DIFF.json/md`, `BREAKING_CHANGES.json/md`
 - `30_context/`: optional `INLINE_FINDINGS.sarif`, `changed-tests.txt`, profile-specific (`cargo-tree`, `tsc-trace`, `eslint`, `vitest`)
 - `latest` symlink in the parent dir (completed runs only)
+
+The default run generates one HTML entry point, `dashboard.html`.
+`--no-dashboard` selects the static `review.html` export instead. `AI_INDEX.md`
+points to the selected entry. The interactive report is rendered after its
+source evidence, including `REVIEW_SUMMARY.md`, `PROVENANCE.json` and `RUN.json`,
+has been written. Manifest and sanity generation follow HTML generation; those
+artifacts are available as original files rather than embedded copies of
+records that depend on the HTML itself.
 
 #### Stale-cache caveats (`MERGE_GATE.json.stale_cache_caveats`)
 
@@ -2675,13 +2683,14 @@ left the bracket depth stuck open under the old rule — dominated by
 the next line (`pub static X: [[u16; N];`) must hold its depth open so that `;`
 is not mistaken for the end of the item.
 
-#### signal/coverage.rs — coverage delta computation
+#### signal/coverage.rs — source-to-test matching
 
-Cross-references changed source files with test files to estimate test coverage:
+Cross-references changed source files with test files. This is structural
+matching, not an execution-based line or branch coverage measurement:
 
 - `CoverageSignal` struct — canonical single source of truth for all consumers (`dashboard.html`, `MERGE_GATE.json`, `PR_REVIEW.md`, text artifact)
 - `CoverageDelta` struct — legacy wrapper with `from_signal()` conversion
-- `CoverageFile` struct — a single changed source file with its matched test files and coverage state
+- `CoverageFile` struct — a single changed source file with its matched test files and matching state
 - `CoveragePair` struct — a matched (source file, test file) pair with the match strategy used
 - `compute_coverage_signal(diffs, repo_root, repo)` — the canonical computation function
 - `generate_coverage_delta(dir, signal)` — renders `coverage-delta.txt` from a pre-computed signal
@@ -2690,8 +2699,12 @@ Cross-references changed source files with test files to estimate test coverage:
 **Unmeasured is not 100%.** `coverage_pct` / `CoverageDelta::pct` are
 `Option<u32>` and are `None` whenever no changed source file was evaluated
 (`total_source_files == 0`). Consumers must render that as "not measured" or
-omit the coverage surface entirely — never as a percentage. A real `0/N`
-(N > 0) stays a genuine `0%` measurement. In `report.json`,
+omit the matching surface entirely — never as a percentage. A real `0/N`
+(N > 0) means no matching tests were found among the evaluated source files.
+The dashboard presents the matched/evaluated count under **Tests for changed
+files**. Legacy `coverage` field names and heuristic ratios remain in machine
+artifacts; they do not establish which lines executed, whether behavior is
+tested, or whether tests passed. In `report.json`,
 `quality.coverage.heuristic_ratio` is `null` in the unmeasured case and is
 paired with `measured: false` + `not_measured_reason`. That nullability — with
 the loctree counters becoming omittable for the same reason — is why
@@ -2874,9 +2887,47 @@ the signal modules for data computation.
 
 ### artifacts/dashboard/
 
-Generates `dashboard.html` — a visual summary of the PR with checks, findings, and
-file stats. Split across `mod.rs` (layout/orchestration), `sections.rs` (panel
-rendering), `assets.rs` (embedded CSS/JS (system font stack)), and `tests.rs`/`trends_tests.rs`.
+Generates `dashboard.html`, the default human entry point for a review pack.
+The reading path moves from changed files and check results to failure
+evidence, provenance and the consolidated summary. The same view provides gate
+data, the narrative, full diff, source locations and an artifact explorer.
+
+Responsibilities are split across `mod.rs` (layout and orchestration),
+`sections.rs` (panels), `evidence.rs` (artifact inventory, embedded text, source
+previews and the evidence reader), `assets.rs` (embedded CSS/JS and locale
+loading), and `tests.rs`/`trends_tests.rs`.
+
+`evidence.rs` inventories real pack files without following symlinks, excluding
+HTML and ZIP containers. Markdown, JSON, logs and patches are embedded as
+bounded text and opened in an offline dialog with search and an original-file
+download. Markdown also has a rendered reading view. Text is limited to 2 MiB
+per file and 12 MiB across artifact content. A separate 12 MiB budget applies
+to source previews, also limited to 2 MiB per file. These are input text limits,
+not a maximum HTML size: escaped text and rendered Markdown add markup.
+Oversized, binary and otherwise non-embedded artifacts keep original download
+links. Manifest and sanity results are generated later and are not embedded.
+
+Source previews use blobs from the diff's committed target tree, never the
+ambient checkout. Changed files and Loctree candidate locations share this
+reader. A WIP overlay is visible in the diff and provenance, not substituted
+for committed source. Missing target blobs or files outside preview limits
+produce an explicit unavailable state.
+
+Panel labels preserve the scope of their evidence:
+
+- Source-to-test matches do not claim execution coverage.
+- Structural risk and its baseline comparisons do not measure behavioral
+  regressions or include failed-test results in their score.
+- Loctree details describe the whole analyzed repository. Export names,
+  locations, confidence and baseline count changes are exposed where available;
+  repeated names alone do not justify deduplication.
+- Check timing is the sum of recorded durations with execution statuses, not
+  total wall-clock report time. A skipped check does not become a fast pass.
+- Ownership is computed from CODEOWNERS at the analyzed target revision. Path
+  grouping never invents an owner when no declaration matches.
+- Tool observations retain their originating check and supported file/line
+  locations. A failure site is distinct from a diagnosis; unlocated signals
+  remain general check evidence.
 
 ### heuristics/
 

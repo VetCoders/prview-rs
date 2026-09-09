@@ -102,7 +102,7 @@ fn mock_checks() -> Vec<CheckResult> {
     ]
 }
 
-fn mock_ctx() -> DashboardContext {
+pub(super) fn mock_ctx() -> DashboardContext {
     DashboardContext {
         verdict: "PASS",
         analysis_status: crate::policy::engine::AnalysisStatus::Complete,
@@ -288,7 +288,8 @@ fn runtime_skipped_check_renders_operator_disclaimer() {
     let html = build_checks_section(&checks, &mock_ctx());
 
     assert!(html.contains("Not executed by this PrView run."));
-    assert!(html.contains("Reason: virtual manifest — configure -p demo."));
+    assert!(html.contains("virtual manifest — configure -p demo"));
+    assert!(html.contains("data-i18n=\"message.notExecutedHere\""));
     assert!(html.contains("External CI status not included."));
 }
 
@@ -347,7 +348,11 @@ fn test_file_with_patch_has_data_attr() {
 #[test]
 fn test_artifacts_explorer_has_per_file_patches() {
     let ctx = mock_ctx();
-    let html = build_artifacts_section(&ctx);
+    let files = vec![super::evidence::EvidenceFile {
+        path: "10_diff/per-file-diffs/abc12345__src~2Fmain.rs.patch".into(),
+        text: Some("patch".into()),
+    }];
+    let html = build_artifacts_section(&ctx, &files);
 
     assert!(
         html.contains("Artifacts Explorer"),
@@ -535,6 +540,8 @@ fn test_merge_decision_card_review_caveats() {
         check_name: "heuristics_loctree".into(),
         check_id: "heuristics_loctree".into(),
         message: "review me".into(),
+        file: None,
+        line: None,
         in_diff: Some(true),
     }];
     let html = build_merge_decision_card(&ctx);
@@ -736,18 +743,20 @@ fn test_blockers_section_max_three() {
 
 #[test]
 fn test_blockers_debug_hints() {
-    assert_eq!(debug_hint_for_check("cargo_clippy"), "cargo clippy --fix");
-    assert_eq!(
-        debug_hint_for_check("cargo_test"),
-        "cargo test -- --nocapture"
-    );
-    assert_eq!(debug_hint_for_check("cargo_fmt"), "cargo fmt");
-    assert_eq!(debug_hint_for_check("eslint"), "npx eslint --fix .");
-    assert_eq!(debug_hint_for_check("ruff_check"), "ruff check --fix .");
-    assert_eq!(
-        debug_hint_for_check("unknown_check"),
-        "Re-run locally with verbose output"
-    );
+    for name in [
+        "cargo_clippy",
+        "cargo_test",
+        "pytest",
+        "cargo_fmt",
+        "eslint",
+        "ruff_check",
+        "unknown_check",
+    ] {
+        let hint = debug_hint_for_check(name);
+        assert!(hint.contains("evidence"));
+        assert!(!hint.contains("--fix"));
+        assert!(!hint.contains("Re-run"));
+    }
 }
 
 // ---- PRV-103: Time Budget ----
@@ -768,7 +777,7 @@ fn test_time_budget_basic() {
     assert!(html.contains("cargo check"), "Should show check name");
     assert!(html.contains("cargo clippy"), "Should show check name");
     assert!(
-        html.contains(r#"data-i18n="label.total""#),
+        html.contains(r#"data-i18n="label.recordedCheckTime""#),
         "Should localize total label"
     );
     assert!(html.contains("2 checks"), "Should show count");
@@ -1399,7 +1408,10 @@ fn test_pl_locale_merge_gate_caveat_translations() {
         "returned-warnings PL missing"
     );
     assert!(js.contains("skipped: "), "skipped shape missing");
-    assert!(js.contains("' pominięty: '"), "skipped PL wrapper missing");
+    assert!(
+        js.contains("' — pominięto: '"),
+        "skipped PL wrapper missing"
+    );
     assert!(
         js.contains("'lint disabled': 'lint wyłączony'"),
         "lint reason map missing"
@@ -1409,7 +1421,7 @@ fn test_pl_locale_merge_gate_caveat_translations() {
         "tests reason map missing"
     );
     assert!(
-        js.contains("'security disabled': 'security wyłączone'"),
+        js.contains("'security disabled': 'analiza bezpieczeństwa wyłączona'"),
         "security reason map missing"
     );
     assert!(
