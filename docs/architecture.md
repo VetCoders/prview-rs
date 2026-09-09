@@ -1467,6 +1467,11 @@ immutable manifest or ZIP. If the bounded unwind stalls, the parent terminates
 every still-owned group before killing and reaping the direct review root;
 tracker Drop repeats that cleanup. Confirmed cleanup unlinks the sidecar;
 unconfirmed containment retains it and is surfaced in the MCP error contract.
+When the native identity lookup returns `ESRCH` before the direct child is
+waitable, registration resamples for at most 100 ms. Each retry still requires
+a captured native identity or a positive non-reaping exit observation. Other
+identity errors, wait-status errors (including `ECHILD`), and an unresolved
+deadline abort fail-closed; a missing PID alone never proves safe completion.
 Windows keeps native recursive `taskkill /T` and needs no mirror.
 
 **`--watch` ends on the first interrupt.** One `App`, and therefore one governor,

@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP child registration briefly resamples an `ESRCH` identity lookup when
+  the owned child has not yet become waitable, preserving fail-closed behavior
+  for ambiguous ownership and exposing wait-status errors in diagnostics.
+
 - Private Rust API and Loctree workers require application-only arguments paired
   with their environment requests and refuse nested launches. A library test
   runner can no longer re-enter the full test suite through `current_exe()`.
