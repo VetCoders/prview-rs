@@ -1613,7 +1613,8 @@ Pytest process noncompletion without a parsed diagnostic retains its exit code
 and unknown cause; passed test names and startup banners cannot become failure
 excerpts or located findings. A diagnostic's source location remains an
 observation, not proof of the underlying cause. A recorded runner timeout
-(`exit_code: -1`) remains an explicit timeout for Pytest; timeout-like words in
+(`exit_code: -1`) or an exact runner-generated `pytest`/`uv timed out after Ns`
+error without an exit code remains an explicit timeout for Pytest; timeout-like words in
 passed test names do not establish a timeout. Explicit Pytest usage/configuration
 errors and exit-5 no-tests summaries remain unlocated runner diagnostics rather
 than being replaced by an unknown-cause claim. Short tracebacks pair their last

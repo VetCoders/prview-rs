@@ -373,6 +373,17 @@ pub(crate) fn extract_pytest_root_cause(check: &CheckResult) -> Option<RootCause
         return None;
     }
 
+    static RUNNER_TIMEOUT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:pytest|uv) timed out after [0-9]+s$").expect("pytest runner timeout regex")
+    });
+    if check.status == CheckStatus::Error && RUNNER_TIMEOUT.is_match(check.output.trim()) {
+        return Some(RootCause {
+            cause: "Process timed out".into(),
+            evidence: check.output.trim().to_string(),
+            hint: "Inspect the timeout budget and full Pytest log.".into(),
+        });
+    }
+
     if check.provenance.as_ref().and_then(|p| p.exit_code) == Some(-1) {
         return Some(RootCause {
             cause: "Process timed out".into(),
@@ -480,6 +491,26 @@ mod tests {
                 hard_fail_signatures: vec![],
                 cache_key: None,
             }),
+        }
+    }
+
+    #[test]
+    fn pytest_runner_timeout_without_exit_code_is_explicit() {
+        for launcher in ["pytest", "uv"] {
+            let mut check = interrupted_pytest();
+            check.status = CheckStatus::Error;
+            check.provenance.as_mut().unwrap().exit_code = None;
+            check.output = format!("{launcher} timed out after 600s");
+            assert_eq!(
+                extract_root_cause(&check).unwrap().cause,
+                "Process timed out"
+            );
+            assert_eq!(findings::check_failure_excerpt(&check), check.output);
+            check.output = format!("tests/test_x.py::test_{launcher} timed out after 600s PASSED");
+            assert_ne!(
+                extract_root_cause(&check).unwrap().cause,
+                "Process timed out"
+            );
         }
     }
 
