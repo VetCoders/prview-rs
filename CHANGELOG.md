@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP contract tests bound response waits and pagination, and clean the owned
+  server tree before reaping it on timeout or drop, including detached reviews.
+
 - MCP child registration briefly resamples an `ESRCH` identity lookup when
   the owned child has not yet become waitable, preserving fail-closed behavior
   for ambiguous ownership and exposing wait-status errors in diagnostics.
