@@ -1626,6 +1626,8 @@ errors and exit-5 no-tests summaries remain unlocated runner diagnostics rather
 than being replaced by an unknown-cause claim. Short tracebacks pair their last
 recorded frame with following exception evidence; a later terminal diagnostic
 location takes precedence, and an uncorroborated frame produces no finding.
+Vitest failure excerpts prefer explicit failed-test markers and exclude passing
+verbose rows, including passing names that contain the word `failed`.
 Semgrep JSON excerpts summarize findings and scan warnings/errors, while the
 original log remains available. Incomplete public API analysis states its unknown
 regions and labels change counts as known facts; zero known changes cannot imply

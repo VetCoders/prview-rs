@@ -1028,24 +1028,38 @@ pub(super) fn check_failure_excerpt(check: &CheckResult) -> String {
             })
             .unwrap_or_default()
     } else {
+        let is_vitest = check.name.to_ascii_lowercase().contains("vitest");
         let lines: Vec<_> = check
             .output
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
+                if is_vitest && trimmed.starts_with(['✓', '✔', '√']) {
+                    return false;
+                }
                 !(trimmed.starts_with("test ") && trimmed.ends_with(" ... ok")
                     || trimmed.contains(".py::")
                         && trimmed.split_whitespace().any(|part| part == "PASSED"))
             })
             .collect();
-        let failure = lines.iter().position(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("error:")
-                || lower.contains("error[")
-                || lower.contains("failed")
-                || lower.contains("panicked at")
-                || lower.contains("caused by:")
-        });
+        let failure = is_vitest
+            .then(|| {
+                lines.iter().position(|line| {
+                    let line = line.trim();
+                    line.starts_with("FAIL ") || line.starts_with(['×', '✗'])
+                })
+            })
+            .flatten()
+            .or_else(|| {
+                lines.iter().position(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower.contains("error:")
+                        || lower.contains("error[")
+                        || lower.contains("failed")
+                        || lower.contains("panicked at")
+                        || lower.contains("caused by:")
+                })
+            });
         let start = failure.unwrap_or_else(|| lines.len().saturating_sub(12));
         lines
             .iter()
@@ -1447,6 +1461,24 @@ FAILED tests/test_parser.py::test_roundtrip\n\
         assert!(excerpt.contains("stack backtrace:"));
         assert!(!excerpt.contains(" ... ok"));
         assert!(!excerpt.contains("Compiling fixture"));
+    }
+
+    #[test]
+    fn vitest_excerpt_starts_at_failure_not_a_passing_test_name() {
+        let mut output = "✓ handles failed requests\n".repeat(20);
+        output.push_str("× rejects malformed payload\nAssertionError: expected false to be true\n");
+        let check = super::CheckResult {
+            name: "Vitest".into(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output,
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.starts_with("× rejects malformed payload"));
+        assert!(excerpt.contains("AssertionError"));
+        assert!(!excerpt.contains("handles failed requests"));
     }
 
     #[test]
