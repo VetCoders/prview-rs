@@ -709,7 +709,7 @@ The report distinguishes observations from conclusions:
 - **Tests for changed files** shows source-to-test matching, not measured line
   or branch coverage. Finding a matching test file does not establish that the
   changed behavior is tested or that its tests passed.
-- **Structural change risk** compares structural indicators. Its score is not
+- **Code change structure** compares structural indicators. Its score is not
   a probability of failure and does not include test results. The lowest band
   is labeled minimal, not a general assurance that the change is OK.
 - **Structural observations** exposes repository-wide Loctree candidates with

@@ -71,7 +71,8 @@ const STATIC_CSS: &str = r#"
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-family: var(--mono);
+    font-size: 14px;
     background:
         radial-gradient(circle at 50% 40%, rgba(var(--veil),0.08), transparent 40%),
         radial-gradient(circle at 50% 80%, rgba(var(--veil),0.04), transparent 50%),
@@ -127,11 +128,18 @@ body::before {
     gap: 10px;
     flex-wrap: wrap;
 }
-h1, h2, h3, h4 { font-family: var(--font-heading); letter-spacing: -0.02em; }
-code, pre { font-family: var(--mono); }
-/* Brand wordmark: shared lockup with review.html (Space Grotesk + signal dot). */
+h1, h2, h3, h4, h5, h6 { font-family: var(--mono); letter-spacing: -0.02em; line-height: 1.35; }
+h1 { font-size: 24px; }
+h2 { font-size: 18px; }
+h3 { font-size: 16px; }
+h4, h5, h6 { font-size: 14px; }
+button, input, select, textarea, code, pre { font-family: var(--mono); }
+a, a:visited { color: var(--fg); text-decoration-color: var(--muted); text-underline-offset: 3px; }
+a:hover { color: var(--fg); text-decoration: underline; }
+a:focus-visible { outline: 2px solid var(--muted); outline-offset: 3px; text-decoration: underline; }
+/* The report uses the same monospace family for wordmark and content. */
 .wordmark {
-    font-family: var(--font-heading);
+    font-family: var(--mono);
     font-weight: 700;
     font-size: 19px;
     letter-spacing: -0.03em;
@@ -339,6 +347,7 @@ code, pre { font-family: var(--mono); }
 .merge-allow { background: transparent; color: var(--pass); border-color: var(--pass); }
 .merge-block { background: transparent; color: var(--block); border-color: var(--block); }
 .merge-na { background: rgba(var(--veil),0.06); color: var(--muted); }
+.merge-review { background: transparent; color: var(--warn); border-color: var(--warn); }
 .merge-policy {
     font-size: 12px;
     color: var(--muted);
@@ -575,14 +584,21 @@ code, pre { font-family: var(--mono); }
     border-bottom: 1px solid var(--line);
 }
 .check-output-inner {
-    background: var(--bg);
-    padding: 12px 16px;
+    padding: 8px 16px 16px;
+    min-width: 0;
+}
+.check-output-inner.check-output-long {
+    background: var(--hover);
+    padding: 14px;
     max-height: 360px;
     overflow: auto;
-    border-left: 3px solid var(--line-strong);
-    margin: 0 12px 12px 12px;
-    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    border: 1px solid var(--line);
+    margin: 12px 16px 16px;
+    border-radius: var(--radius-sm);
 }
+.check-output-inner details { margin-top: 12px; }
+.check-output-inner details > pre { margin-top: 10px; }
+.check-output-inner summary { cursor: pointer; color: var(--fg); }
 .check-output-inner pre {
     font-family: var(--mono);
     font-size: 12px;
@@ -1627,7 +1643,13 @@ body.author-mode .section-noise  { display: none; }
 .flaky-confidence-low { background: var(--surface-2); color: var(--faint); }
 
 /* === Dashboard v2: Collapsible sections === */
-.section-collapsible { margin-bottom: 12px; }
+.section-collapsible {
+    margin-bottom: 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--glass-bg);
+    min-width: 0;
+}
 .section-collapsible > .section-header {
     cursor: pointer;
     display: flex;
@@ -1637,13 +1659,16 @@ body.author-mode .section-noise  { display: none; }
     flex-wrap: wrap;
     min-width: 0;
     padding: 12px 16px;
-    border-radius: var(--radius);
-    background: rgba(var(--veil),0.03);
-    border: 1px solid var(--line);
+    margin: 0;
+    border-radius: inherit;
+    background: transparent;
+    border: 0;
     transition: background 0.15s;
     user-select: none;
 }
 .section-collapsible > .section-header:hover { background: var(--hover); }
+.section-collapsible > .section-header:focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
+.section-collapsible.expanded > .section-header { border-radius: var(--radius) var(--radius) 0 0; border-bottom: 1px solid var(--line); }
 .section-collapsible > .section-header .toggle-indicator {
     color: var(--faint);
     font-size: 11px;
@@ -1657,12 +1682,13 @@ body.author-mode .section-noise  { display: none; }
     align-items: center;
     min-width: 0;
 }
-.section-collapsible .section-body {
+.section-collapsible > .section-body {
     display: none;
-    padding: 12px 0 0;
+    padding: 16px;
+    border-radius: 0 0 var(--radius) var(--radius);
     min-width: 0;
 }
-.section-collapsible.expanded .section-body { display: block; }
+.section-collapsible.expanded > .section-body { display: block; }
 .section-collapsible .section-body > .section {
     margin-bottom: 0;
     min-width: 0;
@@ -1682,10 +1708,21 @@ body.author-mode .section-noise  { display: none; }
 .section-collapsible .section-body > .section > .merge-decision-card {
     min-width: 0;
 }
+.section-collapsible > .section-body > .section > .card,
+.section-collapsible > .section-body > .section > .merge-decision-card {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.section-collapsible > .section-body > .section > .tab-container { margin-top: 0; }
 .section-summary {
     color: var(--muted);
     font-size: 12px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     flex: 1 1 280px;
     min-width: 0;
     max-width: none;
@@ -1702,7 +1739,7 @@ body.author-mode .section-noise  { display: none; }
     border-radius: 12px;
     font-weight: 600;
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     letter-spacing: 0.5px;
 }
 .severity-ok   { background: rgba(var(--veil),0.06); color: var(--muted); border: 1px solid rgba(var(--veil),0.14); }
@@ -1830,7 +1867,7 @@ body.author-mode .section-noise  { display: none; }
     padding: 0;
     margin: 0 0 12px;
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     color: var(--muted);
 }
 .regression-reasons li { padding: 2px 0; }
@@ -1838,7 +1875,7 @@ body.author-mode .section-noise  { display: none; }
 .risk-files { margin-top: 8px; }
 .risk-table { width: 100%; font-size: 13px; }
 .risk-table td { padding: 4px 8px; }
-.risk-table td:first-child { font-family: 'JetBrains Mono', monospace; }
+.risk-table td:first-child { font-family: var(--mono); }
 .risk-table a { color: var(--fg); text-decoration: none; }
 .risk-table a:hover { text-decoration: underline; }
 
@@ -1864,7 +1901,7 @@ body.author-mode .section-noise  { display: none; }
     color: var(--muted);
     cursor: pointer;
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     border-bottom: 2px solid transparent;
     transition: color 0.15s;
 }
@@ -1928,6 +1965,11 @@ mark.evidence-match { color: inherit; padding: 0; outline: 1px solid var(--warn)
 .card pre, .narrative-rendered pre, .check-output, .check-command, .blocker-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
 .narrative-rendered, .checks-table td, .header-stats { overflow-wrap: anywhere; }
 .narrative-rendered table { display: block; max-width: 100%; overflow-x: auto; }
+.narrative-toolbar, .artifact-integrity { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; }
+.narrative-toolbar { justify-content: flex-end; }
+.artifact-integrity { font-size: 12px; color: var(--muted); }
+.evidence-note { font-size: 12px; color: var(--muted); line-height: 1.6; }
+.narrative-rendered .mdr pre, #evidence-body .mdr pre { background: var(--surface-2); color: var(--fg); padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 @media (max-width: 700px) {
     .time-budget-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; }
     .time-budget-bar-wrap { grid-column: 1 / -1; grid-row: 2; }
@@ -1938,7 +1980,7 @@ mark.evidence-match { color: inherit; padding: 0; outline: 1px solid var(--warn)
 /* === Dashboard v2: Hero stats row === */
 .header-stats {
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     color: var(--muted);
     margin-top: 4px;
 }
@@ -2002,6 +2044,17 @@ const JS_SUFFIX: &str = r##"
         return many;
     }
 
+    function translateSkipReason(reason) {
+        if (currentLang !== 'pl') return reason;
+        var reasons = {
+            'lint disabled': 'lint wyłączony',
+            'tests disabled': 'testy wyłączone',
+            'security disabled': 'analiza bezpieczeństwa wyłączona',
+            'heuristics disabled': 'analiza strukturalna wyłączona'
+        };
+        return reasons[(reason || '').trim()] || reason;
+    }
+
     function translateReviewSignalPart(part) {
         if (currentLang !== 'pl') return part;
         var trimmed = (part || '').trim();
@@ -2025,14 +2078,12 @@ const JS_SUFFIX: &str = r##"
         if (match) return match[1] + ': ostrzeżenia';
         match = trimmed.match(/^(.+) skipped: ([\s\S]+)$/);
         if (match) {
-            var skipReasonMap = {
-                'lint disabled': 'lint wyłączony',
-                'tests disabled': 'testy wyłączone',
-                'security disabled': 'analiza bezpieczeństwa wyłączona'
-            };
-            var skipReason = skipReasonMap[match[2].trim()] || match[2];
-            return match[1] + ' — pominięto: ' + skipReason;
+            return match[1] + ' — pominięto: ' + translateSkipReason(match[2]);
         }
+        match = trimmed.match(/^Semgrep analysis was partial; incompletely parsed files: (.+)$/);
+        if (match) return 'Analiza Semgrep była częściowa; pliki sparsowane nie w pełni: ' + match[1];
+        match = trimmed.match(/^Rust API delta: (\d+) unknown finding(?:s)?$/);
+        if (match) return 'Zmiany API Rust: ' + match[1] + ' ' + polishPlural(Number(match[1]), 'obserwacja o nieustalonym znaczeniu', 'obserwacje o nieustalonym znaczeniu', 'obserwacji o nieustalonym znaczeniu');
         match = trimmed.match(/^(.+) returned failed$/);
         if (match) return match[1] + ': niepowodzenie';
         match = trimmed.match(/^(.+) needs manual review$/);
@@ -2052,6 +2103,7 @@ const JS_SUFFIX: &str = r##"
         if (currentLang !== 'pl') return reason;
         var text = (reason || '').trim();
         var match;
+        if (text.includes('; ')) return text.split('; ').map(translateDecisionReason).join('; ');
         if (text === 'All quality gates passed') return 'Wszystkie wymagane kontrole zakończyły się powodzeniem';
         match = text.match(/^Quality gates passed, but (\d+) review signal(?:s)? need attention$/);
         if (match) {
@@ -2063,6 +2115,13 @@ const JS_SUFFIX: &str = r##"
             var detail = match[2].replace(/pre-existing/g, 'wcześniej istniejących').replace(/introduced/g, 'wprowadzonych').replace(/unclassified/g, 'bez ustalonego pochodzenia').replace(/warning signals?/g, 'sygnałów ostrzegawczych');
             return 'Niepowodzenie kontroli jakości: ' + match[1] + detail;
         }
+        match = text.match(/^(\d+) warning signal(?:s)?: (.+)$/);
+        if (match) {
+            var warningDetail = match[2].replace(/pre-existing/g, 'wcześniej istniejących').replace(/introduced/g, 'wprowadzonych').replace(/unclassified/g, 'bez ustalonego pochodzenia').replace(/mixed/g, 'o mieszanym pochodzeniu');
+            return match[1] + ' ' + polishPlural(Number(match[1]), 'sygnał ostrzegawczy', 'sygnały ostrzegawcze', 'sygnałów ostrzegawczych') + ': ' + warningDetail;
+        }
+        match = text.match(/^(\d+) review signal(?:s)? need attention$/);
+        if (match) return match[1] + ' ' + polishPlural(Number(match[1]), 'sygnał wymaga uwagi', 'sygnały wymagają uwagi', 'sygnałów wymaga uwagi');
         if (text === 'Merge not recommended') return 'Scalenie nie jest zalecane';
         match = text.match(/^(\d+) blocking issue(?:s)? found: (.+)$/);
         if (match) {
@@ -2160,6 +2219,9 @@ const JS_SUFFIX: &str = r##"
             var rendered = t('summary.severityValue');
             rendered = rendered.split('{value}').join(translateSeverityValue(el.dataset.value || ''));
             el.textContent = rendered;
+        });
+        document.querySelectorAll('[data-i18n-template="message.skippedCheckDetail"]').forEach(function(el) {
+            el.textContent = t('message.skippedCheckDetail').split('{reason}').join(translateSkipReason(el.dataset.reason || ''));
         });
         document.querySelectorAll('[data-review-signals]').forEach(function(el) {
             var source = el.getAttribute('data-review-signals') || '';
@@ -2422,15 +2484,28 @@ const JS_SUFFIX: &str = r##"
 
     function updateActiveNav() {
         if (!sections.length) return;
-        var scrollY = window.scrollY + 120;
-        var current = sections[0];
-        for (var i = 0; i < sections.length; i++) {
-            if (sections[i].el.offsetTop <= scrollY) {
-                current = sections[i];
-            }
-        }
-        navLinks.forEach(function(l) { l.classList.remove('active'); });
-        if (current) current.link.classList.add('active');
+        var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        var readingLine = Math.min(120, viewportHeight / 3);
+        // offsetTop belongs to an offsetParent, not the document. Measure all
+        // sections in the same viewport coordinate system; menu order may differ
+        // from document order. A collapsed section is represented by its header.
+        var visible = sections.map(function(section) {
+            var surface = section.el.closest('.section-collapsible') || section.el;
+            var rect = surface.getBoundingClientRect();
+            return {section: section, top: rect.top, bottom: rect.bottom, height: rect.height};
+        }).filter(function(item) {
+            return item.height > 0 && item.bottom > 0 && item.top < viewportHeight;
+        }).sort(function(a, b) { return a.top - b.top; });
+        var current = visible[0];
+        visible.forEach(function(item) {
+            if (item.top <= readingLine) current = item;
+        });
+        navLinks.forEach(function(link) {
+            var active = Boolean(current && current.section.link === link);
+            link.classList.toggle('active', active);
+            if (active) link.setAttribute('aria-current', 'location');
+            else link.removeAttribute('aria-current');
+        });
     }
 
     function updateSectionAddress(id) {
@@ -2450,6 +2525,8 @@ const JS_SUFFIX: &str = r##"
 
     if (sections.length > 0) {
         window.addEventListener('scroll', updateActiveNav, { passive: true });
+        window.addEventListener('resize', updateActiveNav, { passive: true });
+        document.addEventListener('toggle', updateActiveNav, true);
         updateActiveNav();
     }
 
@@ -2653,12 +2730,14 @@ const JS_SUFFIX: &str = r##"
         header.addEventListener('click', function() {
             var collapsible = this.closest('.section-collapsible');
             setCollapsibleExpanded(collapsible, !collapsible.classList.contains('expanded'));
+            updateActiveNav();
         });
         header.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 var collapsible = this.closest('.section-collapsible');
                 setCollapsibleExpanded(collapsible, !collapsible.classList.contains('expanded'));
+                updateActiveNav();
             }
         });
     });

@@ -131,7 +131,8 @@ pub(crate) enum MergeDecisionState {
 impl MergeDecisionState {
     pub(crate) fn hero_class(self) -> &'static str {
         match self {
-            MergeDecisionState::Allow | MergeDecisionState::AllowWithReview => "merge-allow",
+            MergeDecisionState::Allow => "merge-allow",
+            MergeDecisionState::AllowWithReview => "merge-review",
             MergeDecisionState::Hold => "merge-hold",
             MergeDecisionState::Block => "merge-block",
         }

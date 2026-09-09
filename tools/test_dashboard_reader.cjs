@@ -112,6 +112,67 @@ function checkNavigation(dom, state, fileOrigin) {
   assert.equal(state.fetches, 0, 'DOM navigation must not fetch');
 }
 
+function checkSidebarGeometry(dom) {
+  const { document: doc } = dom.window;
+  const rectangles = new Map();
+  const surface = id => {
+    const target = doc.getElementById(id);
+    assert(target, 'Fixture must contain geometry target: ' + id);
+    return target.closest('.section-collapsible') || target;
+  };
+  for (const link of doc.querySelectorAll('.sidebar-nav a[href^="#"]')) {
+    const target = doc.getElementById(link.hash.slice(1));
+    if (!target) continue;
+    // Different offset parents can all expose offsetTop=0 even though their
+    // panels occupy entirely different places in the document.
+    Object.defineProperty(target, 'offsetTop', {configurable:true, get:() => 0});
+    const panel = target.closest('.section-collapsible') || target;
+    panel.classList.add('expanded');
+    panel.getBoundingClientRect = () => rectangles.get(panel) || {top:0, bottom:0, height:0};
+  }
+  Object.defineProperty(dom.window, 'scrollY', {configurable:true, value:1400});
+  Object.defineProperty(dom.window, 'innerHeight', {configurable:true, value:900});
+  function place(id, top, height) { rectangles.set(surface(id), {top, bottom:top + height, height}); }
+  function expectActive(id, event = 'scroll') {
+    dom.window.dispatchEvent(new dom.window.Event(event));
+    const active = [...doc.querySelectorAll('.sidebar-nav a.active')];
+    assert.equal(active.length, 1, 'Only one section may represent the reading position');
+    assert.equal(active[0].hash, '#' + id, 'Active section must follow viewport geometry, not offsetParent/menu order');
+    assert.equal(active[0].getAttribute('aria-current'), 'location');
+    assert.equal(doc.querySelectorAll('.sidebar-nav [aria-current="location"]').length, 1);
+  }
+  place('section-checks', 20, 500);
+  place('section-files', 550, 500);
+  place('section-statistics', 1100, 500);
+  place('section-commits', 1700, 180);
+  place('section-time-budget', 1950, 200);
+  expectActive('section-checks');
+  place('section-checks', -650, 500);
+  place('section-files', -100, 500);
+  place('section-statistics', 420, 500);
+  expectActive('section-files');
+  place('section-files', -750, 500);
+  place('section-statistics', -100, 700);
+  place('section-commits', 620, 180);
+  place('section-time-budget', 820, 200);
+  expectActive('section-statistics');
+  // Visible panel positions can differ from the sidebar's semantic grouping.
+  place('section-checks', 300, 200);
+  place('section-files', 20, 240);
+  place('section-statistics', 540, 200);
+  expectActive('section-files', 'resize');
+  // A collapsed body has no rect; its visible header still participates.
+  const files = surface('section-files');
+  files.classList.remove('expanded');
+  doc.getElementById('section-files').getBoundingClientRect = () => ({top:0, bottom:0, height:0});
+  place('section-files', 50, 60);
+  expectActive('section-files');
+  // An empty/hidden panel must not win simply because its top is zero.
+  place('section-time-budget', 0, 0);
+  expectActive('section-files');
+  console.log('PASS: sidebar geometry tracks checks/files/structural panels across scrolling, resizing, reordered sections and collapsed headers; hidden sections excluded.');
+}
+
 async function runReaderGate() {
   const { dom, state, loaded } = createDom('https://prview.test/dashboard.html');
   const doc = dom.window.document;
@@ -278,6 +339,23 @@ async function runReaderGate() {
     click(doc.getElementById('lang-toggle-pl'));
     assert.equal(doc.documentElement.lang, 'pl');
     assert.equal(doc.querySelector('[data-i18n="evidence.readingPath"]').textContent, 'Przejdź przez review');
+    const warningReason = doc.createElement('p');
+    warningReason.dataset.decisionReason = '1 warning signal: 1 unclassified; 10 review signals need attention';
+    doc.body.append(warningReason);
+    const signals = doc.createElement('p');
+    signals.dataset.reviewSignals = 'heuristics_loctree skipped: heuristics disabled · Semgrep analysis was partial; incompletely parsed files: src/example.rs · Rust API delta: 1 unknown finding';
+    doc.body.append(signals);
+    const skipped = doc.createElement('p');
+    skipped.dataset.i18nTemplate = 'message.skippedCheckDetail';
+    skipped.dataset.reason = 'tests disabled';
+    doc.body.append(skipped);
+    click(doc.getElementById('lang-toggle-en'));
+    assert.equal(warningReason.textContent, warningReason.dataset.decisionReason, 'Switching to English retains original recorded wording');
+    assert(skipped.textContent.includes('Reason: tests disabled.'));
+    click(doc.getElementById('lang-toggle-pl'));
+    assert.equal(warningReason.textContent, '1 sygnał ostrzegawczy: 1 bez ustalonego pochodzenia; 10 sygnałów wymaga uwagi');
+    assert.equal(signals.textContent, 'heuristics_loctree — pominięto: analiza strukturalna wyłączona · Analiza Semgrep była częściowa; pliki sparsowane nie w pełni: src/example.rs · Zmiany API Rust: 1 obserwacja o nieustalonym znaczeniu');
+    assert(skipped.textContent.includes('Powód: testy wyłączone.'));
     open('20_quality/search.md');
     setSearch(dom, 'needle');
     assert.equal(count.textContent, 'Trafienie 1 z 3 na tej stronie');
@@ -294,6 +372,7 @@ async function runFileNavigationGate() {
   await loaded;
   try {
     checkNavigation(dom, state, true);
+    checkSidebarGeometry(dom);
     assert.deepEqual(state.errors, []);
     console.log('PASS: file-origin DOM reading-path/sidebar/file navigation expands and scrolls without history rewrites or fetches (native file permissions untested).');
   } finally { dom.window.close(); }

@@ -30,7 +30,7 @@ const TEST_DIR_MARKERS: &[&str] = &[
 ];
 
 /// Basename suffix markers (before the extension) that indicate a test file.
-const TEST_SUFFIX_MARKERS: &[&str] = &["_test", ".test", "_spec", ".spec"];
+const TEST_SUFFIX_MARKERS: &[&str] = &["_test", "_tests", ".test", "_spec", ".spec"];
 
 // ---------------------------------------------------------------------------
 // Classification helpers
@@ -390,6 +390,8 @@ mod tests_unit {
         assert!(is_test_file("__tests__/App.test.tsx"));
         assert!(is_test_file("e2e/login.spec.ts"));
         assert!(is_test_file("src/foo_test.go"));
+        assert!(is_test_file("src/artifacts/dashboard/evidence_tests.rs"));
+        assert!(is_test_file("src/artifacts/dashboard/trends_tests.rs"));
         assert!(is_test_file("src/foo.test.js"));
         assert!(is_test_file("src/foo_spec.rb"));
         assert!(is_test_file("src/foo.spec.ts"));
@@ -408,6 +410,8 @@ mod tests_unit {
         assert!(!is_test_file("src/main.rs"));
         assert!(!is_test_file("src/lib.rs"));
         assert!(!is_test_file("src/app.ts"));
+        assert!(!is_test_file("src/testsupport.rs"));
+        assert!(!is_test_file("src/evidence_tests_support.rs"));
     }
 
     // -- Analyze: classification --

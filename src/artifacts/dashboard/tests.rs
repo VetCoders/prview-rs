@@ -183,6 +183,34 @@ fn test_safe_id_no_collisions() {
 }
 
 #[test]
+fn source_test_sidebar_preserves_full_matching_fraction() {
+    let config = mock_config();
+    let diffs = vec![mock_diff()];
+    let checks = mock_checks();
+    let mut ctx = mock_ctx();
+    ctx.coverage.pct = Some(100);
+    ctx.coverage.covered_count = 21;
+    ctx.coverage.total_source = 21;
+    let dir = std::env::temp_dir();
+    let html = build_html_test!(&config, &diffs, &checks, None, &ctx, "", &dir, "", None);
+    let navigation = html
+        .split("<nav")
+        .nth(1)
+        .expect("sidebar navigation")
+        .split("</nav>")
+        .next()
+        .unwrap()
+        .split("href=\"#section-coverage\"")
+        .nth(1)
+        .unwrap()
+        .split("</a>")
+        .next()
+        .unwrap();
+    assert!(navigation.contains(">21/21</span>"));
+    assert!(!navigation.contains("PASS"));
+}
+
+#[test]
 fn test_deep_links_consistency() {
     // Every href="#file-..." in the HTML must have a corresponding id="file-..."
     let config = mock_config();
@@ -278,6 +306,8 @@ fn test_skipped_checks_rendered() {
         "Should show skipped check name"
     );
     assert!(html.contains("not installed"), "Should show skip reason");
+    assert!(html.contains("data-i18n-template=\"message.skippedCheckDetail\""));
+    assert!(html.contains("data-reason=\"not installed\""));
 }
 
 #[test]
@@ -586,6 +616,21 @@ fn test_merge_decision_card_review_caveats() {
         ));
     assert!(html.contains("11% coverage heuristic"));
     assert!(html.contains("1 inline finding"));
+}
+
+#[test]
+fn merge_decision_summary_hides_serialized_api_payload_without_mutating_evidence() {
+    let mut ctx = mock_ctx();
+    let caveat = "Rust API analysis incomplete [api-delta:{\"kind\":\"unknown\"}]".to_string();
+    ctx.review_caveats = vec![caveat.clone()];
+    let html = build_merge_decision_card(&ctx);
+    assert!(html.contains("Rust API analysis incomplete"));
+    assert!(!html.contains("api-delta:"));
+    assert_eq!(ctx.review_caveats, vec![caveat]);
+    assert_eq!(
+        crate::artifacts::verdict::MergeDecisionState::AllowWithReview.hero_class(),
+        "merge-review"
+    );
 }
 
 #[test]
@@ -1388,18 +1433,29 @@ fn narrative_section_renders_markdown_through_mdrender() {
     let md = "## Findings\n\n> [!NOTE]\n> Look here.\n\n```rust\nfn a() {}\n```\n";
     let html = build_narrative_section(md);
 
-    // Rendered through mdrender (scoped wrapper + GFM callout + code highlight).
+    // Rendered through mdrender; dashboard CSS owns all presentation colors.
     assert!(html.contains("<div class=\"mdr\">"), "mdr wrapper missing");
     assert!(
         html.contains("markdown-alert markdown-alert-note"),
         "note callout missing: {html}"
     );
     assert!(
-        html.contains("<span style=\"color:#"),
-        "syntect highlight spans missing"
+        !html.contains("style=\"color:#") && !html.contains("style=\"background-color:#"),
+        "fenced code must not inject a competing inline palette"
     );
     // Raw markdown is still preserved for the copy-as-markdown control.
     assert!(html.contains("narrative-content"));
+    let panel = html
+        .find("card narrative-rendered")
+        .expect("narrative content panel");
+    let copy = html.find("id=\"copy-narrative-btn\"").expect("copy action");
+    let rendered = html
+        .find("<div class=\"mdr\">")
+        .expect("rendered narrative");
+    assert!(
+        panel < copy && copy < rendered,
+        "copy action belongs inside the narrative panel before its content"
+    );
 }
 
 #[test]

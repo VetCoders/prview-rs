@@ -16,7 +16,7 @@ use std::path::Path;
 #[serde(rename_all = "snake_case")]
 pub enum CoverageMatchTier {
     High,   // exact stem match, path-mirrored
-    Medium, // sibling tests module, import recovery
+    Medium, // explicit import recovery
     Low,    // keyword overlap only
 }
 
@@ -191,7 +191,7 @@ pub fn compute_coverage_signal(
     let mut covered: Vec<(&FileChange, &FileChange, CoverageMatchTier)> = Vec::new();
     let mut uncovered: Vec<&FileChange> = Vec::new();
 
-    // Strategies 1-4: filename heuristic, path-mirrored, sibling, keyword overlap
+    // Filename heuristic, path-mirrored names, and filename keyword overlap.
     for src in &source_files {
         if let Some((test, tier)) = find_matching_test(src, &test_files) {
             covered.push((*src, test, tier));
@@ -503,8 +503,9 @@ pub fn generate_coverage_delta(dir: &Path, signal: &CoverageSignal) -> Result<()
 /// Matching strategies (in order):
 /// 1. Exact stem match: `foo.rs` <-> `foo_test.rs` / `test_foo.rs` / `foo.test.ts`
 /// 2. Path-mirrored: `src/foo/bar.rs` <-> `tests/foo/bar.rs`
-/// 3. Sibling tests module: `src/foo/bar.rs` <-> `src/foo/tests.rs` / `src/foo/tests/*.rs`
-/// 4. Keyword overlap: `core/audio/chunker.rs` <-> `tests/e2e_vad_flow.rs` (shared path segments)
+/// 3. Filename keyword overlap: `core/audio/chunker.rs` <-> `tests/e2e_audio_chunker.rs`
+///
+/// Shared directories alone are not evidence of a source-to-test relationship.
 fn find_matching_test<'a>(
     source: &FileChange,
     test_files: &[&'a FileChange],
@@ -514,13 +515,11 @@ fn find_matching_test<'a>(
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    let src_parent = Path::new(&source.path)
-        .parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or("");
-
     // Strategy 1: Exact stem match (strip test prefix/suffix)
     for test in test_files {
+        if !compatible_test_language(&source.path, &test.path) {
+            continue;
+        }
         let test_stem = Path::new(&test.path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -528,6 +527,7 @@ fn find_matching_test<'a>(
 
         let test_base = test_stem
             .strip_suffix("_test")
+            .or_else(|| test_stem.strip_suffix("_tests"))
             .or_else(|| test_stem.strip_suffix(".test"))
             .or_else(|| test_stem.strip_suffix(".spec"))
             .or_else(|| test_stem.strip_prefix("test_"))
@@ -545,6 +545,9 @@ fn find_matching_test<'a>(
 
     // Strategy 2: Path-mirrored (tests/foo/bar.rs <-> src/foo/bar.rs)
     for test in test_files {
+        if !compatible_test_language(&source.path, &test.path) {
+            continue;
+        }
         if test.path.contains("tests/") || test.path.contains("__tests__/") {
             let test_filename = Path::new(&test.path)
                 .file_stem()
@@ -561,38 +564,7 @@ fn find_matching_test<'a>(
         }
     }
 
-    // Strategy 3: Sibling tests module (src/foo/bar.rs <-> src/foo/tests.rs or src/foo/tests/*.rs) → Medium
-    for test in test_files {
-        let test_parent = Path::new(&test.path)
-            .parent()
-            .and_then(|p| p.to_str())
-            .unwrap_or("");
-        let test_stem = Path::new(&test.path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-
-        // src/foo/bar.rs <-> src/foo/tests.rs
-        if test_parent == src_parent && test_stem == "tests" {
-            return Some((test, CoverageMatchTier::Medium));
-        }
-
-        // src/foo/bar.rs <-> src/foo/tests/anything.rs
-        if let Some(stripped) = test_parent.strip_suffix("/tests")
-            && stripped == src_parent
-        {
-            return Some((test, CoverageMatchTier::Medium));
-        }
-        // Also handle tests/ at start: src/foo/bar.rs <-> tests/foo/anything.rs
-        if let Some(test_sub) = test_parent.strip_prefix("tests/")
-            && !src_parent.is_empty()
-            && (src_parent.ends_with(test_sub) || test_sub.ends_with(src_parent))
-        {
-            return Some((test, CoverageMatchTier::Medium));
-        }
-    }
-
-    // Strategy 4: Keyword overlap — source path segments appear in test filename → Low
+    // Strategy 3: Keyword overlap — source path segments appear in test filename → Low
     // e.g. core/audio/chunker.rs <-> tests/e2e_audio_chunker.rs
     let src_segments: Vec<&str> = source
         .path
@@ -604,7 +576,17 @@ fn find_matching_test<'a>(
         let mut best_match: Option<(&'a FileChange, usize)> = None;
 
         for test in test_files {
-            let test_lower = test.path.to_lowercase();
+            if !compatible_test_language(&source.path, &test.path) {
+                continue;
+            }
+            let test_lower = Path::new(&test.path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !test_lower.contains(&src_stem.to_lowercase()) {
+                continue;
+            }
             let overlap = src_segments
                 .iter()
                 .filter(|seg| {
@@ -632,6 +614,18 @@ fn find_matching_test<'a>(
     }
 
     None
+}
+
+fn compatible_test_language(source: &str, test: &str) -> bool {
+    let source_ext = Path::new(source).extension().and_then(|ext| ext.to_str());
+    let test_ext = Path::new(test).extension().and_then(|ext| ext.to_str());
+    let is_js_ts = |ext| {
+        matches!(
+            ext,
+            Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
+        )
+    };
+    source_ext.is_some() && (source_ext == test_ext || is_js_ts(source_ext) && is_js_ts(test_ext))
 }
 
 fn same_coverage_module(source_path: &str, test_path: &str) -> bool {
@@ -665,7 +659,7 @@ fn coverage_module_key(path: &str) -> Vec<String> {
     components
 }
 
-/// Strategy 5 (import recovery): find a test file that imports the source module.
+/// Import recovery: find a test file that imports the source module.
 ///
 /// Only called for source files that had no filename-heuristic match.
 /// Reads test file content from disk and greps for import patterns.
@@ -707,6 +701,9 @@ fn find_test_by_import<'a>(
     }
 
     for test in test_files {
+        if !compatible_test_language(&source.path, &test.path) {
+            continue;
+        }
         let content = match test_contents.get(&test.path) {
             Some(c) => c,
             None => continue,
@@ -726,9 +723,26 @@ fn find_test_by_import<'a>(
                 continue;
             }
 
+            // Imported bindings/aliases do not identify the imported module.
+            // For example, `import { evidence } from './other'` and
+            // `use super::other as evidence` do not exercise evidence.rs/js.
+            let import_target = if let Some((_, target)) = trimmed.split_once(" from ") {
+                target
+            } else if let Some((module, _)) = trimmed.split_once(" import ")
+                && module.trim_start_matches("from ").trim() != "."
+            {
+                module
+            } else if let Some((_, target)) = trimmed.split_once("require(") {
+                target.split(')').next().unwrap_or(target)
+            } else if let Some((_, target)) = trimmed.split_once("import(") {
+                target.split(')').next().unwrap_or(target)
+            } else {
+                trimmed.split(" as ").next().unwrap_or(trimmed)
+            };
+
             if needles
                 .iter()
-                .any(|needle| contains_token_match(trimmed, needle))
+                .any(|needle| contains_token_match(import_target, needle))
             {
                 return Some((test, CoverageMatchTier::Medium));
             }
@@ -784,6 +798,114 @@ mod tests {
     use super::*;
     use crate::git::FileStatus;
     use tempfile::TempDir;
+
+    #[test]
+    fn coverage_requires_source_evidence_not_shared_directories() {
+        for test_path in [
+            "src/artifacts/dashboard/tests.rs",
+            "src/artifacts/dashboard/tests/unrelated.rs",
+            "tests/artifacts/dashboard/unrelated.rs",
+            "src/artifacts/dashboard/trends_tests.rs",
+        ] {
+            let diff = mock_diff(vec![
+                mock_file_change(
+                    "src/artifacts/dashboard/evidence.rs",
+                    FileStatus::Modified,
+                    2,
+                    1,
+                ),
+                mock_file_change(test_path, FileStatus::Modified, 2, 1),
+            ]);
+            let signal = compute_coverage_signal(&[diff], None, None);
+            assert_eq!(signal.total_source_files, 1, "{test_path}");
+            assert_eq!(signal.covered_count, 0, "{test_path}");
+        }
+    }
+
+    #[test]
+    fn coverage_plural_test_suffix_is_a_matching_test_not_source() {
+        let diff = mock_diff(vec![
+            mock_file_change(
+                "src/artifacts/dashboard/evidence.rs",
+                FileStatus::Modified,
+                2,
+                1,
+            ),
+            mock_file_change(
+                "src/artifacts/dashboard/evidence_tests.rs",
+                FileStatus::Modified,
+                2,
+                1,
+            ),
+        ]);
+        let signal = compute_coverage_signal(&[diff], None, None);
+        assert_eq!(signal.total_source_files, 1);
+        assert_eq!(signal.covered_count, 1);
+        assert_eq!(signal.covered_files[0].2, CoverageMatchTier::High);
+    }
+
+    #[test]
+    fn coverage_rejects_cross_language_names_and_imports_but_allows_js_ts() {
+        let source = mock_file_change("src/evidence.js", FileStatus::Modified, 2, 1);
+        let rust = mock_file_change("src/evidence_tests.rs", FileStatus::Modified, 2, 1);
+        let rust_import = mock_file_change("src/tests.rs", FileStatus::Modified, 2, 1);
+        let ts = mock_file_change("src/evidence.test.ts", FileStatus::Modified, 2, 1);
+        assert!(find_matching_test(&source, &[&rust]).is_none());
+        let contents = HashMap::from([(
+            rust_import.path.clone(),
+            "use super::evidence::*;".to_string(),
+        )]);
+        assert!(find_test_by_import(&source, &[&rust_import], &contents).is_none());
+        assert!(find_matching_test(&source, &[&ts]).is_some());
+    }
+
+    #[test]
+    fn coverage_retains_explicit_sibling_import_and_helper_alias_evidence() {
+        let source = mock_file_change("src/dashboard/evidence.rs", FileStatus::Modified, 2, 1);
+        let test = mock_file_change("src/dashboard/tests.rs", FileStatus::Modified, 2, 1);
+        let contents = HashMap::from([(
+            test.path.clone(),
+            "use super::evidence as helper;".to_string(),
+        )]);
+        assert_eq!(
+            find_test_by_import(&source, &[&test], &contents).unwrap().1,
+            CoverageMatchTier::Medium
+        );
+    }
+
+    #[test]
+    fn coverage_import_bindings_do_not_impersonate_source_modules() {
+        for (source_path, test_path, content) in [
+            (
+                "src/evidence.rs",
+                "src/tests.rs",
+                "use super::other as evidence;",
+            ),
+            (
+                "src/evidence.js",
+                "src/tests.test.js",
+                "import { evidence } from './other';",
+            ),
+            (
+                "src/evidence.py",
+                "tests/test_other.py",
+                "from other import evidence",
+            ),
+            (
+                "src/evidence.js",
+                "src/tests.test.js",
+                "const evidence = require('./other');",
+            ),
+        ] {
+            let source = mock_file_change(source_path, FileStatus::Modified, 2, 1);
+            let test = mock_file_change(test_path, FileStatus::Modified, 2, 1);
+            let contents = HashMap::from([(test.path.clone(), content.to_string())]);
+            assert!(
+                find_test_by_import(&source, &[&test], &contents).is_none(),
+                "{content}"
+            );
+        }
+    }
 
     #[test]
     fn coverage_delta_identifies_uncovered() {

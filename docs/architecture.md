@@ -1597,12 +1597,27 @@ those originals; unembedded files remain explicitly separate file links.
 Search walks text nodes and selects individual literal occurrences without
 replacing formatted HTML or losing links. Offline section navigation operates
 on the existing DOM without rewriting local file URLs.
+Active-section tracking compares viewport positions in document order, including
+collapsed section headers, and recalculates after resize. The sidebar source-to-test
+badge reports matched/evaluated files even when every evaluated source has a match.
+
+Report panels and the evidence reader share the dashboard font and neutral link
+palette. Markdown sanitization removes inline syntax-highlighter colors so fenced
+code follows the report theme. Collapsible headers and bodies form one panel;
+short check output stays inline, while longer output uses a bounded scroll area.
+The narrative copy control belongs to its content panel and preserves the original
+Markdown; manifest and integrity links belong to the artifact explorer panel.
 
 Failure cards, the failure summary and report JSON share diagnostic extraction.
 Pytest process noncompletion without a parsed diagnostic retains its exit code
 and unknown cause; passed test names and startup banners cannot become failure
 excerpts or located findings. A diagnostic's source location remains an
 observation, not proof of the underlying cause.
+Semgrep JSON excerpts summarize findings and scan warnings/errors, while the
+original log remains available. Incomplete public API analysis states its unknown
+regions and labels change counts as known facts; zero known changes cannot imply
+that the unobserved API is unchanged. Human decision summaries omit serialized
+API payloads, which remain preserved in the original gate artifacts.
 
 #### Stale-cache caveats (`MERGE_GATE.json.stale_cache_caveats`)
 
@@ -2737,18 +2752,21 @@ two artifacts of one run disagreeing about what "failure" meant. The field is
 additive and `report.json` stays `schema_version: "2.0"` — that major is
 unreleased, so no consumer has ever seen a 2.0 without it.
 
-Four-strategy filename heuristic matching:
-1. Exact stem match: `foo.rs` <-> `foo_test.rs` / `test_foo.rs` / `foo.test.ts`
-2. Path-mirrored: `src/foo/bar.rs` <-> `tests/foo/bar.rs`
-3. Sibling tests module: `src/foo/bar.rs` <-> `src/foo/tests.rs` or `src/foo/tests/*.rs`
-4. Keyword overlap: `core/audio/chunker.rs` <-> `tests/e2e_audio_chunker.rs` (shared path segments)
+Source-to-test matching uses language-compatible evidence (JavaScript and
+TypeScript may match each other; JavaScript cannot match a Rust test):
 
-Import-based recovery (strategy 5): for still-uncovered files, reads test file content
-from the target commit and greps for import statements referencing the source module.
-Uses word-boundary matching to avoid false positives.
+- High confidence: normalized source/test names in the corresponding module or
+  mirrored test path. Test suffixes include `_test`, `_tests`, `.test`, `.spec`
+  and the `test_` prefix. A real inline Rust test at the target revision is also
+  high-confidence evidence; a test-only helper or import alone is insufficient.
+- Medium confidence: an explicit import of the source module in a test file
+  read from the target revision.
+- Low confidence: matching stems outside the corresponding module, or keyword
+  recovery requiring the source stem and at least two source path segments in
+  the test name.
 
-Confidence downgrade: reports "medium" confidence when Rust files are uncovered
-(inline `#[cfg(test)]` modules are a known blind spot) or when import recovery was used.
+A nearby `tests.rs` or tests directory does not by itself match every source
+in that directory. Test files are excluded from the evaluated source count.
 
 #### signal/diffs.rs — per-file diff generation
 

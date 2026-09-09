@@ -114,11 +114,12 @@ pub(super) fn templates(files: &[EvidenceFile]) -> String {
 
 pub(super) fn offline_markdown(text: &str) -> String {
     let rendered = crate::mdrender::render(text, &super::sections::narrative_theme());
-    // The shared renderer already filters scripts and style values. A second
-    // pass removes automatic image loads while preserving its safe styling.
+    // The dashboard owns typography and colors, including fenced code. Strip
+    // inline highlighter styles so another palette cannot override its theme.
+    // Automatic image loads remain disabled for offline evidence.
     ammonia::Builder::default()
         .rm_tags(["img"])
-        .add_generic_attributes(["class", "style"])
+        .add_generic_attributes(["class"])
         .clean(&rendered)
         .to_string()
 }

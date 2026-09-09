@@ -972,7 +972,15 @@ pub(super) fn pytest_failure_excerpt(output: &str) -> Option<String> {
 /// Shared human and machine excerpt. A failed process is not evidence that a
 /// named test failed; Pytest startup and passing rows never replace diagnostics.
 pub(super) fn check_failure_excerpt(check: &CheckResult) -> String {
-    let mut excerpt = if !matches!(check.status, CheckStatus::Failed | CheckStatus::Error) {
+    let semgrep = check
+        .name
+        .to_ascii_lowercase()
+        .contains("semgrep")
+        .then(|| semgrep_check_excerpt(&check.output))
+        .flatten();
+    let mut excerpt = if let Some(summary) = semgrep {
+        summary
+    } else if !matches!(check.status, CheckStatus::Failed | CheckStatus::Error) {
         // The checks panel also calls this helper for successful/skipped rows.
         // Preserve their neutral output without inventing a failed process.
         let mut lines: Vec<_> = check.output.lines().rev().take(12).collect();
@@ -1024,6 +1032,70 @@ pub(super) fn check_failure_excerpt(check: &CheckResult) -> String {
         excerpt.push_str(TRUNCATED);
     }
     excerpt
+}
+
+/// Summarize scan findings separately from parser/tool diagnostics. Preserve
+/// the complete JSON and stderr in the raw log linked by the checks panel.
+fn semgrep_check_excerpt(output: &str) -> Option<String> {
+    let start = output.find('{')?;
+    let payload = &output[start..];
+    let mut stream = serde_json::Deserializer::from_str(payload).into_iter::<serde_json::Value>();
+    let json = stream.next()?.ok()?;
+    let results = json.get("results")?.as_array()?;
+    let errors = json
+        .get("errors")
+        .and_then(|value| value.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let scan_errors = errors
+        .iter()
+        .filter(|error| {
+            error
+                .get("level")
+                .and_then(|value| value.as_str())
+                .is_some_and(|level| level.eq_ignore_ascii_case("error"))
+        })
+        .count();
+    let mut summary = format!(
+        "{} findings; {} scan warnings; {} scan errors",
+        results.len(),
+        errors.len() - scan_errors,
+        scan_errors
+    );
+    if !errors.is_empty() {
+        summary.push_str(". Scan diagnostics may limit coverage.");
+    }
+    let compact = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(240)
+            .collect::<String>()
+    };
+    for finding in parsers::semgrep::parse_semgrep_json_output(&payload[..stream.byte_offset()])
+        .iter()
+        .take(3)
+    {
+        summary.push_str(&format!(
+            "\nFinding: {}:{} — {}",
+            finding.file,
+            finding.line,
+            compact(&finding.message)
+        ));
+    }
+    for error in errors.iter().take(3) {
+        let kind = error
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Scan diagnostic");
+        let message = ["message", "long_msg", "short_msg"]
+            .iter()
+            .find_map(|field| error.get(field).and_then(|value| value.as_str()))
+            .unwrap_or(kind);
+        summary.push_str(&format!("\nScan diagnostic ({kind}): {}", compact(message)));
+    }
+    Some(summary)
 }
 
 /// Extract the first file:line reference from check output.
@@ -1361,6 +1433,43 @@ FAILED tests/test_parser.py::test_roundtrip\n\
         assert!(excerpt.starts_with("error[E0001]: invalid value "));
         assert!(excerpt.ends_with("... (truncated; see the full check log)"));
         assert!(excerpt.contains("ą🧪"));
+    }
+
+    #[test]
+    fn semgrep_warning_excerpt_separates_scan_diagnostics_from_findings() {
+        let json = serde_json::json!({
+            "results": [],
+            "errors": [{"type": "PartialParsing", "level": "warn", "message": format!("Could not parse src/ui.js: {}", "ą🧪".repeat(4096))}]
+        });
+        let check = super::CheckResult {
+            name: "Semgrep".into(),
+            status: crate::checks::CheckStatus::Warnings,
+            duration: std::time::Duration::ZERO,
+            output: format!("{json}\npkg_resources is deprecated"),
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.starts_with("0 findings; 1 scan warnings; 0 scan errors"));
+        assert!(excerpt.contains("Scan diagnostic (PartialParsing): Could not parse src/ui.js:"));
+        assert!(!excerpt.contains("pkg_resources"));
+        assert!(!excerpt.contains("\"errors\""));
+        assert!(!excerpt.contains("Finding:"));
+        assert!(excerpt.len() < 2048);
+    }
+
+    #[test]
+    fn semgrep_excerpt_preserves_actual_findings_and_scan_errors() {
+        let output = serde_json::json!({
+            "results": [{"path": "src/api.py", "start": {"line": 7}, "extra": {"severity": "ERROR", "message": "Unsafe eval"}}],
+            "errors": [{"type": "Timeout", "level": "error", "short_msg": "Timed out parsing src/large.py"}]
+        }).to_string();
+        let excerpt = super::semgrep_check_excerpt(&output).unwrap();
+        assert!(excerpt.starts_with("1 findings; 0 scan warnings; 1 scan errors"));
+        assert!(excerpt.contains("Finding: src/api.py:7 — Unsafe eval"));
+        assert!(excerpt.contains("Scan diagnostic (Timeout): Timed out parsing src/large.py"));
+        assert_eq!(super::semgrep_check_excerpt("semgrep unavailable"), None);
+        assert_eq!(super::semgrep_check_excerpt("{invalid json}"), None);
     }
 
     #[test]

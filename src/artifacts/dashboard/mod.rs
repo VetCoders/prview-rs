@@ -935,18 +935,16 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
         }
     }
     if let Some(pct) = ctx.coverage.pct {
-        if pct < 80 {
-            let _ = write!(
-                nav,
-                "<a href=\"#section-coverage\"><span data-i18n=\"nav.coverage\">Coverage</span> <span class=\"nav-badge badge-warn\">{}</span></a>",
-                pct
-            );
+        let badge_class = if pct < 80 {
+            "badge-warn"
         } else {
-            let _ = write!(
-                nav,
-                "<a href=\"#section-coverage\" data-i18n=\"nav.coverage\">Coverage</a>"
-            );
-        }
+            "badge-muted"
+        };
+        let _ = write!(
+            nav,
+            "<a href=\"#section-coverage\"><span data-i18n=\"nav.coverage\">Tests for changed files</span> <span class=\"nav-badge {badge_class}\">{}/{}</span></a>",
+            ctx.coverage.covered_count, ctx.coverage.total_source,
+        );
     }
     if !ctx.breaking.is_empty() {
         let _ = write!(

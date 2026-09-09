@@ -1411,9 +1411,14 @@ pub(super) fn build_checks_section(checks: &[CheckResult], ctx: &DashboardContex
             let open_class = if is_problem { " open" } else { "" };
             let _ = write!(
                 rows,
-                r#"<tr class="check-output{oc}" id="check-output-{idx}"><td colspan="3"><div class="check-output-inner"><pre>{output}</pre><details><summary data-i18n="button.fullCheckOutput">Full check output</summary><pre>{full_output}</pre></details></div></td></tr>"#,
+                r#"<tr class="check-output{oc}" id="check-output-{idx}"><td colspan="3"><div class="check-output-inner {output_size}"><pre>{output}</pre><details><summary data-i18n="button.fullCheckOutput">Full check output</summary><pre>{full_output}</pre></details></div></td></tr>"#,
                 oc = open_class,
                 idx = idx,
+                output_size = if check.output.len() <= 600 && check.output.lines().count() <= 6 {
+                    "check-output-short"
+                } else {
+                    "check-output-long"
+                },
                 output = escape_html(&check_output_excerpt(check)),
                 full_output = escape_html(check.output.trim()),
             );
@@ -1465,9 +1470,16 @@ pub(super) fn build_checks_section(checks: &[CheckResult], ctx: &DashboardContex
             let _ = write!(
                 items,
                 "<span style=\"display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:var(--surface-2);border-radius:var(--radius-sm);font-size:11px;font-family:var(--mono)\">\
-                <span class=\"badge badge-muted\" style=\"font-size:9px\">SKIP</span> {} <span style=\"color:var(--faint)\">— Not executed by this PrView run. Reason: {}. External CI status not included.</span></span>",
+                <span class=\"badge badge-muted\" style=\"font-size:9px\">SKIP</span> {} <span style=\"color:var(--faint)\">— {}</span></span>",
                 escape_html(&sc.name),
-                escape_html(&sc.reason),
+                i18n_template(
+                    "message.skippedCheckDetail",
+                    &format!(
+                        "Not executed by this PrView run. Reason: {}. External CI status not included.",
+                        sc.reason
+                    ),
+                    &[("reason", sc.reason.clone())],
+                ),
             );
         }
         format!(
@@ -3156,9 +3168,11 @@ pub(super) fn build_narrative_section(pr_review_content: &str) -> String {
         r#"<div class="section" id="section-narrative">
     <div class="section-header">
         <span class="section-title" data-i18n="section.narrativeReview">Narrative Review</span>
-        <button id="copy-narrative-btn" class="btn-ghost" data-i18n="button.copyMarkdown">Copy as Markdown</button>
     </div>
-    <div class="card narrative-rendered">{content}</div>
+    <div class="card narrative-rendered">
+        <div class="narrative-toolbar"><button id="copy-narrative-btn" class="btn-ghost" type="button" data-i18n="button.copyMarkdown">Copy as Markdown</button></div>
+        {content}
+    </div>
     <pre class="narrative-content" style="display:none">{raw}</pre>
 </div>"#,
         content = rendered,
@@ -3244,9 +3258,11 @@ pub(super) fn build_artifacts_section(
         <span class="section-title" data-i18n="section.artifactsExplorer">Artifacts Explorer</span>
         <span class="section-count">{files_count}</span>
     </div>
-    <p data-i18n="evidence.lateFiles">Integrity records are finalized after this report. Open their original files.</p>
-    <p><a href="00_summary/MANIFEST.json" download>MANIFEST.json</a> · <a href="00_summary/SANITY.json" download>SANITY.json</a></p>
     <div class="card" style="padding:0;overflow:hidden">
+        <div class="artifact-integrity">
+            <p class="evidence-note" data-i18n="evidence.lateFiles">Integrity records are finalized after this report. Open their original files.</p>
+            <p><a href="00_summary/MANIFEST.json" data-i18n="evidence.manifest">File manifest</a> · <a href="00_summary/SANITY.json" data-i18n="evidence.integrity">Integrity checks</a></p>
+        </div>
         <div style="padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <input type="text" id="artifact-search" class="file-search" placeholder="Search artifacts..." data-i18n-placeholder="placeholder.searchArtifacts" style="max-width:260px" />
             <div style="display:flex;gap:4px;flex-wrap:wrap">{kind_chips}</div>
@@ -3323,13 +3339,25 @@ pub(super) fn build_merge_decision_card(ctx: &DashboardContext) -> String {
     let reason = decision.reason.clone();
     let card_class = decision.state.card_class();
 
+    let readable_caveats = decision
+        .review_caveats
+        .iter()
+        .map(|caveat| {
+            // Structured API evidence stays in the original gate artifacts; the
+            // decision card displays its summary rather than serialized payloads.
+            caveat
+                .split_once(" [api-delta:")
+                .map_or(caveat.as_str(), |(summary, _)| summary)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
     let caveat_html = if has_review_caveats {
         // Amber stays only on the small "Review signals" label marker; the
         // full caveat prose reads as normal (--fg) text, not a warn-colored wall.
         format!(
             r#"<div class="merge-decision-reason merge-policy-line review-signal-full" style="margin-top:8px"><span class="merge-policy-label review-signal-label" data-i18n="message.reviewSignalsPrefix">Review signals</span><span class="merge-policy-value review-signal-prose" data-review-signals="{}">{}</span></div>"#,
-            escape_html(&decision.review_caveats.join(" · ")),
-            escape_html(&decision.review_caveats.join(" · "))
+            escape_html(&readable_caveats),
+            escape_html(&readable_caveats)
         )
     } else {
         String::new()
