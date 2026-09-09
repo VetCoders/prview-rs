@@ -186,6 +186,7 @@ code, pre { font-family: var(--mono); }
     align-items: center;
     gap: 8px;
     min-width: 0;
+    max-width: 100%;
     padding: 6px 10px;
     border-radius: 999px;
     background: rgba(var(--veil),0.04);
@@ -201,6 +202,8 @@ code, pre { font-family: var(--mono); }
 }
 .context-pill code,
 .context-pill a {
+    min-width: 0;
+    overflow-wrap: anywhere;
     color: var(--fg);
     font-family: var(--mono);
     font-size: 12px;
@@ -804,7 +807,7 @@ code, pre { font-family: var(--mono); }
 }
 .commit-item {
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 10px;
     padding: 10px 14px;
     position: relative;
@@ -820,8 +823,8 @@ code, pre { font-family: var(--mono); }
     margin-top: 6px;
     margin-left: -7px;
 }
-.commit-body { display: flex; flex-direction: column; gap: 2px; }
-.commit-msg { font-size: 14px; }
+.commit-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.commit-msg { font-size: 14px; overflow-wrap: anywhere; }
 .commit-meta {
     font-size: 12px;
     color: var(--muted);
@@ -1002,97 +1005,6 @@ code, pre { font-family: var(--mono); }
 .file-row.highlight-flash { animation: flash-highlight 1.5s ease-out; }
 @keyframes flash-highlight { 0% { background: color-mix(in srgb, var(--accent) 30%, transparent); outline: 2px solid var(--accent); } 100% { background: transparent; outline-color: transparent; } }
 
-/* ---- DIFF MODAL ---- */
-.diff-modal-overlay {
-    display: none;
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.75);
-    z-index: 1000;
-    justify-content: center;
-    align-items: center;
-    padding: 24px;
-}
-.diff-modal-overlay.open { display: flex; }
-.diff-modal {
-    background: rgba(15,15,15,0.95);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
-    border: 1px solid var(--glass-border);
-    border-radius: var(--radius);
-    box-shadow: 0 20px 60px rgba(0,0,0,0.8);
-    width: 90vw;
-    max-width: 1200px;
-    max-height: 85vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-.diff-modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--line);
-    gap: 12px;
-    flex-wrap: wrap;
-}
-.diff-modal-title {
-    font-family: var(--mono);
-    font-size: 13px;
-    color: var(--accent);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-}
-.diff-modal-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-}
-.diff-modal-search {
-    padding: 4px 8px;
-    background: var(--bg);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-    color: var(--fg);
-    font-size: 12px;
-    font-family: var(--mono);
-    outline: none;
-    width: 200px;
-}
-.diff-modal-search:focus { border-color: var(--accent); }
-.diff-modal-close {
-    background: var(--surface-2);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 4px 10px;
-    font-size: 13px;
-}
-.diff-modal-close:hover { border-color: var(--accent); }
-.diff-modal-body {
-    overflow: auto;
-    flex: 1;
-    padding: 0;
-}
-.diff-modal-body pre {
-    font-family: var(--mono);
-    font-size: 12px;
-    line-height: 1.5;
-    margin: 0;
-    padding: 12px 16px;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
-    word-break: break-word;
-}
-.diff-line-add { background: rgba(46,160,67,0.15); color: var(--pass); }
-.diff-line-del { background: rgba(248,81,73,0.15); color: var(--block); }
-.diff-line-hunk { color: var(--accent); font-weight: 600; }
-.diff-line-match { background: rgba(210,153,34,0.25); }
-
 /* ---- BATCH LINKS ---- */
 .batch-links {
     display: flex;
@@ -1198,10 +1110,11 @@ code, pre { font-family: var(--mono); }
 /* ---- BLOCKERS SECTION ---- */
 .blockers-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
     gap: 16px;
 }
 .blocker-card {
+    min-width: 0;
     background: var(--glass-bg);
     backdrop-filter: blur(var(--glass-blur));
     -webkit-backdrop-filter: blur(var(--glass-blur));
@@ -1227,6 +1140,12 @@ code, pre { font-family: var(--mono); }
     color: var(--muted);
     line-height: 1.5;
     margin-bottom: 8px;
+    max-width: 100%;
+    max-height: 18rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overscroll-behavior: contain;
 }
 .blocker-card-body code {
     font-family: var(--mono);
@@ -1266,20 +1185,21 @@ code, pre { font-family: var(--mono); }
 }
 .time-budget-row {
     display: grid;
-    grid-template-columns: minmax(100px, 180px) minmax(60px, 1fr) minmax(110px, auto);
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 3fr) minmax(0, 1fr);
     align-items: center;
     gap: 12px;
     font-size: 13px;
 }
 .time-budget-name {
     font-family: var(--mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 6px;
 }
+.time-budget-name .badge { flex-shrink: 0; }
 .time-budget-bar-wrap {
     height: 18px;
     background: var(--bg);
@@ -1291,13 +1211,13 @@ code, pre { font-family: var(--mono); }
     height: 100%;
     border-radius: 4px;
     transition: width 0.4s ease;
-    background: var(--accent-dim);
+    background: var(--muted);
 }
 .time-budget-bar.tb-slowest {
-    background: rgba(var(--veil),0.30);
+    background: var(--accent);
 }
 .time-budget-bar.tb-cached {
-    background: var(--surface-2);
+    background: var(--faint);
 }
 .time-budget-duration {
     text-align: right;
@@ -1305,6 +1225,8 @@ code, pre { font-family: var(--mono); }
     font-family: var(--mono);
     font-size: 12px;
     display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: flex-end;
     gap: 6px;
@@ -1983,24 +1905,35 @@ body.author-mode .section-noise  { display: none; }
 .reading-steps, .evidence-shortcuts { display: flex; flex-wrap: wrap; gap: 10px 18px; }
 .reading-path a { color: var(--accent); }
 .evidence-shortcuts { margin-top: 12px; font-size: 12px; }
-.evidence-dialog { width: min(1100px, 94vw); max-height: 90vh; padding: 20px; border: 1px solid var(--line); border-radius: 14px; color: var(--fg); background: var(--surface); }
+.evidence-dialog { position: fixed; inset: 0; margin: auto; width: min(1100px, calc(100vw - 32px)); height: min(820px, calc(100dvh - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: hidden; padding: 20px; border: 1px solid var(--line-strong); border-radius: 14px; color: var(--fg); background: var(--bg); box-shadow: var(--glass-shadow); }
+.evidence-dialog[open] { display: flex; flex-direction: column; gap: 12px; }
 .evidence-dialog::backdrop { background: #000a; }
 .evidence-dialog header, .evidence-tools { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.evidence-dialog header > div { min-width: 0; flex: 1; }
+.evidence-dialog header button { flex-shrink: 0; }
 .evidence-dialog h2 { font-size: 16px; overflow-wrap: anywhere; }
 .evidence-dialog p { color: var(--muted); overflow-wrap: anywhere; }
 .evidence-tools { justify-content: flex-start; margin-bottom: 14px; }
+.evidence-tools input { flex: 1 1 180px; min-width: 0; max-width: 100%; }
 .evidence-dialog button, .evidence-tools input { color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
 .evidence-dialog a { color: var(--accent); }
-#evidence-body { overflow: auto; max-height: 65vh; }
+#evidence-body { overflow: auto; flex: 1; min-height: 0; min-width: 0; overscroll-behavior: contain; }
 #evidence-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .evidence-line { display: block; counter-increment: evidence-line; }
 .evidence-line::before { content: attr(data-line); display: inline-block; width: 5ch; margin-right: 12px; color: var(--muted); user-select: none; }
 .evidence-match, .evidence-selected { background: rgba(220,180,50,.2); }
+mark.evidence-match { color: inherit; padding: 0; outline: 1px solid var(--warn); }
+#evidence-match-count { color: var(--muted); font-size: 12px; }
 .card, .section, .main-content, .check-detail { min-width: 0; }
 .card pre, .narrative-rendered pre, .check-output, .check-command, .blocker-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
 .narrative-rendered, .checks-table td, .header-stats { overflow-wrap: anywhere; }
 .narrative-rendered table { display: block; max-width: 100%; overflow-x: auto; }
-@media (max-width: 700px) { .time-budget-row { grid-template-columns: minmax(90px, 1fr) minmax(60px, 1fr) minmax(75px, 1fr); } .evidence-dialog { padding: 12px; } }
+@media (max-width: 700px) {
+    .time-budget-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; }
+    .time-budget-bar-wrap { grid-column: 1 / -1; grid-row: 2; }
+    .time-budget-duration { grid-column: 2; grid-row: 1; }
+    .evidence-dialog { padding: 12px; }
+}
 
 /* === Dashboard v2: Hero stats row === */
 .header-stats {
@@ -2145,10 +2078,10 @@ const JS_SUFFIX: &str = r##"
     }
 
     function translateSeverityValue(value) {
-        if (currentLang !== 'pl') return value;
         var normalized = (value || '').trim().toUpperCase();
+        if (normalized === 'OK') return t('label.minimalStructural');
+        if (currentLang !== 'pl') return value;
         var map = {
-            'OK': 'OK',
             'LOW': 'NISKIE',
             'MED': 'ŚREDNIE',
             'HIGH': 'WYSOKIE',
@@ -2500,12 +2433,18 @@ const JS_SUFFIX: &str = r##"
         if (current) current.link.classList.add('active');
     }
 
+    function updateSectionAddress(id) {
+        // Offline reports navigate the current DOM without asking a file-origin
+        // frame to load or replace a local URL. HTTP reports retain shareable hashes.
+        if (window.location.protocol !== 'file:') history.replaceState(null, '', '#' + id);
+    }
+
     function scrollToSection(id, behavior) {
         var target = document.getElementById(id);
         if (!target) return;
         expandForTarget(target);
         target.scrollIntoView({ behavior: behavior || 'smooth', block: 'start' });
-        history.replaceState(null, '', '#' + id);
+        updateSectionAddress(id);
         updateActiveNav();
     }
 
@@ -2526,7 +2465,7 @@ const JS_SUFFIX: &str = r##"
         }
     }
 
-    navLinks.forEach(function(link) {
+    document.querySelectorAll('a[href^="#"]:not([href^="#file-"])').forEach(function(link) {
         link.addEventListener('click', function(e) {
             e.preventDefault();
             scrollToSection(this.getAttribute('href').slice(1), 'smooth');
@@ -2549,154 +2488,13 @@ const JS_SUFFIX: &str = r##"
                     if (chevron) chevron.classList.add('open');
                 }
                 el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                history.replaceState(null, '', '#' + id);
+                updateSectionAddress(id);
                 // Flash highlight animation
                 el.classList.add('highlight-flash');
                 setTimeout(function() { el.classList.remove('highlight-flash'); }, 1500);
             }
         });
     });
-
-    // -- Diff modal --
-    var diffOverlay = document.getElementById('diff-modal-overlay');
-    var diffTitle = document.getElementById('diff-modal-title');
-    var diffBody = document.getElementById('diff-modal-body');
-    var diffSearch = document.getElementById('diff-modal-search');
-    var diffCopyPath = document.getElementById('diff-copy-path');
-
-    function closeDiffModal() {
-        if (diffOverlay) diffOverlay.classList.remove('open');
-    }
-
-    function highlightDiffLines(text) {
-        var lines = text.split('\n');
-        var html = '';
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            // Escape HTML entities
-            var escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            if (line.indexOf('@@') === 0) {
-                html += '<span class="diff-line-hunk">' + escaped + '</span>\n';
-            } else if (line.indexOf('+') === 0 && line.indexOf('+++') !== 0) {
-                html += '<span class="diff-line-add">' + escaped + '</span>\n';
-            } else if (line.indexOf('-') === 0 && line.indexOf('---') !== 0) {
-                html += '<span class="diff-line-del">' + escaped + '</span>\n';
-            } else {
-                html += escaped + '\n';
-            }
-        }
-        return html;
-    }
-
-    function openDiffModal(path, patchPath) {
-        if (!diffOverlay || !diffBody || !diffTitle) return;
-        diffTitle.textContent = path;
-        diffBody.innerHTML = '<pre style="color:var(--faint);padding:24px;text-align:center">' + t('misc.loading') + '</pre>';
-        diffOverlay.classList.add('open');
-
-        if (patchPath) {
-            // Progressive enhancement: try fetch for modal, fallback to direct link (file:// CORS safe)
-            fetch(patchPath).then(function(r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.text();
-            }).then(function(text) {
-                diffBody.innerHTML = '<pre>' + highlightDiffLines(text) + '</pre>';
-            }).catch(function() {
-                // fetch failed (file:// CORS, network error) — fallback to direct navigation
-                closeDiffModal();
-                window.open(patchPath, '_blank');
-            });
-        } else {
-            diffBody.innerHTML = '<pre style="color:var(--faint);padding:24px">' + t('message.noPerFilePatch') + ' <a href="10_diff/full.patch" style="color:var(--accent)">' + t('button.viewFullPatch') + '</a></pre>';
-        }
-    }
-
-    // File row click -> open diff (modal if fetch works, direct link otherwise)
-    document.querySelectorAll('.file-row').forEach(function(row) {
-        row.style.cursor = 'pointer';
-        row.addEventListener('click', function(e) {
-            // Don't trigger if user clicked an anchor link
-            if (e.target.tagName === 'A') return;
-            var path = this.dataset.path || '';
-            var patchPath = this.dataset.patchPath || '';
-            if (patchPath) {
-                openDiffModal(path, patchPath);
-            } else {
-                // No per-file patch — open full.patch directly
-                window.open('10_diff/full.patch', '_blank');
-            }
-        });
-    });
-
-    if (diffOverlay) {
-        diffOverlay.addEventListener('click', function(e) {
-            if (e.target === this) closeDiffModal();
-        });
-    }
-
-    var closeBtn = document.getElementById('diff-modal-close');
-    if (closeBtn) closeBtn.addEventListener('click', closeDiffModal);
-
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') closeDiffModal();
-    });
-
-    // Diff modal: copy path button
-    if (diffCopyPath) {
-        diffCopyPath.addEventListener('click', function() {
-            var path = diffTitle ? diffTitle.textContent : '';
-            if (navigator.clipboard && path) {
-                navigator.clipboard.writeText(path).then(function() {
-                    diffCopyPath.textContent = t('button.copied');
-                    setTimeout(function() { diffCopyPath.textContent = t('button.copyPath'); }, 1500);
-                }).catch(function() {});
-            }
-        });
-    }
-
-    // Diff modal: search in diff (uses TreeWalker on text nodes to avoid
-    // corrupting HTML entities like &amp; when the search term overlaps them)
-    if (diffSearch) {
-        var diffSearchTimeout;
-        diffSearch.addEventListener('input', function() {
-            clearTimeout(diffSearchTimeout);
-            var q = this.value;
-            diffSearchTimeout = setTimeout(function() {
-                if (!diffBody) return;
-                var pre = diffBody.querySelector('pre');
-                if (!pre) return;
-                // Remove existing highlights (unwrap <span class="diff-line-match">)
-                pre.querySelectorAll('.diff-line-match').forEach(function(el) {
-                    var parent = el.parentNode;
-                    while (el.firstChild) parent.insertBefore(el.firstChild, el);
-                    parent.removeChild(el);
-                    parent.normalize();
-                });
-                if (!q) return;
-                var escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                var regex = new RegExp(escaped, 'gi');
-                // Walk only text nodes — never touch innerHTML
-                var walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT, null, false);
-                var textNodes = [];
-                while (walker.nextNode()) textNodes.push(walker.currentNode);
-                textNodes.forEach(function(node) {
-                    var match, last = 0, frag = document.createDocumentFragment(), txt = node.nodeValue;
-                    regex.lastIndex = 0;
-                    while ((match = regex.exec(txt)) !== null) {
-                        if (match.index > last) frag.appendChild(document.createTextNode(txt.slice(last, match.index)));
-                        var mark = document.createElement('span');
-                        mark.className = 'diff-line-match';
-                        mark.textContent = match[0];
-                        frag.appendChild(mark);
-                        last = regex.lastIndex;
-                    }
-                    if (last === 0) return; // no matches in this node
-                    if (last < txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
-                    node.parentNode.replaceChild(frag, node);
-                });
-            }, 200);
-        });
-    }
 
     // -- Narrative copy button --
     var narrativeCopyBtn = document.getElementById('copy-narrative-btn');

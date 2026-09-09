@@ -2368,7 +2368,11 @@ fn generate_failures_summary(dir: &Path, checks: &[CheckResult]) -> Result<()> {
 
         if let Some(ref prov) = check.provenance {
             md.push_str(&format!("- **Command:** `{}`\n", prov.command));
-            md.push_str(&format!("- **Exit code:** {:?}\n", prov.exit_code));
+            let exit_code = prov
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "Not recorded".to_string());
+            md.push_str(&format!("- **Exit code:** {exit_code}\n"));
             if !prov.hard_fail_signatures.is_empty() {
                 md.push_str(&format!(
                     "- **Hard fail signatures:** {}\n",
@@ -2382,10 +2386,10 @@ fn generate_failures_summary(dir: &Path, checks: &[CheckResult]) -> Result<()> {
             check_id_from_name(&check.name)
         ));
 
-        // Root cause analysis
+        // Diagnostic evidence does not by itself establish a root cause.
         if let Some(rc) = extract_root_cause(check) {
-            md.push_str("\n### Root Cause\n\n");
-            md.push_str(&format!("- **Cause:** {}\n", rc.cause));
+            md.push_str("\n### Failure details\n\n");
+            md.push_str(&format!("- **Summary:** {}\n", rc.cause));
             if !rc.evidence.is_empty() {
                 md.push_str(&format!("- **Evidence:** `{}`\n", rc.evidence));
             }
@@ -2425,15 +2429,15 @@ fn generate_failures_summary(dir: &Path, checks: &[CheckResult]) -> Result<()> {
                 }
             }
             md.push('\n');
-        } else {
-            // First 12 lines of output as preview for non-structured failures
-            let preview: Vec<&str> = check.output.lines().take(12).collect();
+        } else if !check.name.to_ascii_lowercase().contains("pytest") {
+            // Use the same evidence as the dashboard and machine report;
+            // startup and successful test progress are not failure details.
+            // Pytest's structured evidence (or missing-diagnostic explanation)
+            // is already included above, so it needs no second output preview.
+            let preview = findings::check_failure_excerpt(check);
             if !preview.is_empty() {
                 md.push_str("\n```\n");
-                md.push_str(&preview.join("\n"));
-                if check.output.lines().count() > 12 {
-                    md.push_str("\n... (truncated, see full log)");
-                }
+                md.push_str(&preview);
                 md.push_str("\n```\n");
             }
         }

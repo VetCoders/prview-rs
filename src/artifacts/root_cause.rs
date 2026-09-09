@@ -20,6 +20,13 @@ pub(crate) fn extract_root_cause(check: &CheckResult) -> Option<RootCause> {
         return Some(root_cause);
     }
 
+    // Pytest progress and parameterized test names can contain words such as
+    // "failed", "error", or "timed out" even when that test passed. Its
+    // structured diagnostics must take precedence over generic signatures.
+    if name_lower.contains("pytest") {
+        return extract_pytest_root_cause(check);
+    }
+
     // Timeout detection (universal)
     if let Some(ref prov) = check.provenance
         && (prov.exit_code == Some(-1)
@@ -175,11 +182,6 @@ pub(crate) fn extract_root_cause(check: &CheckResult) -> Option<RootCause> {
             evidence: error_line.unwrap_or("").to_string(),
             hint: "Fix type annotations or add type: ignore comments".into(),
         });
-    }
-
-    // Pytest (Python)
-    if name_lower.contains("pytest") {
-        return extract_pytest_root_cause(output);
     }
 
     // Fallback: first non-empty line
@@ -363,24 +365,54 @@ pub(crate) fn extract_vitest_root_cause(output: &str) -> Option<RootCause> {
     })
 }
 
-pub(crate) fn extract_pytest_root_cause(output: &str) -> Option<RootCause> {
+pub(crate) fn extract_pytest_root_cause(check: &CheckResult) -> Option<RootCause> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    if !matches!(check.status, CheckStatus::Failed | CheckStatus::Error) {
+        return None;
+    }
+
+    static FAILURE_COUNT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:^|,\s*)[1-9][0-9]* (?:failed|errors?)\b")
+            .expect("pytest failure summary regex")
+    });
+    let output = &check.output;
+    let excerpt = findings::pytest_failure_excerpt(output);
     let summary = output
         .lines()
         .rev()
         .map(str::trim)
         .find(|line| {
             line.starts_with('=')
-                && (line.contains(" failed") || line.contains(" error"))
-                && line.contains(" in ")
+                && line.ends_with('=')
+                && FAILURE_COUNT.is_match(line.trim_matches('=').trim())
         })
         .map(|line| line.trim_matches('=').trim());
 
+    if excerpt.is_none() && summary.is_none() {
+        let exit = check
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.exit_code)
+            .map(|code| format!(" (exit code {code})"))
+            .unwrap_or_default();
+        return Some(RootCause {
+            cause: format!(
+                "Pytest did not complete successfully{exit}. No failed-test diagnostic was captured; the cause is unknown."
+            ),
+            evidence: String::new(),
+            hint: "Inspect the full Pytest log and runner details to determine why the process stopped. The exit code alone does not establish the cause."
+                .into(),
+        });
+    }
+
     Some(RootCause {
         cause: summary
-            .unwrap_or("Pytest did not complete successfully")
+            .unwrap_or("Pytest reported test failure or error diagnostics")
             .to_string(),
-        evidence: findings::pytest_failure_excerpt(output).unwrap_or_default(),
-        hint: "Inspect the reported test failure and its inputs in the full Pytest log before choosing a fix."
+        evidence: excerpt.unwrap_or_default(),
+        hint: "Inspect the captured test diagnostics and their inputs in the full Pytest log before choosing a fix."
             .into(),
     })
 }
@@ -389,6 +421,79 @@ pub(crate) fn extract_pytest_root_cause(output: &str) -> Option<RootCause> {
 mod tests {
     use super::*;
 
+    fn interrupted_pytest() -> CheckResult {
+        CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::from_secs(111),
+            output: "===== test session starts =====\n\
+                rootdir: /tmp/project\n\
+                collecting ... collected 3293 items\n\
+                tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+                tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n\
+                tests/test_parser.py::test_next_case "
+                .to_string(),
+            cached: false,
+            provenance: Some(crate::checks::CheckProvenance {
+                command: "uv run pytest -v".to_string(),
+                tool_version: None,
+                cwd: "/tmp/project".to_string(),
+                target_sha: None,
+                tree_state: None,
+                exit_code: Some(137),
+                started_at: String::new(),
+                finished_at: String::new(),
+                hard_fail_signatures: vec![],
+                cache_key: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn pytest_interrupted_process_does_not_invent_a_failed_test() {
+        let check = interrupted_pytest();
+        let diagnostic = extract_root_cause(&check).expect("process diagnostic");
+        assert!(diagnostic.cause.contains("exit code 137"));
+        assert!(
+            diagnostic
+                .cause
+                .contains("No failed-test diagnostic was captured")
+        );
+        assert!(diagnostic.cause.contains("cause is unknown"));
+        assert!(diagnostic.evidence.is_empty());
+        assert!(!diagnostic.hint.contains("reported test failure"));
+        assert!(!diagnostic.cause.contains("SIGKILL"));
+        assert!(!diagnostic.cause.contains("memory"));
+        assert_eq!(findings::check_failure_excerpt(&check), diagnostic.cause);
+    }
+
+    #[test]
+    fn pytest_failure_summary_uses_diagnostics_and_plain_exit_code() {
+        let tmp = tempfile::tempdir().expect("summary directory");
+        crate::artifacts::generate_failures_summary(tmp.path(), &[interrupted_pytest()])
+            .expect("failure summary");
+        let summary = std::fs::read_to_string(tmp.path().join("FAILURES_SUMMARY.md")).unwrap();
+        assert!(summary.contains("**Status:** failed"));
+        assert!(summary.contains("**Exit code:** 137\n"));
+        assert!(summary.contains("### Failure details"));
+        assert!(summary.contains("cause is unknown"));
+        for misleading in [
+            "Some(137)",
+            "Root Cause",
+            "PASSED",
+            "test_failed_setup_is_reported",
+            "test_error[",
+            "test session starts",
+            "rootdir:",
+            "reported test failure and its inputs",
+        ] {
+            assert!(
+                !summary.contains(misleading),
+                "unexpected {misleading}: {summary}"
+            );
+        }
+    }
+
     #[test]
     fn pytest_dispatch_reports_python_evidence_and_final_summary() {
         let check = CheckResult {
@@ -396,6 +501,7 @@ mod tests {
             status: crate::checks::CheckStatus::Failed,
             duration: std::time::Duration::ZERO,
             output: "===== test session starts =====\n\
+                tests/test_parser.py::test_failed_input_is_handled PASSED\n\
                 tests/test_parser.py::test_roundtrip FAILED\n\
                 ===== FAILURES =====\n\
                 _____ test_roundtrip _____\n\
@@ -419,5 +525,12 @@ mod tests {
         assert!(!diagnostic.evidence.contains("test session starts"));
         assert!(!diagnostic.hint.contains("cargo"));
         assert!(!diagnostic.hint.contains("Run test suite"));
+        let tmp = tempfile::tempdir().expect("summary directory");
+        crate::artifacts::generate_failures_summary(tmp.path(), &[check]).expect("failure summary");
+        let summary = std::fs::read_to_string(tmp.path().join("FAILURES_SUMMARY.md")).unwrap();
+        assert!(summary.contains("tests/test_parser.py:42"));
+        assert!(summary.contains("AssertionError: unexpected message"));
+        assert!(!summary.contains("PASSED"));
+        assert!(!summary.contains("test session starts"));
     }
 }

@@ -514,10 +514,7 @@ pub(super) fn generate_inline_findings(
                         level: "note",
                         check_name: check.name.clone(),
                         check_id: check_id.clone(),
-                        message: pytest_failure_excerpt(&check.output).unwrap_or_else(|| {
-                            "Pytest did not complete successfully. See the full check log for details."
-                                .to_string()
-                        }),
+                        message: check_failure_excerpt(check),
                         in_diff: None,
                     });
                 } else {
@@ -854,7 +851,7 @@ pub(super) fn is_pathish_candidate(candidate: &str) -> bool {
 
 /// Extract located Pytest diagnostics only from its failure/error sections.
 /// A traceback location says where the failure was reported, not what caused it.
-fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
+pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
     use regex::Regex;
     use std::sync::LazyLock;
 
@@ -925,6 +922,10 @@ fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
 /// A bounded diagnostic excerpt for human-facing test output. Startup and
 /// per-test progress are deliberately excluded; the complete log remains evidence.
 pub(super) fn pytest_failure_excerpt(output: &str) -> Option<String> {
+    static FAILED_PROGRESS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^\S+\.py::.+\s(?:FAILED|ERROR)(?:\s+\[[^\]]+\])?\s*$")
+            .expect("pytest failed progress regex")
+    });
     let parsed = parse_pytest_failures(output);
     if !parsed.is_empty() {
         return Some(
@@ -939,10 +940,90 @@ pub(super) fn pytest_failure_excerpt(output: &str) -> Option<String> {
     let summary: Vec<_> = output
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with("FAILED ") || line.starts_with("ERROR "))
+        .filter(|line| {
+            line.starts_with("FAILED ")
+                || line.starts_with("ERROR ")
+                || FAILED_PROGRESS.is_match(line)
+        })
         .take(3)
         .collect();
-    (!summary.is_empty()).then(|| summary.join("\n"))
+    if !summary.is_empty() {
+        return Some(summary.join("\n"));
+    }
+
+    // Pytest can capture exception details without a terminal path:line (for
+    // example a collection error or an abbreviated traceback). Keep that real
+    // diagnostic as unlocated evidence rather than replacing it with startup.
+    let mut in_failures = false;
+    let mut traceback = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('=') && trimmed.ends_with('=') {
+            in_failures = matches!(trimmed.trim_matches('=').trim(), "FAILURES" | "ERRORS");
+            continue;
+        }
+        if in_failures && trimmed.starts_with("E ") && traceback.len() < 6 {
+            traceback.push(trimmed.to_string());
+        }
+    }
+    (!traceback.is_empty()).then(|| traceback.join("\n"))
+}
+
+/// Shared human and machine excerpt. A failed process is not evidence that a
+/// named test failed; Pytest startup and passing rows never replace diagnostics.
+pub(super) fn check_failure_excerpt(check: &CheckResult) -> String {
+    let mut excerpt = if !matches!(check.status, CheckStatus::Failed | CheckStatus::Error) {
+        // The checks panel also calls this helper for successful/skipped rows.
+        // Preserve their neutral output without inventing a failed process.
+        let mut lines: Vec<_> = check.output.lines().rev().take(12).collect();
+        lines.reverse();
+        lines.join("\n")
+    } else if check.name.to_ascii_lowercase().contains("pytest") {
+        super::root_cause::extract_pytest_root_cause(check)
+            .map(|diagnostic| {
+                if diagnostic.evidence.is_empty() {
+                    diagnostic.cause
+                } else {
+                    diagnostic.evidence
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        let lines: Vec<_> = check
+            .output
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !(trimmed.starts_with("test ") && trimmed.ends_with(" ... ok")
+                    || trimmed.contains(".py::")
+                        && trimmed.split_whitespace().any(|part| part == "PASSED"))
+            })
+            .collect();
+        let failure = lines.iter().position(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("error:")
+                || lower.contains("error[")
+                || lower.contains("failed")
+                || lower.contains("panicked at")
+                || lower.contains("caused by:")
+        });
+        let start = failure.unwrap_or_else(|| lines.len().saturating_sub(12));
+        lines
+            .iter()
+            .skip(start)
+            .take(12)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    const MAX_EXCERPT_BYTES: usize = 8 * 1024;
+    const TRUNCATED: &str = "\n... (truncated; see the full check log)";
+    if excerpt.len() > MAX_EXCERPT_BYTES {
+        let end = excerpt.floor_char_boundary(MAX_EXCERPT_BYTES - TRUNCATED.len());
+        excerpt.truncate(end);
+        excerpt.push_str(TRUNCATED);
+    }
+    excerpt
 }
 
 /// Extract the first file:line reference from check output.
@@ -1164,6 +1245,122 @@ FAILED tests/test_parser.py::test_roundtrip\n\
         assert_eq!(findings[1].line, 34);
         assert!(findings[1].message.contains("second failure"));
         assert!(!findings[1].message.contains("first failure"));
+    }
+
+    #[test]
+    fn pytest_aborted_progress_is_not_an_inline_finding() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "===== test session starts =====\n\
+                plugins/helper.py:19: loaded\n\
+                tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+                tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n"
+                .to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        assert_eq!(super::pytest_failure_excerpt(&checks[0].output), None);
+        let summary = super::generate_inline_findings(tmp.path(), &checks, &[], None, None)
+            .expect("findings");
+        assert_eq!(summary.findings_count, 0);
+        let note = &summary.dashboard_findings[0];
+        assert_eq!(note.level, "note");
+        assert_eq!(note.file, None);
+        assert_eq!(note.line, None);
+        assert!(note.message.contains("cause is unknown"));
+        assert!(!note.message.contains("PASSED"));
+        assert!(!tmp.path().join("INLINE_FINDINGS.sarif").exists());
+    }
+
+    #[test]
+    fn pytest_unlocated_exception_remains_diagnostic_evidence() {
+        let output = "===== ERRORS =====\n\
+            _____ ERROR collecting tests/test_import.py _____\n\
+            E   ImportError: cannot import name 'missing'\n";
+        assert!(super::parse_pytest_failures(output).is_empty());
+        let excerpt = super::pytest_failure_excerpt(output).expect("exception evidence");
+        assert!(excerpt.contains("ImportError: cannot import name 'missing'"));
+    }
+
+    #[test]
+    fn pytest_progress_requires_an_actual_failed_status() {
+        let passed = "tests/test_parser.py::test_error[FAILED input] PASSED [ 25%]";
+        assert_eq!(super::pytest_failure_excerpt(passed), None);
+        let failed = "tests/test_parser.py::test_real_failure FAILED [ 26%]";
+        let output = format!("{passed}\n{failed}");
+        assert!(super::parse_pytest_failures(&output).is_empty());
+        assert_eq!(
+            super::pytest_failure_excerpt(&output).as_deref(),
+            Some(failed)
+        );
+    }
+
+    #[test]
+    fn shared_failure_excerpt_skips_passing_names_and_keeps_rust_panic_location() {
+        let check = super::CheckResult {
+            name: "Cargo test".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "Compiling fixture\n\
+                test test_failed_setup_is_reported ... ok\n\
+                test test_error ... ok\n\
+                thread 'tests::real_failure' panicked at src/lib.rs:42:5:\n\
+                assertion failed: false\n\
+                stack backtrace:\n\
+                0: fixture::real_failure\n"
+                .to_string(),
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.contains("src/lib.rs:42:5"));
+        assert!(excerpt.contains("stack backtrace:"));
+        assert!(!excerpt.contains(" ... ok"));
+        assert!(!excerpt.contains("Compiling fixture"));
+    }
+
+    #[test]
+    fn pytest_nonfailure_excerpt_never_invents_noncompletion() {
+        for status in [
+            crate::checks::CheckStatus::Passed,
+            crate::checks::CheckStatus::Skipped,
+            crate::checks::CheckStatus::Warnings,
+        ] {
+            let check = super::CheckResult {
+                name: "Pytest".to_string(),
+                status,
+                duration: std::time::Duration::ZERO,
+                output: "tests/test_parser.py::test_error PASSED\n===== 1 passed in 0.1s ====="
+                    .to_string(),
+                cached: false,
+                provenance: None,
+            };
+            let excerpt = super::check_failure_excerpt(&check);
+            assert!(excerpt.contains("1 passed in 0.1s"));
+            assert!(!excerpt.contains("did not complete"));
+            assert!(!excerpt.contains("cause is unknown"));
+            assert!(super::super::root_cause::extract_pytest_root_cause(&check).is_none());
+        }
+    }
+
+    #[test]
+    fn shared_failure_excerpt_bounds_a_huge_unicode_line() {
+        let check = super::CheckResult {
+            name: "Cargo check".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: format!("error[E0001]: invalid value {}", "ą🧪".repeat(4096)),
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.len() <= 8 * 1024);
+        assert!(excerpt.starts_with("error[E0001]: invalid value "));
+        assert!(excerpt.ends_with("... (truncated; see the full check log)"));
+        assert!(excerpt.contains("ą🧪"));
     }
 
     #[test]

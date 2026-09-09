@@ -23,24 +23,7 @@ fn structural_scope_note() -> &'static str {
 }
 
 fn check_output_excerpt(check: &CheckResult) -> String {
-    if check.name.to_ascii_lowercase().contains("pytest")
-        && let Some(excerpt) = super::super::findings::pytest_failure_excerpt(&check.output)
-    {
-        return excerpt;
-    }
-    let lines: Vec<_> = check.output.lines().collect();
-    let failure = lines.iter().position(|line| {
-        let lower = line.to_ascii_lowercase();
-        lower.contains("error:") || lower.contains("failed") || lower.contains("caused by:")
-    });
-    let start = failure.unwrap_or_else(|| lines.len().saturating_sub(12));
-    lines
-        .iter()
-        .skip(start)
-        .take(12)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n")
+    super::super::findings::check_failure_excerpt(check)
 }
 
 pub(super) fn build_files_summary_widget(diff: Option<&Diff>) -> String {
@@ -281,12 +264,6 @@ pub(super) fn build_header(
         format!(
             r#"<span class="badge badge-success">{}</span>"#,
             i18n_template("badge.qualityPass", "Quality: PASS", &[])
-        )
-    } else if ctx.policy_allow_merge {
-        format!(
-            r#"<span class="badge badge-warning" title="{} check(s) failed">{}</span>"#,
-            ctx.quality_failures.len(),
-            i18n_template("badge.qualityFail", "Quality: FAIL", &[])
         )
     } else {
         format!(
@@ -577,17 +554,24 @@ pub(super) fn build_delta_section(ctx: &DashboardContext, checks: &[CheckResult]
 
     // Quality pass status change
     {
-        let (label, class) = match (prev.quality_pass_before, ctx.quality_pass) {
-            (false, true) => ("FAIL&#x2192;PASS", "delta-better"),
-            (true, false) => ("PASS&#x2192;FAIL", "delta-worse"),
-            (true, true) => ("PASS&#x2192;PASS", "delta-same"),
-            (false, false) => ("FAIL&#x2192;FAIL", "delta-same"),
+        let class = match (prev.quality_pass_before, ctx.quality_pass) {
+            (false, true) => "delta-better",
+            (true, false) => "delta-worse",
+            _ => "delta-same",
+        };
+        let state = |passed| {
+            if passed {
+                r#"<span class="green">PASS</span>"#
+            } else {
+                r#"<span class="red">FAIL</span>"#
+            }
         };
         let _ = write!(
             badges,
-            r#"<span class="delta-badge {cls}"><span class="delta-label" data-i18n="label.quality">Quality</span> {label}</span>"#,
+            r#"<span class="delta-badge {cls}"><span class="delta-label" data-i18n="label.quality">Quality</span> {before}&#x2192;{after}</span>"#,
             cls = class,
-            label = label,
+            before = state(prev.quality_pass_before),
+            after = state(ctx.quality_pass),
         );
     }
 
@@ -1238,6 +1222,11 @@ pub(super) fn build_regression_score_widget(
 
     let score = reg.score.score;
     let severity_str = reg.score.severity.as_str();
+    let severity_label = if reg.score.severity == crate::regression::score::Severity::OK {
+        "MINIMAL"
+    } else {
+        severity_str
+    };
     let severity_class = match reg.score.severity {
         crate::regression::score::Severity::OK => "severity-ok",
         crate::regression::score::Severity::LOW => "severity-low",
@@ -1253,13 +1242,14 @@ pub(super) fn build_regression_score_widget(
     <div class=\"regression-widget-header\">\
         <span style=\"font-size:15px;font-weight:600\" data-i18n=\"section.regression\">Regression</span>\
         <div>\
-            <span class=\"severity-badge {sev_cls}\" data-regression-severity=\"{sev}\">{sev}</span>\
+            <span class=\"severity-badge {sev_cls}\" data-regression-severity=\"{sev}\">{sev_label}</span>\
             <span style=\"font-family:var(--mono);font-size:22px;font-weight:700;margin-left:10px\">{score}</span>\
             <span style=\"color:var(--faint);font-size:13px\">/100</span>\
         </div>\
     </div>",
         sev_cls = severity_class,
         sev = escape_html(severity_str),
+        sev_label = escape_html(severity_label),
         score = score,
     );
 

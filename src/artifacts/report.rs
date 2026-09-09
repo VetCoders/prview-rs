@@ -351,6 +351,35 @@ fn finding_stats_from_output(output: &str) -> Option<FindingStats> {
     }
 }
 
+/// Count the same located diagnostics that feed Pytest SARIF. Progress paths,
+/// parameter values and an interrupted runner are not source findings.
+fn pytest_finding_stats_from_output(output: &str) -> Option<FindingStats> {
+    let findings = super::findings::parse_pytest_failures(output);
+    if findings.is_empty() {
+        return None;
+    }
+    let mut generated_paths_matched = BTreeSet::new();
+    let generated_path_findings = findings
+        .iter()
+        .filter(|finding| {
+            GENERATED_PATH_PREFIXES.iter().any(|prefix| {
+                if finding.file.contains(prefix) {
+                    generated_paths_matched.insert((*prefix).to_string());
+                    true
+                } else {
+                    false
+                }
+            })
+        })
+        .count();
+    Some(FindingStats {
+        total_findings: findings.len(),
+        real_findings: findings.len() - generated_path_findings,
+        generated_path_findings,
+        generated_paths_matched: generated_paths_matched.into_iter().collect(),
+    })
+}
+
 /// Compute finding stats for the semgrep check directly from its JSON output.
 ///
 /// The generic line-based [`finding_stats_from_output`] heuristic mis-counts
@@ -756,10 +785,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
             };
 
             let error_excerpt = if matches!(c.status, CheckStatus::Failed | CheckStatus::Error) {
-                c.output.lines().find(|l| !l.trim().is_empty()).map(|l| {
-                    let end = l.floor_char_boundary(200);
-                    l[..end].to_string()
-                })
+                let excerpt = super::findings::check_failure_excerpt(c);
+                (!excerpt.is_empty()).then_some(excerpt)
             } else {
                 None
             };
@@ -806,6 +833,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                     // Semgrep emits JSON; count the `results` array directly so
                     // report.json cannot disagree with the scan log it links to.
                     semgrep_finding_stats_from_output(&c.output)
+                } else if id == "pytest" {
+                    pytest_finding_stats_from_output(&c.output)
                 } else {
                     finding_stats_from_output(&c.output)
                 },
@@ -1238,6 +1267,27 @@ Compiling prview v0.1.0\n";
     }
 
     #[test]
+    fn pytest_stats_count_diagnostics_instead_of_progress_paths() {
+        let progress = "===== test session starts =====\n\
+            tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+            tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n";
+        assert_eq!(pytest_finding_stats_from_output(progress), None);
+
+        let failures = format!(
+            "{progress}===== FAILURES =====\n\
+            _____ test_real_failure _____\n\
+            E   AssertionError: incorrect value\n\
+            tests/test_parser.py:42: AssertionError\n\
+            ===== short test summary info =====\n\
+            FAILED tests/test_parser.py::test_real_failure\n"
+        );
+        let stats = pytest_finding_stats_from_output(&failures).expect("one diagnostic");
+        assert_eq!(stats.total_findings, 1);
+        assert_eq!(stats.real_findings, 1);
+        assert_eq!(stats.generated_path_findings, 0);
+    }
+
+    #[test]
     fn semgrep_stats_count_results_array_not_json_noise() {
         // results:[] with PartialParsing errors must report ZERO findings, not
         // phantom counts scraped from `line`/`col` offsets in the error spans.
@@ -1408,6 +1458,54 @@ test result: FAILED. 0 passed; 1 failed
             entry["failed_tests"].as_array(),
             Some(&vec![serde_json::Value::String("tests::bad".to_string())])
         );
+
+        // Exercise the serialized report path as well as the parser. A
+        // progress-only process failure has no source findings, while a real
+        // assertion retains its evidence and location after startup noise.
+        for (output, has_diagnostic) in [
+            (
+                "===== test session starts =====\n\
+                 tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+                 tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n",
+                false,
+            ),
+            (
+                "===== test session starts =====\n\
+                 tests/test_parser.py::test_failed_setup_is_reported PASSED\n\
+                 ===== FAILURES =====\n\
+                 _____ test_real_failure _____\n\
+                 E   AssertionError: incorrect value\n\
+                 tests/test_parser.py:42: AssertionError\n",
+                true,
+            ),
+        ] {
+            let pytest_checks = [CheckResult {
+                name: "Pytest".to_string(),
+                status: CheckStatus::Failed,
+                duration: Duration::ZERO,
+                output: output.to_string(),
+                cached: false,
+                provenance: None,
+            }];
+            let pytest_input = ReportInput {
+                checks: &pytest_checks,
+                ..input
+            };
+            let payload = serde_json::to_value(build_report(&pytest_input)).expect("report JSON");
+            let entry = &payload["checks"][0];
+            assert_eq!(entry["status"], "FAIL");
+            let excerpt = entry["error_excerpt"].as_str().expect("failure context");
+            assert!(!excerpt.contains("PASSED"));
+            assert!(!excerpt.contains("test session starts"));
+            if has_diagnostic {
+                assert!(excerpt.contains("tests/test_parser.py:42"));
+                assert!(excerpt.contains("AssertionError: incorrect value"));
+                assert_eq!(entry["finding_stats"]["real_findings"], 1);
+            } else {
+                assert!(excerpt.contains("cause is unknown"));
+                assert!(entry.get("finding_stats").is_none());
+            }
+        }
     }
 
     #[test]

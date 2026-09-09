@@ -41,10 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCP probes also reject test runners rather than treating `mcp` as a test filter.
 
 - Pytest failure excerpts preserve diagnostic locations without treating startup
-  text as an error or a traceback location as proof of causation. General
+  text or passed test names as an error, or a traceback location as proof of
+  causation. Process noncompletion without a diagnostic records an unknown
+  cause consistently across the dashboard, failure summary and report JSON. General
   structural notes no longer inflate SARIF, merge-gate, or report counters.
 - CODEOWNERS patterns respect root anchoring and directory depth, and cached
   check labels render as translated text rather than escaped HTML.
+- Evidence dialogs use an opaque centered surface, long logs stay within their
+  cards, check duration labels remain readable, and failed quality badges keep
+  the same color regardless of merge policy. The shared reader searches each
+  occurrence and downloads preserved complete originals through Blob URLs;
+  unavailable originals are explicitly separate file links. Offline navigation
+  no longer rewrites local file URLs or falls back to a second diff reader.
 
 - A signal arriving after durable pack publication no longer relabels the
   completed run as exit 130, while an unchanged `--update` remains

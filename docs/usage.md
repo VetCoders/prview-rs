@@ -675,8 +675,10 @@ explorer exposes the remaining evidence. `AI_INDEX.md` lists the selected HTML
 entry point and the important source artifacts; that list is a starting point,
 not a limit on the evidence available in the dashboard.
 
-Markdown, JSON, logs and diffs open inside the report, with text search and an
-original download. Markdown has a rendered view and source text. File and
+Markdown, JSON, logs and diffs share one centered, opaque reader. Search selects
+each literal occurrence, including repeated occurrences in one line or
+paragraph, and shows the current match and total for the displayed page.
+Markdown has a rendered view and source text. File and
 symbol links open source from the analyzed target commit, rather than whatever
 happens to be in the working directory when the HTML is opened. For a WIP run,
 that source preview is committed code; inspect the diff and provenance for the
@@ -686,14 +688,21 @@ Embedded text is bounded to 2 MiB per file and 12 MiB for artifact text, with a
 separate 12 MiB budget for source previews. Long text is paged in windows of up
 to 5,000 lines; search applies to the visible page. Markdown up to 256 KiB and
 5,000 lines offers a formatted view; larger embedded Markdown opens as source
-text. Source downloads contain the committed target blob. Check provenance may
+text. For complete embedded text, downloads use its preserved original content,
+including line endings and any byte-order mark, rather than the formatted preview.
+Source downloads contain the committed target blob. Check provenance may
 identify a different scan substrate, so the reference is not proof that a check
 ran on that exact source. Files outside the embedding limits, binary
-files and other non-embedded artifacts remain available as original downloads.
+files and other non-embedded artifacts have a separately labeled link to open
+the original file; a browser may display that file rather than download it.
+Older embedded content without a lossless original marker is labeled as an
+embedded-text download, not a byte-exact original.
 Keep the extracted pack together to use those relative links; copying only the
 HTML preserves embedded evidence but does not copy the original files.
 `MANIFEST.json` and `SANITY.json` are finalized after the dashboard and remain
-original downloads rather than embedded copies.
+separate originals rather than embedded copies. Local section and file links
+scroll and expand the existing document without rewriting a `file://` URL.
+HTTP-hosted reports also update the current section hash.
 
 The report distinguishes observations from conclusions:
 
@@ -701,7 +710,8 @@ The report distinguishes observations from conclusions:
   or branch coverage. Finding a matching test file does not establish that the
   changed behavior is tested or that its tests passed.
 - **Structural change risk** compares structural indicators. Its score is not
-  a probability of failure and does not include test results.
+  a probability of failure and does not include test results. The lowest band
+  is labeled minimal, not a general assurance that the change is OK.
 - **Structural observations** exposes repository-wide Loctree candidates with
   details and source links. Repeated export names are not proof of duplicate
   implementations, and a missing detected import is not proof of unused code.
@@ -718,6 +728,12 @@ The report distinguishes observations from conclusions:
 - **Tool observations** retains source and location evidence. A traceback
   location identifies where a failure was reported, not necessarily its cause.
   General check signals remain general instead of gaining an invented line.
+  Pytest startup output and passed test names are not failure diagnostics.
+  If the process ends unsuccessfully without a diagnostic, the report states
+  the exit code and that the cause is unknown; it does not infer an assertion
+  failure, exhausted memory, or a signal from that code alone.
+- **Quality status colors** are independent of merge policy: a failed quality
+  result stays red, even when policy permits review or does not block the merge.
 
 ### Key artifacts
 

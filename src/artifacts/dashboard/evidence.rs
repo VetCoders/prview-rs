@@ -79,15 +79,21 @@ fn read_bounded(dir: &Path, path: &Path, limit: usize) -> Option<String> {
     Some(text)
 }
 
+/// JSON string encoding preserves CR/LF, a leading newline and BOM through HTML
+/// parsing. The reader decodes this original before previewing or downloading it.
+fn encoded_original_text(text: &str) -> String {
+    escape_html(&serde_json::to_string(text).expect("serializing a string cannot fail"))
+}
+
 pub(super) fn templates(files: &[EvidenceFile]) -> String {
     let mut html = String::new();
     for file in files {
         if let Some(text) = &file.text {
             let _ = write!(
                 html,
-                "<template data-evidence-content=\"{}\"><pre>{}</pre></template>",
+                "<template data-evidence-content=\"{}\" data-content-encoding=\"json-string\"><pre>{}</pre></template>",
                 escape_html(&file.path),
-                escape_html(text)
+                encoded_original_text(text)
             );
             if file.path.ends_with(".md")
                 && text.len() <= 256 * 1024
@@ -192,10 +198,10 @@ pub(super) fn source_templates(
         remaining -= text.len();
         let _ = write!(
             html,
-            "<template data-source-content=\"{}\" data-revision=\"{}\"><pre>{}</pre></template>",
+            "<template data-source-content=\"{}\" data-revision=\"{}\" data-content-encoding=\"json-string\"><pre>{}</pre></template>",
             escape_html(&path),
             oid,
-            escape_html(text)
+            encoded_original_text(text)
         );
     }
     html
@@ -238,7 +244,8 @@ pub(super) fn modal() -> &'static str {
     <header><div><h2 id="evidence-title"></h2><p id="evidence-note"></p></div>
     <button type="button" id="evidence-close" data-i18n="button.close">Close</button></header>
     <div class="evidence-tools"><input type="search" id="evidence-search" data-i18n-placeholder="evidence.search" placeholder="Find in this evidence" />
-    <button type="button" id="evidence-next" data-i18n="evidence.next">Next match</button>
+    <button type="button" id="evidence-next" data-i18n="evidence.next" disabled>Next match</button>
+    <span id="evidence-match-count" role="status" aria-live="polite" aria-atomic="true"></span>
     <button type="button" id="evidence-format" data-i18n="evidence.raw">Show source text</button>
     <a id="evidence-original" download data-i18n="evidence.original">Download original</a></div>
     <div id="evidence-body"></div></dialog>"#
@@ -302,6 +309,36 @@ mod tests {
     }
 
     #[test]
+    fn original_encoding_preserves_text_bytes_across_the_html_boundary() {
+        let text =
+            "\u{feff}\nZażółć <&>\r\n\"quoted\"\r</pre></template><script>unsafe()</script>\n";
+        let html = templates(&[EvidenceFile {
+            path: "20_quality/original.log".into(),
+            text: Some(text.into()),
+        }]);
+        assert!(html.contains("data-content-encoding=\"json-string\""));
+        let encoded = html
+            .split("<pre>")
+            .nth(1)
+            .unwrap()
+            .split("</pre>")
+            .next()
+            .unwrap();
+        assert!(!encoded.contains(['\r', '\n', '<']));
+        let decoded_html = encoded
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        let original: String = serde_json::from_str(&decoded_html).unwrap();
+        assert_eq!(original.as_bytes(), text.as_bytes());
+        assert!(
+            modal().contains("id=\"evidence-match-count\" role=\"status\" aria-live=\"polite\"")
+        );
+    }
+
+    #[test]
     fn raw_templates_are_inert_and_markdown_cannot_load_remote_resources() {
         let text = "# Evidence\n![remote](https://example.com/image.png)\n<script>alert(1)</script>\n</pre></template><script>unsafe()</script>\n[Next](../PR_REVIEW.md)";
         let html = templates(&[EvidenceFile {
@@ -355,6 +392,7 @@ mod tests {
         };
         let html = source_templates(&config, &[diff], None, &[finding]);
         assert!(html.contains("committed evidence"));
+        assert!(html.contains("data-content-encoding=\"json-string\""));
         assert!(!html.contains("ambient content"));
         assert!(html.contains(&oid.to_string()));
     }

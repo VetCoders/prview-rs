@@ -330,5 +330,11 @@
   "evidence.noLocated": "W tym uruchomieniu nie powstały uwagi ze wskazaniem miejsca w kodzie.",
   "evidence.previousPage": "Poprzednia strona",
   "evidence.nextPage": "Następna strona",
-  "message.notExecutedHere": "Nie wykonano w tym uruchomieniu PrView. Raport nie uwzględnia stanu zewnętrznego CI."
+  "message.notExecutedHere": "Nie wykonano w tym uruchomieniu PrView. Raport nie uwzględnia stanu zewnętrznego CI.",
+  "evidence.matchCount": "Trafienie {current} z {total} na tej stronie",
+  "evidence.noMatches": "Brak trafień na tej stronie",
+  "evidence.downloadEmbeddedText": "Pobierz osadzony tekst",
+  "evidence.openOriginalFile": "Otwórz oryginalny plik osobno",
+  "evidence.originalNotEmbedded": "Pełny oryginał nie jest osadzony. Otwórz jego plik osobno; przeglądarka może go wyświetlić zamiast pobrać.",
+  "label.minimalStructural": "MINIMALNE"
 }

@@ -1142,20 +1142,6 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
         </div>
         {brand_footer}
     </div>
-    <!-- Diff modal -->
-    <div class="diff-modal-overlay" id="diff-modal-overlay">
-        <div class="diff-modal">
-            <div class="diff-modal-header">
-                <span class="diff-modal-title" id="diff-modal-title"></span>
-                <div class="diff-modal-actions">
-                    <input type="text" class="diff-modal-search" id="diff-modal-search" placeholder="Search in diff..." data-i18n-placeholder="placeholder.searchDiff" />
-                    <button class="diff-modal-close" id="diff-copy-path" data-i18n="button.copyPath">Copy path</button>
-                    <button class="diff-modal-close" id="diff-modal-close"><span aria-hidden="true">&#x2715;</span> <span data-i18n="button.close">Close</span></button>
-                </div>
-            </div>
-            <div class="diff-modal-body" id="diff-modal-body"></div>
-        </div>
-    </div>
     {evidence_modal}
     {evidence_templates}
     {source_templates}

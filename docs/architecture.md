@@ -1589,6 +1589,21 @@ has been written. Manifest and sanity generation follow HTML generation; those
 artifacts are available as original files rather than embedded copies of
 records that depend on the HTML itself.
 
+The dashboard has one evidence reader, including file-row patches. It does not
+fall back to a second fetch-based diff modal. Complete original text is stored
+as an escaped JSON string inside its template so HTML newline normalization
+does not alter downloaded bytes. The reader creates local Blob downloads for
+those originals; unembedded files remain explicitly separate file links.
+Search walks text nodes and selects individual literal occurrences without
+replacing formatted HTML or losing links. Offline section navigation operates
+on the existing DOM without rewriting local file URLs.
+
+Failure cards, the failure summary and report JSON share diagnostic extraction.
+Pytest process noncompletion without a parsed diagnostic retains its exit code
+and unknown cause; passed test names and startup banners cannot become failure
+excerpts or located findings. A diagnostic's source location remains an
+observation, not proof of the underlying cause.
+
 #### Stale-cache caveats (`MERGE_GATE.json.stale_cache_caveats`)
 
 A verdict can rest on evidence the run never produced. In the Vista dogfood run

@@ -434,6 +434,34 @@ fn test_header_merge_chip_shows_hold_when_not_recommended() {
 
     assert!(html.contains("HOLD MERGE"));
     assert!(!html.contains("BLOCK MERGE"));
+    let quality_badge = Regex::new(
+        r#"<span class="badge ([^"]+)"[^>]*>[^<]*<span[^>]*data-i18n-template="badge.qualityFail""#,
+    )
+    .unwrap();
+    // A permissive merge policy does not turn a failed quality check into a warning.
+    // Both the header and the decision panel retain their failure color classes.
+    assert_eq!(
+        quality_badge
+            .captures(&html)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .as_str(),
+        "badge-error"
+    );
+    let panel = build_merge_decision_card(&ctx);
+    assert!(panel.contains("merge-decision-badge mdb-fail"));
+    ctx.policy_allow_merge = false;
+    let enforced = build_header(&config, Some(&diff), &ctx, Path::new("20260308-031035"), "");
+    assert_eq!(
+        quality_badge
+            .captures(&enforced)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .as_str(),
+        "badge-error"
+    );
 }
 
 #[test]
