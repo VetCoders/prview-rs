@@ -862,9 +862,33 @@ pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
     let mut in_failures = false;
     let mut test_name = String::new();
     let mut evidence = Vec::new();
+    let mut pending_frame: Option<(String, u32)> = None;
+    let flush_frame = |findings: &mut Vec<parsers::LintFinding>,
+                       pending: &mut Option<(String, u32)>,
+                       evidence: &[String],
+                       name: &str| {
+        if !evidence.is_empty()
+            && let Some((file, line)) = pending.take()
+        {
+            findings.push(parsers::LintFinding {
+                file,
+                line,
+                column: None,
+                level: "error",
+                message: format!(
+                    "Pytest reported a failure in {name}:\n{}",
+                    evidence.join("\n")
+                ),
+                rule_id: None,
+                source: "pytest",
+            });
+        }
+    };
     for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('=') && trimmed.ends_with('=') {
+            flush_frame(&mut findings, &mut pending_frame, &evidence, &test_name);
+            pending_frame = None;
             let section = trimmed.trim_matches('=').trim();
             in_failures = matches!(section, "FAILURES" | "ERRORS");
             evidence.clear();
@@ -874,6 +898,8 @@ pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
             continue;
         }
         if trimmed.starts_with("___") && trimmed.ends_with("___") {
+            flush_frame(&mut findings, &mut pending_frame, &evidence, &test_name);
+            pending_frame = None;
             test_name = trimmed.trim_matches('_').trim().to_string();
             evidence.clear();
             continue;
@@ -888,8 +914,11 @@ pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
             continue;
         };
         if caps[3].starts_with("in ") {
-            // Short tracebacks list frames before the error. Do not present
-            // an intermediate frame as the diagnostic's terminal location.
+            // Retain the last frame until an error corroborates it. A later
+            // terminal location takes precedence over abbreviated frames.
+            if let Ok(line_number) = caps[2].parse::<u32>() {
+                pending_frame = Some((caps[1].to_string(), line_number));
+            }
             continue;
         }
         let Ok(line_number) = caps[2].parse::<u32>() else {
@@ -914,8 +943,10 @@ pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
             rule_id: None,
             source: "pytest",
         });
+        pending_frame = None;
         evidence.clear();
     }
+    flush_frame(&mut findings, &mut pending_frame, &evidence, &test_name);
     findings
 }
 
@@ -1295,6 +1326,30 @@ FAILED tests/test_parser.py::test_roundtrip\n\
         assert_eq!(summary.dashboard_findings[0].line, None);
         assert!(summary.dashboard_findings[0].message.starts_with("FAILED "));
         assert!(!tmp.path().join("INLINE_FINDINGS.sarif").exists());
+    }
+
+    #[test]
+    fn pytest_short_tracebacks_pair_final_frames_with_error_evidence() {
+        let output = "===== FAILURES =====\n_____ test_one _____\ntests/test_parser.py:42: in test_parser\n    helper()\nsrc/parser.py:9: in helper\nE   ValueError: invalid input\n_____ test_two _____\ntests/test_other.py:17: in test_other\nE   AssertionError: mismatch\n===== short test summary info =====";
+        let located = super::parse_pytest_failures(output);
+        assert_eq!(located.len(), 2);
+        assert_eq!((&*located[0].file, located[0].line), ("src/parser.py", 9));
+        assert!(located[0].message.contains("invalid input"));
+        assert_eq!(
+            (&*located[1].file, located[1].line),
+            ("tests/test_other.py", 17)
+        );
+        assert!(!located[1].message.contains("invalid input"));
+        let without_summary = output.split("===== short").next().unwrap();
+        assert_eq!(super::parse_pytest_failures(without_summary).len(), 2);
+        assert!(
+            super::parse_pytest_failures("===== FAILURES =====\ntests/x.py:42: in test_x")
+                .is_empty()
+        );
+        let terminal = "===== FAILURES =====\ntests/x.py:42: in test_x\nE   ValueError: detail\nsrc/y.py:8: ValueError";
+        let located = super::parse_pytest_failures(terminal);
+        assert_eq!(located.len(), 1);
+        assert_eq!((&*located[0].file, located[0].line), ("src/y.py", 8));
     }
 
     #[test]

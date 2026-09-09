@@ -1616,7 +1616,9 @@ observation, not proof of the underlying cause. A recorded runner timeout
 (`exit_code: -1`) remains an explicit timeout for Pytest; timeout-like words in
 passed test names do not establish a timeout. Explicit Pytest usage/configuration
 errors and exit-5 no-tests summaries remain unlocated runner diagnostics rather
-than being replaced by an unknown-cause claim.
+than being replaced by an unknown-cause claim. Short tracebacks pair their last
+recorded frame with following exception evidence; a later terminal diagnostic
+location takes precedence, and an uncorroborated frame produces no finding.
 Semgrep JSON excerpts summarize findings and scan warnings/errors, while the
 original log remains available. Incomplete public API analysis states its unknown
 regions and labels change counts as known facts; zero known changes cannot imply
