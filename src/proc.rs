@@ -90,6 +90,7 @@ fn classify_external_child_birth_identity(
                 // the owned child becomes waitable. Retry only this narrow
                 // transition; absence alone is never evidence of completion.
                 Ok(false) if error.raw_os_error() == Some(libc::ESRCH) && retry_within_budget() => {
+                    continue;
                 }
                 Ok(false) => return Err(error),
                 Err(exit_error) => {
