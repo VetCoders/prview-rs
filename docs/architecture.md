@@ -1614,7 +1614,9 @@ and unknown cause; passed test names and startup banners cannot become failure
 excerpts or located findings. A diagnostic's source location remains an
 observation, not proof of the underlying cause. A recorded runner timeout
 (`exit_code: -1`) remains an explicit timeout for Pytest; timeout-like words in
-passed test names do not establish a timeout.
+passed test names do not establish a timeout. Explicit Pytest usage/configuration
+errors and exit-5 no-tests summaries remain unlocated runner diagnostics rather
+than being replaced by an unknown-cause claim.
 Semgrep JSON excerpts summarize findings and scan warnings/errors, while the
 original log remains available. Incomplete public API analysis states its unknown
 regions and labels change counts as known facts; zero known changes cannot imply

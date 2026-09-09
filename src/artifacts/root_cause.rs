@@ -399,6 +399,32 @@ pub(crate) fn extract_pytest_root_cause(check: &CheckResult) -> Option<RootCause
         .map(|line| line.trim_matches('=').trim());
 
     if excerpt.is_none() && summary.is_none() {
+        let runner_errors: Vec<_> = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("ERROR:"))
+            .take(3)
+            .collect();
+        let no_tests = check.provenance.as_ref().and_then(|p| p.exit_code) == Some(5)
+            && output
+                .lines()
+                .map(str::trim)
+                .any(|line| line.trim_matches('=').trim().starts_with("no tests ran"));
+        if !runner_errors.is_empty() || no_tests {
+            return Some(RootCause {
+                cause: if no_tests && runner_errors.is_empty() {
+                    "Pytest collected no tests".into()
+                } else {
+                    "Pytest reported a runner error".into()
+                },
+                evidence: if runner_errors.is_empty() {
+                    "No tests ran; Pytest exited with code 5.".into()
+                } else {
+                    runner_errors.join("\n")
+                },
+                hint: "Inspect test discovery, command arguments and Pytest configuration.".into(),
+            });
+        }
         let exit = check
             .provenance
             .as_ref()
@@ -468,6 +494,35 @@ mod tests {
         check
             .output
             .push_str("\ntests/test_x.py::test_timed_out PASSED");
+        assert!(
+            extract_root_cause(&check)
+                .unwrap()
+                .cause
+                .contains("unknown")
+        );
+    }
+
+    #[test]
+    fn pytest_retains_explicit_runner_diagnostics_without_inventing_test_failures() {
+        for (code, output, expected) in [
+            (5, "===== no tests ran in 0.01s =====", "No tests ran"),
+            (
+                4,
+                "ERROR: usage: pytest [options]\nERROR: unrecognized arguments: --bad",
+                "unrecognized arguments",
+            ),
+        ] {
+            let mut check = interrupted_pytest();
+            check.output = output.into();
+            check.provenance.as_mut().unwrap().exit_code = Some(code);
+            let diagnostic = extract_root_cause(&check).unwrap();
+            assert!(!diagnostic.cause.contains("unknown"));
+            assert!(diagnostic.evidence.contains(expected));
+            assert!(findings::check_failure_excerpt(&check).contains(expected));
+            assert!(findings::parse_pytest_failures(output).is_empty());
+        }
+        let mut check = interrupted_pytest();
+        check.provenance.as_mut().unwrap().exit_code = Some(5);
         assert!(
             extract_root_cause(&check)
                 .unwrap()
