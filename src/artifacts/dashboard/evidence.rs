@@ -221,7 +221,7 @@ pub(super) fn source_templates(
     html
 }
 
-pub(super) fn reading_path(files: &[EvidenceFile]) -> String {
+pub(super) fn reading_path(files: &[EvidenceFile], has_files: bool, has_checks: bool) -> String {
     let html = r##"<section class="card reading-path" aria-label="Review path">
     <h2 data-i18n="evidence.readingPath">Read this review</h2>
     <p data-i18n="evidence.readingHint">Start with the changes, check the results, then inspect the evidence. Full artifacts stay available here.</p>
@@ -240,11 +240,26 @@ pub(super) fn reading_path(files: &[EvidenceFile]) -> String {
       <a href="30_context/INLINE_FINDINGS.sarif" data-evidence-path="30_context/INLINE_FINDINGS.sarif" data-i18n="evidence.findingData">Located observations</a>
     </div>
     </section>"##;
+    let mut html = html.to_string();
+    for (present, link) in [
+        (
+            has_files,
+            r##"<a href="#section-files" data-i18n="evidence.stepChanges">1. What changed</a>"##,
+        ),
+        (
+            has_checks,
+            r##"<a href="#section-checks" data-i18n="evidence.stepChecks">2. What was checked</a>"##,
+        ),
+    ] {
+        if !present {
+            html = html.replace(link, "");
+        }
+    }
     if files
         .iter()
         .any(|file| file.path == "30_context/INLINE_FINDINGS.sarif")
     {
-        html.to_string()
+        html
     } else {
         html.replace(
             r#"<a href="30_context/INLINE_FINDINGS.sarif" data-evidence-path="30_context/INLINE_FINDINGS.sarif" data-i18n="evidence.findingData">Located observations</a>"#,
@@ -268,6 +283,18 @@ pub(super) fn modal() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_path_links_only_to_rendered_sections() {
+        for has_files in [false, true] {
+            for has_checks in [false, true] {
+                let html = reading_path(&[], has_files, has_checks);
+                assert_eq!(html.contains("href=\"#section-files\""), has_files);
+                assert_eq!(html.contains("href=\"#section-checks\""), has_checks);
+                assert!(html.contains("PROVENANCE.json"));
+            }
+        }
+    }
 
     #[test]
     fn embedding_preserves_required_evidence_before_large_diff_copies() {

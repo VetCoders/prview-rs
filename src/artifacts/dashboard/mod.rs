@@ -1178,7 +1178,11 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
         regression_details = regression_details_html,
         artifacts = artifacts_html,
         report_script = report_script,
-        reading_path = evidence::reading_path(&evidence_files),
+        reading_path = evidence::reading_path(
+            &evidence_files,
+            !files_html.is_empty(),
+            !checks_html.is_empty()
+        ),
         evidence_modal = evidence::modal(),
         evidence_templates = evidence_templates,
         source_templates = source_templates,

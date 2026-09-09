@@ -1607,6 +1607,8 @@ code follows the report theme. Collapsible headers and bodies form one panel;
 short check output stays inline, while longer output uses a bounded scroll area.
 The narrative copy control belongs to its content panel and preserves the original
 Markdown; manifest and integrity links belong to the artifact explorer panel.
+The reading path omits change/check steps when their sections are absent, as
+in a current-only or empty comparison.
 When archive creation is enabled, that panel also links directly to the ZIP
 finalized after dashboard rendering; `--no-zip` omits the download link.
 
