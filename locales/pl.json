@@ -326,6 +326,7 @@
   "evidence.formatted": "Pokaż sformatowany dokument",
   "message.checksNotExecuted": "Nie wykonano części kontroli; sprawdź ich status",
   "evidence.limited": "Wiersze {from}–{to} z {total}. Przyciski stron pozwalają przeczytać cały plik.",
+  "evidence.archive": "Pobierz ZIP",
   "evidence.manifest": "Manifest plików",
   "evidence.integrity": "Kontrole spójności",
   "evidence.lateFiles": "Dane integralności powstają po wygenerowaniu raportu. Otwórz ich oryginalne pliki.",

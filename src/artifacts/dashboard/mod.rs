@@ -504,7 +504,7 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
     let loctree_html = build_loctree_section(heuristics);
     let regression_details_html = build_regression_details_section(ctx, heuristics, regression);
     let evidence_files = evidence::inventory(dir);
-    let artifacts_html = build_artifacts_section(ctx, &evidence_files);
+    let artifacts_html = build_artifacts_section(ctx, &evidence_files, config.create_zip);
     let evidence_templates = evidence::templates(&evidence_files);
     let source_templates = evidence::source_templates(config, diffs, heuristics, &ctx.findings);
     let breakdown = build_file_breakdown(diff);

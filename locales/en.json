@@ -326,6 +326,7 @@
   "evidence.formatted": "Show formatted document",
   "message.checksNotExecuted": "Some checks were not executed; inspect their status",
   "evidence.limited": "Lines {from}–{to} of {total}. Use the page controls to read the full file.",
+  "evidence.archive": "Download ZIP",
   "evidence.manifest": "File manifest",
   "evidence.integrity": "Integrity checks",
   "evidence.lateFiles": "Integrity records are finalized after this report. Open their original files.",

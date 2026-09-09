@@ -382,7 +382,7 @@ fn test_artifacts_explorer_has_per_file_patches() {
         path: "10_diff/per-file-diffs/abc12345__src~2Fmain.rs.patch".into(),
         text: Some("patch".into()),
     }];
-    let html = build_artifacts_section(&ctx, &files);
+    let html = build_artifacts_section(&ctx, &files, false);
 
     assert!(
         html.contains("Artifacts Explorer"),
@@ -1535,4 +1535,13 @@ fn test_pl_locale_merge_gate_caveat_translations() {
         js.contains("return text;"),
         "decision-reason EN fallback missing"
     );
+}
+
+#[test]
+fn archive_download_is_present_only_when_archive_creation_is_enabled() {
+    let ctx = mock_ctx();
+    let enabled = build_artifacts_section(&ctx, &[], true);
+    assert!(enabled.contains("href=\"artifacts.zip\" download"));
+    assert!(!enabled.contains("data-evidence-path=\"artifacts.zip\""));
+    assert!(!build_artifacts_section(&ctx, &[], false).contains("artifacts.zip"));
 }

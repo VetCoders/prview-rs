@@ -3207,7 +3207,13 @@ pub(super) fn artifact_kind(path: &str) -> &'static str {
 pub(super) fn build_artifacts_section(
     _ctx: &DashboardContext,
     files: &[super::evidence::EvidenceFile],
+    create_zip: bool,
 ) -> String {
+    let archive_link = if create_zip {
+        r#"<p><a href="artifacts.zip" download data-i18n="evidence.archive">Download ZIP</a></p>"#
+    } else {
+        ""
+    };
     // Only advertise files present in this pack. Every text artifact opens in
     // the offline reader, including per-file/per-commit patches and check logs.
     let all_items: Vec<(String, String, &str)> = files
@@ -3266,6 +3272,7 @@ pub(super) fn build_artifacts_section(
         <div class="artifact-integrity">
             <p class="evidence-note" data-i18n="evidence.lateFiles">Integrity records are finalized after this report. Open their original files.</p>
             <p><a href="00_summary/MANIFEST.json" data-i18n="evidence.manifest">File manifest</a> · <a href="00_summary/SANITY.json" data-i18n="evidence.integrity">Integrity checks</a></p>
+            {archive_link}
         </div>
         <div style="padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <input type="text" id="artifact-search" class="file-search" placeholder="Search artifacts..." data-i18n-placeholder="placeholder.searchArtifacts" style="max-width:260px" />
