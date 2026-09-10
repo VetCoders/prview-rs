@@ -741,6 +741,7 @@ of `changed_paths` (null if any comparison is unknown), nullable `error`, and
 each with its own SHA, paths, status, error, `phase` and nullable `check_name`.
 Known paths remain in individual observations even when the aggregate is unknown.
 Non-UTF8 Git path bytes are hex-escaped. A failed evidence write aborts publication.
+AI_INDEX and the dashboard artifact explorer link only published evidence.
 The same typed report raises both merge-gate and dashboard analysis to at least
 degraded and merge recommendation to at least review_required without lowering
 BLOCK. Report and HTML consume that decision; check results and exit codes are

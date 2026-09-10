@@ -347,7 +347,8 @@ fn test_file_with_patch_has_data_attr() {
 #[test]
 fn test_artifacts_explorer_has_per_file_patches() {
     let ctx = mock_ctx();
-    let html = build_artifacts_section(&ctx);
+    let dir = tempfile::tempdir().unwrap();
+    let html = build_artifacts_section(&ctx, dir.path());
 
     assert!(
         html.contains("Artifacts Explorer"),
@@ -362,6 +363,27 @@ fn test_artifacts_explorer_has_per_file_patches() {
         html.contains("artifact-kind-chip"),
         "Should have kind filter chips"
     );
+}
+
+#[test]
+fn snapshot_integrity_explorer_links_only_published_evidence() {
+    let ctx = mock_ctx();
+    let dir = tempfile::tempdir().unwrap();
+    let quality = dir.path().join("20_quality");
+    std::fs::create_dir(&quality).unwrap();
+    assert!(!build_artifacts_section(&ctx, dir.path()).contains("SNAPSHOT_INTEGRITY"));
+    std::fs::write(quality.join("SNAPSHOT_INTEGRITY.md"), "# Evidence").unwrap();
+    // A path-shaped directory is not a published JSON artifact.
+    std::fs::create_dir(quality.join("SNAPSHOT_INTEGRITY.json")).unwrap();
+    let html = build_artifacts_section(&ctx, dir.path());
+    assert!(html.contains("href=\"20_quality/SNAPSHOT_INTEGRITY.md\""));
+    assert!(!html.contains("SNAPSHOT_INTEGRITY.json"));
+    std::fs::remove_dir(quality.join("SNAPSHOT_INTEGRITY.json")).unwrap();
+    std::fs::write(quality.join("SNAPSHOT_INTEGRITY.json"), "{}").unwrap();
+    let html = build_artifacts_section(&ctx, dir.path());
+    assert!(html.contains("href=\"20_quality/SNAPSHOT_INTEGRITY.json\""));
+    assert!(html.contains("Snapshot Integrity (MD)"));
+    assert!(html.contains("Snapshot Integrity (JSON)"));
 }
 
 #[test]

@@ -500,7 +500,7 @@ fn build_html(input: BuildHtmlInput<'_>) -> String {
     let flaky_html = build_flaky_section(ctx);
     let loctree_html = build_loctree_section(heuristics);
     let regression_details_html = build_regression_details_section(ctx, heuristics, regression);
-    let artifacts_html = build_artifacts_section(ctx);
+    let artifacts_html = build_artifacts_section(ctx, dir);
     let breakdown = build_file_breakdown(diff);
 
     // --- Summaries for collapsible headers ---

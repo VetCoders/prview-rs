@@ -860,7 +860,8 @@ least CONDITIONAL. Existing blocking failures remain BLOCK.
 
 `20_quality/SNAPSHOT_INTEGRITY.json` and `.md` preserve the original target,
 observed HEAD, complete tracked-path list, and any observation error. AI_INDEX
-points at this evidence. The gate and dashboard carry the same review signal.
+points at this evidence; the dashboard artifact explorer links both files only
+when they exist. The gate and dashboard carry the same review signal.
 Newly untracked files, including a generated Cargo.lock, do not trigger this rule;
 a changed **tracked** Cargo.lock does. Staged changes, deletions and changes
 committed inside the snapshot are included. Local operator worktrees are outside
