@@ -1142,8 +1142,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         .collect();
 
     Report {
-        // 3.0: `quality.breaking_changes.md_path` is nullable, `meta` uses
-        // `base_refs`/`target_ref`, and `gate.status` carries the canonical
+        // 3.0: `quality.breaking_changes.md_path` is nullable and
+        // `gate.status` carries the canonical
         // PASS/CONDITIONAL/BLOCK verdict. Readers must migrate from 2.0.
         schema_version: "3.0",
         meta,
