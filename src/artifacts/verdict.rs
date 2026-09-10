@@ -698,30 +698,26 @@ pub(crate) fn check_id_is_baseline_signal(check_id: &str) -> bool {
 /// The downgrade is only sound for a check whose findings came from the analysed
 /// *target* tree. Two shapes qualify:
 ///
-/// * **Local target** (`head == target`): every baseline-signal check scans the
+/// * **Local target** (`captured head == target`): every baseline-signal check scans the
 ///   working tree, which IS the target — provided the tree is clean. A dirty
 ///   worktree can make an uncommitted finding look out-of-diff (R2-9), so a dirty
 ///   local scan downgrades nothing.
-/// * **Remote/snapshot target** (`head != target`): only semgrep materialises and
-///   scans an ephemeral snapshot of the target (R2-10). Every other baseline
-///   signal (rustfmt/ruff/eslint/…) still scans `config.repo_root` — the local
-///   checkout, a *different* tree than the target — so its out-of-diff rows prove
-///   nothing about the target diff and must NOT be downgraded (R3-16).
+/// * **Remote/snapshot target** (`captured head != target`): only checks listed
+///   by `check_scans_target_snapshot` qualify. Operator-scanned checks came from
+///   a different tree, even if the checkout moves to the target before publication.
 ///
 /// `--current-only` deliberately drops the diff bases to analyse the whole
 /// current state, so there is no diff baseline a finding can "predate": the
 /// downgrade must never fire regardless of tree shape (R3-14).
 ///
-/// On any inability to inspect the repo we default to the permissive "local
-/// checkout is the target" shape, preserving the historical downgrade behaviour
-/// rather than distrusting a repo we cannot read. That default does NOT extend to
-/// cleanliness: a tree whose status could not be read is unknown, not clean, and
-/// an unknown tree never unlocks the downgrade.
+/// Checkout identity comes from the operator HEAD captured before checks. An
+/// unknown captured HEAD grants no downgrade. A later HEAD read only invalidates
+/// a moved checkout; it never changes which source produced the findings.
 #[derive(Debug, Clone)]
 pub(crate) struct CleanComparison {
-    /// `head == target`: the local working tree IS the analysed target, so every
-    /// check scanned the target directly.
-    target_is_checkout: bool,
+    /// Whether the captured checkout was the analysed target. `None` means
+    /// the operator HEAD was not established or moved; no stable identity is inferred.
+    target_is_checkout: Option<bool>,
     /// When the local checkout is the target, whether it is free of staged,
     /// unstaged, and untracked changes. `None` means the status could not be
     /// read: not a licence to trust the tree, so the downgrade stays off.
@@ -756,6 +752,7 @@ impl CleanComparison {
         resolved_target: &crate::git::ResolvedRef,
         resolved_bases: &[crate::git::ResolvedRef],
         worktree_clean: Option<bool>,
+        worktree_head_sha: Option<&str>,
         diffs: &[crate::git::Diff],
     ) -> Self {
         let has_base_diff = has_resolvable_base_diff(resolved_target, resolved_bases);
@@ -763,25 +760,15 @@ impl CleanComparison {
         let head = crate::git::Repository::open(&config.repo_root)
             .ok()
             .and_then(|repo| repo.head_commit_id().ok());
-        match head {
-            Some(head) => CleanComparison {
-                target_is_checkout: head == resolved_target.commit_id,
-                worktree_clean,
-                current_only: config.current_only,
-                has_base_diff,
-                configs_changed,
-            },
-            // Repo unreadable: preserve the historical downgrade by treating the
-            // target as the local checkout. Whether the downgrade actually fires
-            // is then decided by `worktree_clean`, which is `Some(true)` only for
-            // a tree whose status was really read.
-            None => CleanComparison {
-                target_is_checkout: true,
-                worktree_clean,
-                current_only: config.current_only,
-                has_base_diff,
-                configs_changed,
-            },
+        // A later HEAD can invalidate source stability, never grant a new
+        // source identity to results produced earlier in the run.
+        let stable_head = worktree_head_sha.filter(|captured| head.as_deref() == Some(*captured));
+        CleanComparison {
+            target_is_checkout: stable_head.map(|captured| captured == resolved_target.commit_id),
+            worktree_clean,
+            current_only: config.current_only,
+            has_base_diff,
+            configs_changed,
         }
     }
 
@@ -805,21 +792,21 @@ impl CleanComparison {
             // full-scan findings all sit "out of diff" trivially (R3-14).
             return false;
         }
-        if self.target_is_checkout {
-            // Local checkout is the target for every check; only a tree PROVEN
-            // clean can be trusted (R2-9). An unread status is not proof.
-            self.worktree_clean == Some(true)
-        } else {
-            // Remote target: only checks that scanned the target snapshot qualify;
-            // everything else scanned the local checkout, a different tree (R3-16).
-            check_scans_target_snapshot(check_id)
+        match self.target_is_checkout {
+            // Local checkout was the target: both captured cleanliness and HEAD
+            // stability are required. Generated files do not trigger a new status read.
+            Some(true) => self.worktree_clean == Some(true),
+            // A different operator checkout never licenses operator-scanned findings.
+            // Checks known to use the target snapshot retain their own source proof.
+            Some(false) => check_scans_target_snapshot(check_id),
+            None => false,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn for_test(target_is_checkout: bool, worktree_clean: bool) -> Self {
         CleanComparison {
-            target_is_checkout,
+            target_is_checkout: Some(target_is_checkout),
             worktree_clean: Some(worktree_clean),
             current_only: false,
             has_base_diff: true,
@@ -830,7 +817,7 @@ impl CleanComparison {
     #[cfg(test)]
     pub(crate) fn for_test_current_only() -> Self {
         CleanComparison {
-            target_is_checkout: true,
+            target_is_checkout: Some(true),
             worktree_clean: Some(true),
             current_only: true,
             has_base_diff: true,
@@ -841,7 +828,7 @@ impl CleanComparison {
     #[cfg(test)]
     pub(crate) fn for_test_no_base_diff() -> Self {
         CleanComparison {
-            target_is_checkout: true,
+            target_is_checkout: Some(true),
             worktree_clean: Some(true),
             current_only: false,
             has_base_diff: false,
@@ -852,7 +839,7 @@ impl CleanComparison {
     #[cfg(test)]
     pub(crate) fn for_test_config_changed(owners: &[&'static str]) -> Self {
         CleanComparison {
-            target_is_checkout: true,
+            target_is_checkout: Some(true),
             worktree_clean: Some(true),
             current_only: false,
             has_base_diff: true,
@@ -2361,6 +2348,121 @@ mod tests {
         }
     }
 
+    fn comparison_repo() -> (tempfile::TempDir, git2::Repository, git2::Oid, git2::Oid) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let first = repo
+            .commit(Some("HEAD"), &signature, &signature, "operator", &tree, &[])
+            .unwrap();
+        let parent = repo.find_commit(first).unwrap();
+        let target = repo
+            .commit(None, &signature, &signature, "target", &tree, &[&parent])
+            .unwrap();
+        drop(parent);
+        drop(tree);
+        (tmp, repo, first, target)
+    }
+
+    #[test]
+    fn clean_comparison_rejects_a_late_checkout_to_the_target() {
+        let (tmp, repo, first, target) = comparison_repo();
+        let captured = capture_worktree_provenance(tmp.path());
+        assert_eq!(captured.head_sha, Some(first.to_string()));
+        assert_eq!(captured.clean, Some(true));
+        let config = crate::config::test_config_builder()
+            .repo_root(tmp.path())
+            .build();
+        let stable = CleanComparison::resolve(
+            &config,
+            &resolved_ref(&target.to_string()),
+            &[resolved_ref(&first.to_string())],
+            captured.clean,
+            captured.head_sha.as_deref(),
+            &[],
+        );
+        assert!(stable.applies_to("semgrep_scan"));
+        assert!(!stable.applies_to("rustfmt"));
+        repo.set_head_detached(target).unwrap();
+        let comparison = CleanComparison::resolve(
+            &config,
+            &resolved_ref(&target.to_string()),
+            &[resolved_ref(&first.to_string())],
+            captured.clean,
+            captured.head_sha.as_deref(),
+            &[],
+        );
+        assert!(
+            !comparison.applies_to("rustfmt"),
+            "a late checkout cannot change the source of earlier findings"
+        );
+        let summary = build_quality_failure_summary(
+            &[failed_check("Rustfmt")],
+            &[out_of_diff_finding("rustfmt")],
+            &comparison,
+        );
+        assert!(summary.preexisting_quality_failures.is_empty());
+        assert_eq!(summary.unclassified_quality_failures, vec!["Rustfmt"]);
+        assert!(summary.has_new_failures());
+        assert!(
+            !comparison.applies_to("semgrep_scan"),
+            "a moved HEAD disables the downgrade for the run"
+        );
+    }
+
+    #[test]
+    fn clean_comparison_invalidates_a_target_checkout_that_moved() {
+        let (tmp, repo, first, other) = comparison_repo();
+        let captured = capture_worktree_provenance(tmp.path());
+        let config = crate::config::test_config_builder()
+            .repo_root(tmp.path())
+            .build();
+        let resolve = || {
+            CleanComparison::resolve(
+                &config,
+                &resolved_ref(&first.to_string()),
+                &[resolved_ref(&other.to_string())],
+                captured.clean,
+                captured.head_sha.as_deref(),
+                &[],
+            )
+        };
+        // Check output must not replace the status observed before checks.
+        fs::write(tmp.path().join("check-output.txt"), "generated").unwrap();
+        assert!(resolve().applies_to("rustfmt"));
+        repo.set_head_detached(other).unwrap();
+        assert!(!resolve().applies_to("rustfmt"));
+        repo.set_head("refs/heads/missing").unwrap();
+        assert!(
+            !resolve().applies_to("rustfmt"),
+            "unreadable live HEAD cannot certify stability"
+        );
+    }
+
+    #[test]
+    fn clean_comparison_never_infers_a_missing_captured_head() {
+        let (tmp, _repo, first, other) = comparison_repo();
+        let config = crate::config::test_config_builder()
+            .repo_root(tmp.path())
+            .build();
+        let comparison = CleanComparison::resolve(
+            &config,
+            &resolved_ref(&first.to_string()),
+            &[resolved_ref(&other.to_string())],
+            Some(true),
+            None,
+            &[],
+        );
+        for check in ["rustfmt", "semgrep_scan", "ruff"] {
+            assert!(
+                !comparison.applies_to(check),
+                "{check}: current HEAD cannot fill an unknown captured HEAD"
+            );
+        }
+    }
+
     #[test]
     fn no_resolvable_base_diff_when_bases_empty_or_equal_to_target() {
         // R4-20: an empty base set (a repo whose configured trunk never resolves)
@@ -2724,7 +2826,7 @@ mod tests {
         );
 
         let unknown = CleanComparison {
-            target_is_checkout: true,
+            target_is_checkout: Some(true),
             worktree_clean: None,
             current_only: false,
             has_base_diff: true,

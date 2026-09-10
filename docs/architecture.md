@@ -772,6 +772,13 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   from authorizing the clean-tree downgrade. There is no retry or worktree lock:
   this detects a changed endpoint, not edits under an unchanged HEAD or a change
   followed by a return to the original commit (ABA);
+  The gate's pre-existing downgrade also uses the captured HEAD, never a later
+  checkout to infer where checks ran. With no captured HEAD no downgrade is
+  authorized. HEAD must still match at artifact generation for any downgrade;
+  this extra stability check does not re-read cleanliness or rewrite recorded
+  starting provenance. With a stable captured non-target checkout, only checks
+  known to read a target snapshot remain eligible. A detected checkout change
+  disables the downgrade for the run, including these checks;
 - `operator_worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
   working-tree status, from the *same* read as `clean`. Each line is
   `XY <path>\0<content>`, where `<content>` fingerprints the file the entry

@@ -870,6 +870,9 @@ quality, policy, and permission axes beside that explanation.
   cleanliness/digest (including dirty content). Unknown operator observations remain `null`.
   A HEAD change detected between the start and end of capture makes all operator fields
   `null`; capture is bounded and does not lock files or provide an atomic filesystem snapshot.
+  A later checkout cannot retroactively make operator-scanned findings target findings.
+  The pre-existing downgrade requires captured identity and the same operator HEAD
+  through artifact generation. Recorded starting provenance stays unchanged.
   Schema 1.0 called the operator fields `head_sha` and `worktree`; its HEAD was read later, during
   artifact generation. Use `target_sha` for review identity in both versions. The record also carries,
   per check, the directory and commit it actually read. `bases[]` names every baseline the pack's patches

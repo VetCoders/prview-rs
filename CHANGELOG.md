@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pre-existing failure classification uses the operator HEAD captured before
+  checks. A later checkout can invalidate stability but cannot grant a new
+  downgrade; unknown captured HEAD no longer takes a permissive local fallback.
+
 - A signal arriving after durable pack publication no longer relabels the
   completed run as exit 130, while an unchanged `--update` remains
   cancellation-sensitive. Crash-journal recovery refuses and quarantines

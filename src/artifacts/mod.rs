@@ -797,6 +797,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         resolved_target,
         resolved_bases,
         worktree_clean,
+        worktree_head_sha.as_deref(),
         diffs,
     );
 
