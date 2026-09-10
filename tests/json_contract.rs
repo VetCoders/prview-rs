@@ -312,12 +312,12 @@ fn operator_policy_rank_invariants_validator_contract() {
 
     let raw = fs::read_to_string(&merge_gate).expect("read generated merge gate");
     let original: serde_json::Value = serde_json::from_str(&raw).expect("parse merge gate");
-    assert_eq!(original["schema_version"], "2.3");
+    assert_eq!(original["schema_version"], "3.0");
     assert!(
         original["decision"]["enforcement_disposition"]
             .as_str()
             .is_some(),
-        "the 2.3 writer must emit its typed enforcement disposition"
+        "the current writer must emit its typed enforcement disposition"
     );
 
     let validator = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/validate_merge_gate.py");
@@ -338,6 +338,47 @@ fn operator_policy_rank_invariants_validator_contract() {
             assertion.failure();
         }
     };
+
+    assert!(original["policy"]["source"].is_null());
+    assert_eq!(original["policy"]["origin"], "builtin-default");
+    for (origin, source, expected) in [
+        (
+            serde_json::json!("builtin-default"),
+            serde_json::Value::Null,
+            true,
+        ),
+        (
+            serde_json::json!("file"),
+            serde_json::json!("policy.yml"),
+            true,
+        ),
+        (
+            serde_json::json!("builtin-default"),
+            serde_json::json!("phantom.yml"),
+            false,
+        ),
+        (serde_json::json!("file"), serde_json::Value::Null, false),
+        (serde_json::json!("file"), serde_json::json!(""), false),
+        (serde_json::json!("unknown"), serde_json::Value::Null, false),
+        (serde_json::Value::Null, serde_json::Value::Null, false),
+    ] {
+        let mut vector = original.clone();
+        vector["policy"]["origin"] = origin;
+        vector["policy"]["source"] = source;
+        validate(&vector, expected);
+    }
+    let mut absent_source = original.clone();
+    absent_source["policy"]
+        .as_object_mut()
+        .unwrap()
+        .remove("source");
+    validate(&absent_source, false);
+    let mut legacy = original.clone();
+    legacy["schema_version"] = serde_json::json!("2.3");
+    validate(&legacy, false);
+    legacy["policy"]["source"] = serde_json::json!(".prview-policy.yml");
+    legacy["policy"].as_object_mut().unwrap().remove("origin");
+    validate(&legacy, true);
 
     let clean_decision = {
         let mut decision = original["decision"].clone();
@@ -859,10 +900,11 @@ fn validator_rejects_schema_two_two_without_a_usable_origin() {
     let mut original: serde_json::Value = serde_json::from_str(&raw).expect("parse gate");
     assert_eq!(
         original["schema_version"].as_str(),
-        Some("2.3"),
+        Some("3.0"),
         "the current writer retains the 2.2 `origin` requirement"
     );
     original["schema_version"] = serde_json::json!("2.2");
+    original["policy"]["source"] = serde_json::json!(".prview-policy.yml");
 
     let broken_details = [
         serde_json::json!([{ "name": "Clippy", "classification": "introduced" }]),
@@ -966,6 +1008,7 @@ fn validator_rejects_quality_pass_contradicting_its_own_details() {
     let raw = std::fs::read_to_string(&merge_gate).expect("read gate");
     let mut original: serde_json::Value = serde_json::from_str(&raw).expect("parse gate");
     original["schema_version"] = serde_json::json!("2.2");
+    original["policy"]["source"] = serde_json::json!(".prview-policy.yml");
 
     let detail = |classification: &str, origin: &str| serde_json::json!([{ "name": "Clippy", "classification": classification, "origin": origin }]);
 
@@ -1049,7 +1092,7 @@ fn validator_requires_a_boolean_quality_pass_from_schema_two_two() {
     let original: serde_json::Value = serde_json::from_str(&raw).expect("parse gate");
     assert_eq!(
         original["schema_version"].as_str(),
-        Some("2.3"),
+        Some("3.0"),
         "the current writer retains the 2.2 quality_pass requirement"
     );
     assert!(
@@ -1097,6 +1140,7 @@ fn validator_requires_a_boolean_quality_pass_from_schema_two_two() {
     // not a broken one, and the readers derive the flag rather than refusing it.
     let mut legacy = original.clone();
     legacy["schema_version"] = serde_json::json!("2.1");
+    legacy["policy"]["source"] = serde_json::json!(".prview-policy.yml");
     legacy["decision"]
         .as_object_mut()
         .expect("decision object")
@@ -1155,6 +1199,7 @@ fn validator_rejects_a_check_status_outside_the_emitted_vocabulary() {
         original["checks"]
     );
     original["schema_version"] = serde_json::json!("2.2");
+    original["policy"]["source"] = serde_json::json!(".prview-policy.yml");
 
     // Recognizable-but-uncanonical spellings, plus the non-strings a bare
     // "non-empty" rule never caught either.
@@ -1316,10 +1361,11 @@ fn validator_requires_the_decision_axes_schema_two_two_emits() {
     let mut original: serde_json::Value = serde_json::from_str(&raw).expect("parse gate");
     assert_eq!(
         original["schema_version"].as_str(),
-        Some("2.3"),
+        Some("3.0"),
         "the current writer retains the decision axes introduced in 2.2"
     );
     original["schema_version"] = serde_json::json!("2.2");
+    original["policy"]["source"] = serde_json::json!(".prview-policy.yml");
     for axis in [
         "analysis_status",
         "merge_recommendation",
@@ -1462,6 +1508,7 @@ fn validator_rejects_a_verdict_its_own_axes_contradict() {
     let raw = std::fs::read_to_string(&merge_gate).expect("read gate");
     let mut original: serde_json::Value = serde_json::from_str(&raw).expect("parse gate");
     original["schema_version"] = serde_json::json!("2.2");
+    original["policy"]["source"] = serde_json::json!(".prview-policy.yml");
 
     let gating_detail = serde_json::json!([
         { "name": "Clippy", "classification": "introduced", "origin": "failure" }
@@ -1679,6 +1726,7 @@ fn validator_rejects_a_blocker_flag_its_blocking_issues_contradict() {
     let raw = std::fs::read_to_string(&merge_gate).expect("read gate");
     let mut original: serde_json::Value = serde_json::from_str(&raw).expect("parse gate");
     original["schema_version"] = serde_json::json!("2.2");
+    original["policy"]["source"] = serde_json::json!(".prview-policy.yml");
 
     let with = |base: &serde_json::Value, patch: serde_json::Value| {
         let mut decision = base.clone();

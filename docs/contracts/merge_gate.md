@@ -1,4 +1,4 @@
-# MERGE_GATE Contract (schema 2.3)
+# MERGE_GATE Contract (schema 3.0)
 
 `MERGE_GATE.json` is the policy-aware merge decision emitted at
 `00_summary/MERGE_GATE.json`. It is the single machine-readable verdict surface
@@ -11,13 +11,13 @@ document disagree, the code is the contract and this document is the bug.
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | `"2.3"` |
+| `schema_version` | string | `"3.0"` |
 | `generated_at` | string | RFC 3339 local datetime |
 | `bridge_stage` | integer | `0..4` |
 | `target` | string | Resolved target branch name (not raw CLI input) |
 | `bases` | string[] | Resolved base branch names |
 | `profile` | string | Resolved profile kind |
-| `policy` | object | `{ version, mode, default_severity, source }` |
+| `policy` | object | `{ version, mode, default_severity, source, origin }` |
 | `checks` | object[] | Per-check evaluation records (see below) |
 | `inline_findings` | object | Inline SARIF summary (see below) |
 | `stale_cache_caveats` | object[] | Advisory, additive: gate rows replayed from an old or age-unverifiable cache (see below) |
@@ -29,10 +29,21 @@ document disagree, the code is the contract and this document is the bug.
 
 | Field | Type | Notes |
 |---|---|---|
-| `version` | string | Policy document version |
+| `version` | integer | Policy document version |
 | `mode` | string | Policy mode (e.g. `shadow` / `warn` / `block`) |
 | `default_severity` | string | `block` \| `warn` \| `ignore` |
-| `source` | string | Path to the resolved policy file |
+| `source` | string \| null | Path actually read at policy load, or `null` for built-in defaults |
+| `origin` | string | `file` \| `builtin-default`; consistent with `source` |
+
+Policy provenance is captured when configuration is loaded, before checks.
+Creating or removing a policy file later does not change this record.
+`--policy-mode` overrides the effective mode without changing the policy's
+origin. An absent requested policy retains the existing built-in fallback.
+
+Migration from 2.x: readers must accept nullable `source` and use `origin` to
+distinguish built-in defaults from a file. Older records carried the resolved
+candidate path even when no file was read; that path is not proof of a loaded
+policy. The validator retains the older string contract for 1.x/2.x records.
 
 ### `files`
 
@@ -406,7 +417,7 @@ Readers accept a pack by MAJOR version and say what they had to normalize:
 |---|---|
 | absent | Accepted silently — pre-2.1 packs predate the field, and their root object is read as the `decision` |
 | known schema through `2.2` | Canonical verdict stays readable, but any injected `enforcement_disposition` is ignored; a legacy `CONDITIONAL` is conservatively `review_required` for strict enforcement |
-| `2.3` | `enforcement_disposition`, `checks`, `inline_findings`, policy mode, and typed quality-failure provenance are required and cross-checked as enforcement proof |
+| `2.3` / `3.0` | `enforcement_disposition`, `checks`, `inline_findings`, policy mode, and typed quality-failure provenance are required and cross-checked as enforcement proof |
 | known MAJOR, newer MINOR | Accepted with a `schema_forward_compat:` caveat; the 2.3 typed-enforcement requirements still apply |
 | unknown MAJOR, unparsable version, a non-canonical spelling (`02.2`, `+2.2`), or a non-string value | Fail loud |
 

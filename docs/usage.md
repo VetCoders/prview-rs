@@ -83,7 +83,7 @@ not compute a second verdict path.
 
 `--json` makes stdout machine-readable (`schema_version: "gate-json/v1"`) with
 the verdict, `enforcement_disposition`, caveats, blocking issues, and artifact
-paths. Only a schema 2.3 pack with typed warning proof can use the warnings-only
+paths. Only a schema 2.3 or 3.x pack with typed warning proof can use the warnings-only
 strict exception; older or malformed packs remain strict-rejected.
 
 Local pre-push hook recipes and the recommended Shadow -> Warn -> Block rollout
@@ -842,7 +842,7 @@ they are not neutralized without compiler-backed name resolution.
 
 #### How to read an artifact pack
 
-- `00_summary/MERGE_GATE.json` is the canonical source of check statuses.
+- `00_summary/MERGE_GATE.json` is the canonical source of check statuses. Schema 3.0 records the loaded policy as `origin: file` with a source path, or `origin: builtin-default` with `source: null`; later filesystem changes do not rewrite that observation.
 - `00_summary/PROVENANCE.json` schema 2.0 answers *what was judged*: `target_sha` and the base commits,
   separately from the pre-check operator checkout (`worktree_head_sha`) and `operator_worktree`
   cleanliness/digest (including dirty content). Unknown operator observations remain `null`.

@@ -3492,8 +3492,8 @@ fn merge_gate_names_the_origin_of_every_quality_failure_entry() {
     );
     assert_eq!(
         crate::gate::MERGE_GATE_SCHEMA_VERSION,
-        "2.3",
-        "typed enforcement disposition and its proof bump the MINOR after origin"
+        "3.0",
+        "nullable policy source changes the MAJOR while retaining typed enforcement proof"
     );
 }
 

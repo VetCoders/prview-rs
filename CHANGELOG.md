@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `MERGE_GATE.json` schema 3.0 records actual policy provenance captured at
+  load: `origin: file` with a source path, or `origin: builtin-default` with
+  `source: null`. CLI/MCP readers and the validator accept 3.0 while retaining
+  older schema contracts and the typed enforcement requirements from 2.3.
+
 - `PROVENANCE.json` schema 2.0 separates review identity (`target_sha`) from
   operator state (`worktree_head_sha`, `operator_worktree`). The ambiguous 1.0
   field names are removed from new records. Operator HEAD is now captured

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate MERGE_GATE.json contract (schema 1.0/2.0/2.1/2.2/2.3)."""
+"""Validate MERGE_GATE.json contract (schema 1.0/2.0/2.1/2.2/2.3/3.0)."""
 
 from __future__ import annotations
 
@@ -420,9 +420,9 @@ def validate(path: Path) -> list[str]:
 
     if not isinstance(data["schema_version"], str):
         issues.append("schema_version must be a string")
-    elif data["schema_version"] not in ("1.0", "2.0", "2.1", "2.2", "2.3"):
+    elif data["schema_version"] not in ("1.0", "2.0", "2.1", "2.2", "2.3", "3.0"):
         issues.append(
-            "schema_version must be '1.0', '2.0', '2.1', '2.2', or '2.3'"
+            "schema_version must be '1.0', '2.0', '2.1', '2.2', '2.3', or '3.0'"
         )
     require_iso_datetime(data["generated_at"], "generated_at", issues)
     if (
@@ -463,7 +463,17 @@ def validate(path: Path) -> list[str]:
             issues.append("policy.mode must be one of shadow|warn|block")
         if severity not in VALID_SEVERITIES:
             issues.append("policy.default_severity must be one of block|warn|ignore")
-        require_non_empty_string(policy.get("source"), "policy.source", issues)
+        if schema_at_least(data.get("schema_version"), (3, 0)):
+            origin = policy.get("origin")
+            if origin == "builtin-default":
+                if policy.get("source") is not None:
+                    issues.append("policy.source must be null for builtin-default origin")
+            elif origin == "file":
+                require_non_empty_string(policy.get("source"), "policy.source", issues)
+            else:
+                issues.append("policy.origin must be one of builtin-default|file")
+        else:
+            require_non_empty_string(policy.get("source"), "policy.source", issues)
 
     policy_mode = policy.get("mode") if isinstance(policy, dict) else None
     raw_decision = data.get("decision")

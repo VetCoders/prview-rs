@@ -398,7 +398,8 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
             "version": config.policy.version,
             "mode": config.policy.mode_str(),
             "default_severity": policy_severity_to_str(config.policy.default_severity),
-            "source": config.policy_file.display().to_string()
+            "source": config.policy.source.as_ref().map(|path| path.display().to_string()),
+            "origin": if config.policy.source.is_some() { "file" } else { "builtin-default" }
         },
         "checks": &gate_checks,
         "inline_findings": {
