@@ -793,8 +793,14 @@ uses the existing decision fields; no gate schema migration is introduced.
 Clean shared snapshots and local runs add no signal. Newly untracked files
 (including a generated Cargo.lock) are excluded; modifications to tracked files
 (including a tracked Cargo.lock) and changes committed inside the snapshot are
-not. The evidence retains non-clean observations before/after live checks plus
+included. The evidence retains non-clean observations before/after live checks plus
 the final observation before context tools, so a later restoration does not erase
 an observed change. Boundary check names do not identify the writer. Changes
 restored between observations are not guaranteed to be detected. Results that
 overlap non-clean observations are not written to cache; raw results are preserved.
+
+Every observation uses the snapshot's immutable creation SHA. If that SHA differs
+from the resolved target used for the diff, artifact generation fails before
+allocating the output directory. No gate or successful pack is published for
+mixed review identities; rerun against a stable target. A later commit made
+inside the snapshot remains an integrity signal, not a creation-target mismatch.

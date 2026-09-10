@@ -906,6 +906,11 @@ the writer when checks overlap. Results overlapping an observed change are not
 written to cache. These observations are not atomic and do not cover later
 context commands; a change restored between observations can remain undetected.
 
+If a moving target ref causes the snapshot to be created from a different commit
+than the diff, prview reports `shared snapshot target mismatch` and aborts pack
+publication. Rerun the review against a stable target. Changes made inside an
+already created snapshot still follow the integrity rule above.
+
 #### How to read an artifact pack
 
 `report.json` schema 3.0 uses `null` for `quality.breaking_changes.md_path`
