@@ -546,6 +546,11 @@ array, which also carries any verdict the reader had to normalize.
 exists (pattern scan, dependency delta, Cargo/npm SBOM, or inline SARIF).
 The summary does not emit an empty **Artifact Map** placeholder.
 
+When a review has caveats, `00_summary/MERGE_GATE.md` and `AI_INDEX.md`
+include a **Review signals (N)** section listing every canonical caveat.
+The list explains the headline count without requiring JSON inspection;
+it is omitted when empty and does not change the merge recommendation.
+
 Artifacts are written to `$PRVIEW_HOME/runs/<repo>/<branch>/<run_id>/`
 or, when `PRVIEW_HOME` is unset, to
 `$HOME/.prview/runs/<repo>/<branch>/<run_id>/` in an ordered numbered layout.
