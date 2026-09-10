@@ -203,7 +203,7 @@ step.
 |------|---------------|
 | `AI_INDEX.md` | Compact entry point for human/agent review |
 | `PR_REVIEW.md` | Unified review narrative |
-| `report.json` | Machine-readable findings (schema 3.0; absent breaking report path is null) |
+| `report.json` | Machine-readable findings (schema 3.0; canonical gate status and nullable breaking report path) |
 | `dashboard.html` | Visual summary of the analysis |
 | `00_summary/MERGE_GATE.json` | Pass/fail gate for automation |
 | `00_summary/PROVENANCE.json` | Schema 2.0: reviewed commits, separate operator checkout state, and the tree each check scanned |

@@ -670,7 +670,9 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         &ctx.blocking_issues,
         review_caveats.clone(),
     );
-    let status = if ctx.allow_merge { "ALLOW" } else { "BLOCK" };
+    // Permission is false for both CONDITIONAL and BLOCK; projecting it back
+    // into a verdict loses the distinction already derived by the gate.
+    let status = ctx.verdict;
     let summary = decision.reason.clone();
 
     let mut reasons: Vec<GateReason> = Vec::new();
@@ -2013,6 +2015,19 @@ test result: FAILED. 0 passed; 1 failed
         // Schema compatibility: the counters stay present for existing readers.
         assert_eq!(cov["matched"].as_u64(), Some(0));
         assert_eq!(cov["total"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn report_gate_status_preserves_the_canonical_three_state_verdict() {
+        for verdict in ["PASS", "CONDITIONAL", "BLOCK"] {
+            let mut ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+            ctx.verdict = verdict;
+            ctx.allow_merge = verdict == "PASS";
+            let report = skip_as_zero_report(&ctx, None, false);
+            assert_eq!(report["gate"]["status"], verdict);
+            assert_eq!(report["gate"]["status"], report["gate"]["verdict"]);
+            assert_eq!(report["gate"]["allow_merge"], verdict == "PASS");
+        }
     }
 
     #[test]

@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `report.json` schema 3.0 makes `quality.breaking_changes.md_path` nullable.
   Missing Markdown reports no longer advertise a dead link; existing Rust API
   reports remain linked even when they contain no breaking findings.
+  The same schema uses the canonical PASS/CONDITIONAL/BLOCK vocabulary for
+  `gate.status`, matching `gate.verdict` instead of projecting merge permission
+  as ALLOW/BLOCK. MERGE_GATE.md explains non-blocking quality failures beside
+  the policy and merge-permission axes.
 
 - `MERGE_GATE.json` schema 3.0 records actual policy provenance captured at
   load: `origin: file` with a source path, or `origin: builtin-default` with

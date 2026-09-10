@@ -404,9 +404,17 @@ disposition.
   `evidence` + `log`); a non-executed check carries non-null placeholders, never
   `null` evidence.
 
-`HOLD` and `ALLOW` are retired pre-2.1 verdict synonyms. Current runs never emit
-them; the schema validator and the `prview mcp` adapter still tolerate them on
-read-back of older packs.
+`HOLD` and `ALLOW` are retired pre-2.1 **verdict** synonyms. Current runs never
+emit them as `decision.verdict`; the schema validator and the `prview mcp`
+adapter still tolerate them on read-back of older packs. `recommended_label`
+is a separate human label and can still say HOLD. A failed check can be
+non-blocking under policy while failing quality and requiring that HOLD;
+MERGE_GATE.md exposes quality, policy, and merge permission to explain it.
+
+Report schema 3.0 mirrors `decision.verdict` in both `gate.verdict` and
+`gate.status`. The older report status ALLOW/BLOCK was a permission projection,
+so consumers of old packs must use `gate.verdict` to distinguish CONDITIONAL
+from BLOCK. No report field changes the canonical decision or exit adapter.
 
 ## Reader contract
 

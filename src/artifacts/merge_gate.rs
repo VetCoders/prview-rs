@@ -472,6 +472,17 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
         decision.state.gate_label(),
         decision.reason,
     ));
+    md.push_str(&format!(
+        "- Quality checks passed: `{}`\n- Policy has no hard blockers: `{}`\n- Allow merge: `{}`\n\n",
+        quality_pass, policy_allow_merge, decision_fields.allow_merge,
+    ));
+    if decision.state == MergeDecisionState::Hold && policy_allow_merge && !quality_pass {
+        md.push_str(
+            "A non-blocking check can still fail quality. `HOLD` recommends reviewing \
+             that failed evidence even though policy has no hard blocker; the canonical \
+             verdict above remains authoritative.\n\n",
+        );
+    }
     append_review_signals(&mut md, all_review_caveats.iter().map(String::as_str));
     md.push_str("## Checks\n\n");
     md.push_str("| Check | Status | Class | Blocking |\n");
@@ -752,6 +763,59 @@ mod tests {
             fs::read_to_string(tmp.path().join("AI_INDEX.md")).unwrap(),
             caveats,
         )
+    }
+
+    #[test]
+    fn merge_gate_markdown_explains_a_nonblocking_quality_failure_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config
+            .policy
+            .checks
+            .insert("cargo_test".into(), PolicySeverity::Warn);
+        let checks = [CheckResult {
+            name: "Cargo test".into(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::from_secs(1),
+            output: "test result: FAILED. 0 passed; 1 failed".into(),
+            cached: false,
+            provenance: None,
+        }];
+        let inline = InlineFindingsSummary {
+            status: "passed".into(),
+            findings_count: 0,
+            dashboard_findings: vec![],
+        };
+        let (target, bases) = resolved_refs();
+        generate_merge_gate(MergeGateInput {
+            dir: tmp.path(),
+            config: &config,
+            ledger: &empty_ledger(),
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &empty_coverage(),
+            diffs: &[],
+            skipped_checks: &[],
+            resolved_target: &target,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(true, true),
+        })
+        .unwrap();
+        let gate: serde_json::Value =
+            serde_json::from_slice(&fs::read(tmp.path().join("MERGE_GATE.json")).unwrap()).unwrap();
+        assert_eq!(gate["decision"]["verdict"], "CONDITIONAL");
+        assert_eq!(gate["decision"]["recommended_label"], "HOLD");
+        assert_eq!(gate["decision"]["quality_pass"], false);
+        assert_eq!(gate["decision"]["policy_allow_merge"], true);
+        assert_eq!(gate["checks"][0]["blocking"], false);
+        let md = fs::read_to_string(tmp.path().join("MERGE_GATE.md")).unwrap();
+        assert!(md.contains("- Quality checks passed: `false`"));
+        assert!(md.contains("- Policy has no hard blockers: `true`"));
+        assert!(md.contains("- Allow merge: `false`"));
+        assert!(md.contains("A non-blocking check can still fail quality"));
     }
 
     #[test]

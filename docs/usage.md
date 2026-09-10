@@ -856,6 +856,14 @@ they are not neutralized without compiler-backed name resolution.
 when the Markdown artifact is absent. Render a link only for a non-null path;
 `has_breaking: false` does not imply that the report is absent.
 
+In the same schema, `gate.status` equals `gate.verdict`: `PASS`, `CONDITIONAL`,
+or `BLOCK`. Do not derive it from `allow_merge`: that permission is false for
+both CONDITIONAL and BLOCK. Older report schemas used ALLOW/BLOCK for status;
+use their `gate.verdict` when reading the canonical outcome. `recommended_label`
+is human guidance: HOLD can accompany a non-blocking failed check because
+quality failed even though policy did not hard-block. MERGE_GATE.md names the
+quality, policy, and permission axes beside that explanation.
+
 - `00_summary/MERGE_GATE.json` is the canonical source of check statuses. Schema 3.0 records the loaded policy as `origin: file` with a source path, or `origin: builtin-default` with `source: null`; later filesystem changes do not rewrite that observation.
 - `00_summary/PROVENANCE.json` schema 2.0 answers *what was judged*: `target_sha` and the base commits,
   separately from the pre-check operator checkout (`worktree_head_sha`) and `operator_worktree`

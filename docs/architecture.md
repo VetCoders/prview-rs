@@ -2722,7 +2722,16 @@ from 2.0 must handle null and omit the link. The old hard-coded 2.0 path did not
 prove the file existed. `has_breaking` is independent: a Rust API report can
 exist with no breaking findings, and its link remains available. Artifact write
 errors still abort generation; null does not replace a failed write. The
-coverage nullability and all other report fields retain their prior meaning.
+coverage nullability retains its prior meaning.
+
+Schema 3.0 also makes `gate.status` a projection of the same canonical verdict
+as `gate.verdict` (`PASS` / `CONDITIONAL` / `BLOCK`). Report schemas 1.x/2.x
+instead projected `allow_merge` as ALLOW/BLOCK, which mislabeled CONDITIONAL as
+BLOCK. Older packs must be read through their explicit `gate.verdict`; their
+status cannot recover the lost distinction. The writer consumes the derived
+dashboard context and does not add another policy evaluator. The human
+`recommended_label` and policy/quality/permission axes keep their meanings;
+MERGE_GATE.md displays those axes and explains a non-blocking quality HOLD.
 
 Four-strategy filename heuristic matching:
 1. Exact stem match: `foo.rs` <-> `foo_test.rs` / `test_foo.rs` / `foo.test.ts`
