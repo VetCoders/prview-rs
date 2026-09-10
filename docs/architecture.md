@@ -621,6 +621,13 @@ so it is deliberately deferred rather than smuggled into a review path.
 
 #### Check provenance
 
+Heuristic `AnalysisSnapshot`s contain only the selected `git archive` output.
+They do not borrow the operator's `node_modules`: a local dependency can change
+Loctree import resolution even when both reviewed SHAs are unchanged. Dependency
+files committed to the selected revision remain in the archive. This source-only
+boundary applies to both CLI and TUI target/base heuristics; executable checks
+use the separate worktree/dependency mechanism described below.
+
 Every check records a `CheckProvenance` alongside its result: `command`,
 `tool_version`, `cwd`, `exit_code`, `started_at`/`finished_at`,
 `hard_fail_signatures`, `cache_key`, plus the substrate it read:
