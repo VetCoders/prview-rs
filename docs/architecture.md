@@ -719,6 +719,42 @@ legacy triples are still read (so a warm cache survives the upgrade) and are
 removed the first time the key is rewritten. An entry whose blob no longer
 parses replays with no provenance instead of failing the run.
 
+#### Shared snapshot integrity at check boundaries
+
+`checks::snapshot_integrity::SnapshotObservation` compares the ledger-owned
+worktree with the immutable commit resolved before worktree creation. The shared
+`execute_live_check` path (headless and TUI) observes before and after every live
+check, including errors. The ledger retains non-clean observations even when a
+later check restores the checkout. Artifact generation adds a final observation
+before context commands run. Comparisons union target-tree→index and
+index→worktree paths: staged changes and test-created commits remain visible.
+Newly untracked files are excluded; tracked lockfile changes, deletions and type
+changes remain. A changed HEAD or unreadable/foreign/raced observation cannot
+certify clean. Git reads run outside ledger locks; no lock spans an await.
+
+Modified or unknown observations emit `20_quality/SNAPSHOT_INTEGRITY.json/.md`;
+clean runs and runs without a shared snapshot emit no extra file. JSON schema 1.0
+carries `observation: shared-snapshot-check-boundaries`, `expected_target_sha`,
+final `observed_head_sha`, aggregate `status` (`modified` or `unknown`), the union
+of `changed_paths` (null if any comparison is unknown), nullable `error`, and
+`observations`. The latter retains non-clean boundaries plus the final observation,
+each with its own SHA, paths, status, error, `phase` and nullable `check_name`.
+Known paths remain in individual observations even when the aggregate is unknown.
+Non-UTF8 Git path bytes are hex-escaped. A failed evidence write aborts publication.
+The same typed report raises both merge-gate and dashboard analysis to at least
+degraded and merge recommendation to at least review_required without lowering
+BLOCK. Report and HTML consume that decision; check results and exit codes are
+preserved, and no check is added. Existing gate/provenance schemas keep their shape.
+
+A live result is not written to cache when a non-clean observation occurs before,
+after, or during its execution (including observations from concurrent checks).
+Existing cache entries are not retroactively revalidated by this guard.
+Check names identify observation boundaries, not the writer: checks can overlap.
+Observation is not atomic; mutations restored between observations, including
+within one check, are not guaranteed to be detected. Writes by later context tools
+are outside this observation window. Per-check `snapshot-dirty` remains a separate
+record and can still reflect a harmless untracked lockfile.
+
 #### Pack-level provenance — `00_summary/PROVENANCE.json`
 
 The current schema is **2.0**, independently versioned from `RUN.json`,

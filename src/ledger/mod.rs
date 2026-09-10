@@ -166,6 +166,7 @@ pub struct TaskLedger {
     /// with the frame that created it.
     shared_snapshot: Mutex<Option<WorktreeSnapshot>>,
     resolved_substrate: Mutex<Option<SubstrateKey>>,
+    snapshot_observations: Mutex<Vec<crate::checks::snapshot_integrity::SnapshotObservation>>,
 }
 
 impl TaskLedger {
@@ -320,6 +321,51 @@ impl TaskLedger {
             .shared_snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = snapshot;
+    }
+
+    /// Observe outside the ledger locks; retain only non-clean boundaries.
+    pub(crate) fn observe_snapshot(&self, phase: &'static str, check_name: Option<&str>) {
+        let source = self
+            .shared_snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|snapshot| {
+                (
+                    snapshot.worktree_path.clone(),
+                    snapshot.repo_root.clone(),
+                    snapshot.original_target_sha.clone(),
+                )
+            });
+        if let Some((path, root, target)) = source {
+            let mut observation = crate::checks::snapshot_integrity::SnapshotObservation::observe(
+                &path, &root, &target,
+            );
+            observation.phase = phase;
+            observation.check_name = check_name.map(str::to_owned);
+            if observation.requires_review() {
+                self.snapshot_observations
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(observation);
+            }
+        }
+    }
+
+    pub(crate) fn snapshot_integrity_epoch(&self) -> usize {
+        self.snapshot_observations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    pub(crate) fn snapshot_observations(
+        &self,
+    ) -> Vec<crate::checks::snapshot_integrity::SnapshotObservation> {
+        self.snapshot_observations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Explicitly clean the shared snapshot while the run scope and its

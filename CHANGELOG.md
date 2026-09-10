@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shared review snapshots now preserve tracked/index changes against the original
+  target as SNAPSHOT_INTEGRITY evidence and require review without rewriting
+  passing or failed Cargo results. Committed changes and unknown observations
+  cannot certify clean; newly untracked lockfiles do not trigger this rule.
+  Non-clean check boundaries remain visible after later restoration and prevent
+  overlapping results from entering the target cache.
+
 - Pre-existing failure classification uses the operator HEAD captured before
   checks. A later checkout can invalidate stability but cannot grant a new
   downgrade; unknown captured HEAD no longer takes a permissive local fallback.

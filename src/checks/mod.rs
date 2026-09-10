@@ -27,6 +27,7 @@ pub const TEST_TIMEOUT_SECS: u64 = 900;
 mod cargo;
 mod python;
 mod semgrep;
+pub(crate) mod snapshot_integrity;
 mod typescript;
 
 pub(crate) use cargo::planned_cargo_cwd;
@@ -776,7 +777,7 @@ async fn run_all_checks(
                     let result = crate::governor::with_child_scope(
                         governor,
                         &queued_name,
-                        execute_live_check(check, config.as_ref(), cache.as_ref()),
+                        execute_live_check(check, config.as_ref(), cache.as_ref(), Some(ledger)),
                     )
                     .await;
                     record_completed_check(&result, ledger, queued_at, started_at);
@@ -1235,7 +1236,7 @@ where
                     let result = crate::governor::with_child_scope(
                         governor,
                         &queued_name,
-                        execute_live_check(check, config.as_ref(), cache.as_ref()),
+                        execute_live_check(check, config.as_ref(), cache.as_ref(), Some(ledger)),
                     )
                     .await;
                     record_completed_check(&result, ledger, queued_at, started_at);
@@ -1454,13 +1455,30 @@ fn record_completed_check(
     });
 }
 
-async fn execute_live_check(check: Box<dyn Check>, config: &Config, cache: &Cache) -> CheckResult {
+async fn execute_live_check(
+    check: Box<dyn Check>,
+    config: &Config,
+    cache: &Cache,
+    ledger: Option<&TaskLedger>,
+) -> CheckResult {
     let start = std::time::Instant::now();
     let started_at = chrono::Local::now().to_rfc3339();
     let name = check.name().to_string();
     let cache_key = check.cache_key(config);
 
-    match check.run(config).await {
+    let initial_epoch = ledger.map(TaskLedger::snapshot_integrity_epoch);
+    if let Some(ledger) = ledger {
+        ledger.observe_snapshot("before-check", Some(&name));
+    }
+    let outcome = check.run(config).await;
+    if let Some(ledger) = ledger {
+        ledger.observe_snapshot("after-check", Some(&name));
+    }
+    // Any non-clean observation while this check was running makes its source
+    // unsuitable for a cache entry under the original target key. Another
+    // concurrent check can supply that observation; no writer is inferred.
+    let source_stable = initial_epoch == ledger.map(TaskLedger::snapshot_integrity_epoch);
+    match outcome {
         Ok(mut result) => {
             if matches!(result.status, CheckStatus::Passed | CheckStatus::Warnings)
                 && has_tool_crash(&result.output)
@@ -1475,7 +1493,8 @@ async fn execute_live_check(check: Box<dyn Check>, config: &Config, cache: &Cach
             // the source-hash key (e.g. `mypy-<python_hash>`) would pin the
             // transient miss for the whole hash lifetime, so a later run with
             // the tool present still reports Skipped (PR #12 review #14).
-            if result.status != CheckStatus::Skipped
+            if source_stable
+                && result.status != CheckStatus::Skipped
                 && let Some(key) = cache_key.clone()
             {
                 // Store the provenance next to the result so a later cache hit
@@ -4606,6 +4625,109 @@ test result: ok. 2 passed; 0 failed
     }
 
     #[tokio::test]
+    async fn snapshot_integrity_retains_changes_restored_by_a_later_check_and_guards_cache() {
+        struct Writer {
+            name: &'static str,
+            contents: &'static str,
+            status: CheckStatus,
+            error: bool,
+        }
+        #[async_trait]
+        impl Check for Writer {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn check_eligibility(&self, _: &Config) -> CheckEligibility {
+                CheckEligibility::Run
+            }
+            fn cache_key(&self, _: &Config) -> Option<String> {
+                Some("original-target".into())
+            }
+            async fn run(&self, config: &Config) -> Result<CheckResult> {
+                std::fs::write(
+                    config
+                        .scan_dir_override
+                        .as_ref()
+                        .unwrap()
+                        .join("tracked.txt"),
+                    self.contents,
+                )?;
+                if self.error {
+                    anyhow::bail!("fixture execution error");
+                }
+                Ok(CheckResult {
+                    name: self.name.into(),
+                    status: self.status,
+                    duration: Duration::ZERO,
+                    output: "actual check output".into(),
+                    cached: false,
+                    provenance: None,
+                })
+            }
+        }
+        let (repo, target) = repo_with_one_commit();
+        let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+        let path = snapshot.worktree_path.clone();
+        let ledger = TaskLedger::new();
+        ledger.set_shared_snapshot(Some(snapshot));
+        let mut config = rust_config(true, true, true);
+        config.repo_root = repo.path().to_path_buf();
+        config.scan_dir_override = Some(path.clone());
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = Cache::with_dir(cache_dir.path().to_path_buf(), true);
+        for (name, contents, status, error) in [
+            ("stable", "one\n", CheckStatus::Passed, false),
+            ("mutate", "changed\n", CheckStatus::Passed, false),
+            ("restore", "one\n", CheckStatus::Failed, false),
+            ("error", "error changed\n", CheckStatus::Error, true),
+        ] {
+            let result = execute_live_check(
+                Box::new(Writer {
+                    name,
+                    contents,
+                    status,
+                    error,
+                }),
+                &config,
+                &cache,
+                Some(&ledger),
+            )
+            .await;
+            assert_eq!(result.status, status, "raw check status for {name}");
+            assert_eq!(
+                cache.get(name, "original-target").is_some(),
+                name == "stable",
+                "cache for {name}"
+            );
+            if name == "restore" {
+                assert!(
+                    !snapshot_integrity::SnapshotObservation::observe(&path, repo.path(), &target)
+                        .requires_review()
+                );
+                let observations = ledger.snapshot_observations();
+                assert_eq!(observations.len(), 2);
+                assert_eq!(observations[0].check_name.as_deref(), Some("mutate"));
+                assert_eq!(observations[0].phase, "after-check");
+                assert_eq!(observations[1].check_name.as_deref(), Some("restore"));
+                assert_eq!(observations[1].phase, "before-check");
+                assert_eq!(
+                    observations[0].changed_paths.as_ref().unwrap(),
+                    &["tracked.txt"]
+                );
+            }
+        }
+        assert_eq!(
+            ledger
+                .snapshot_observations()
+                .last()
+                .unwrap()
+                .check_name
+                .as_deref(),
+            Some("error")
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_skipped_result_is_not_cached() {
         // PR #12 review #14: a check that RAN but returned Skipped (mypy when uv
         // "failed to spawn" a missing binary) must NOT be persisted, or the
@@ -4651,6 +4773,7 @@ test result: ok. 2 passed; 0 failed
             }),
             &config,
             &cache,
+            None,
         )
         .await;
         assert!(
@@ -4666,6 +4789,7 @@ test result: ok. 2 passed; 0 failed
             }),
             &config,
             &cache2,
+            None,
         )
         .await;
         assert!(
@@ -4707,7 +4831,7 @@ test result: ok. 2 passed; 0 failed
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
 
-        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache).await;
+        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache, None).await;
         assert_eq!(result.status, CheckStatus::Error);
 
         let prov = result
@@ -4774,7 +4898,7 @@ test result: ok. 2 passed; 0 failed
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
-        let result = execute_live_check(Box::new(TimingOutCargo), &config, &cache).await;
+        let result = execute_live_check(Box::new(TimingOutCargo), &config, &cache, None).await;
 
         let prov = result
             .provenance
@@ -4831,7 +4955,7 @@ test result: ok. 2 passed; 0 failed
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
 
-        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache).await;
+        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache, None).await;
         assert!(
             result.provenance.is_none(),
             "a vanished per-check worktree must not be reported as the local tree",
@@ -4887,7 +5011,7 @@ test result: ok. 2 passed; 0 failed
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
 
         // Pass 1 — live execution, fills the cache.
-        let live = execute_live_check(Box::new(MockCheck), &config, &cache).await;
+        let live = execute_live_check(Box::new(MockCheck), &config, &cache, None).await;
         assert!(!live.cached);
         let live_prov = live.provenance.expect("live run must carry provenance");
 

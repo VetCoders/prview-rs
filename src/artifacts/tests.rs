@@ -100,6 +100,51 @@ fn assert_no_success_surfaces(output_dir: &Path, seam: ArtifactGenerationSeam) {
     }
 }
 
+#[test]
+fn snapshot_tracked_changes_are_preserved_as_review_evidence() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    fs::write(
+        snapshot.worktree_path.join("own.rs"),
+        "pub fn own() -> u8 { 9 }\n",
+    )
+    .unwrap();
+    let ledger = crate::ledger::TaskLedger::new();
+    ledger.set_shared_snapshot(Some(snapshot));
+    let output = tempfile::tempdir().unwrap();
+    let pack = output.path().join("pack");
+    let governor = crate::governor::ResourceGovernor::new();
+    generate_fixture_pack_with_ledger(repo.path(), &pack, &target, &base, &governor, &ledger)
+        .unwrap();
+
+    let evidence = pack.join("20_quality/SNAPSHOT_INTEGRITY.json");
+    assert!(
+        evidence.is_file(),
+        "tracked changes in the shared snapshot need durable evidence"
+    );
+    let evidence: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(evidence).unwrap()).unwrap();
+    assert_eq!(evidence["expected_target_sha"], target);
+    assert_eq!(evidence["status"], "modified");
+    assert_eq!(evidence["changed_paths"][0], "own.rs");
+    let gate: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(pack.join("00_summary/MERGE_GATE.json")).unwrap())
+            .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(pack.join("report.json")).unwrap()).unwrap();
+    for caveats in [
+        &gate["decision"]["review_caveats"],
+        &report["gate"]["review_caveats"],
+    ] {
+        assert!(caveats.as_array().unwrap().iter().any(|c| {
+            c.as_str()
+                .is_some_and(|s| s.contains("Snapshot integrity") && s.contains("own.rs"))
+        }));
+    }
+}
+
 /// A cancelled pack must not be advertised as the latest completed review
 /// (parent `latest` symlink) or as a row in the run index. Publication is
 /// irreversible; the seam check has to run before those side effects.
@@ -1137,6 +1182,7 @@ macro_rules! generate_merge_gate_test {
             resolved_target: $resolved_target,
             resolved_bases: $resolved_bases,
             clean_comparison: CleanComparison::for_test(true, true),
+            snapshot_integrity: None,
         })
     };
 }
@@ -7286,4 +7332,128 @@ fn breaking_markdown_write_failure_is_not_reported_as_success() {
         risk_level: signal::BreakingRisk::High,
     };
     assert!(signal::write_breaking_changes_with_api(dir.path(), None, &[finding]).is_err());
+}
+
+#[test]
+fn snapshot_integrity_gate_preserves_check_results_and_dashboard_parity() {
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    let clean = signal::SnapshotIntegrity::observe(&snapshot.worktree_path, repo.path(), &target);
+    fs::write(
+        snapshot.worktree_path.join("own.rs"),
+        "pub fn own() -> u8 { 7 }\n",
+    )
+    .unwrap();
+    let changed = signal::SnapshotIntegrity::observe(&snapshot.worktree_path, repo.path(), &target);
+    let policy = PolicyConfig {
+        mode: crate::policy::PolicyMode::Block,
+        default_severity: crate::policy::PolicySeverity::Ignore,
+        checks: std::collections::HashMap::from([(
+            "cargo_test".to_owned(),
+            crate::policy::PolicySeverity::Block,
+        )]),
+        ..PolicyConfig::default()
+    };
+    let config = test_config_builder()
+        .repo_root(repo.path())
+        .profile(test_generic_profile())
+        .policy(policy)
+        .build();
+    let target_ref = ResolvedRef {
+        name: "feature".to_owned(),
+        commit_id: target,
+        is_remote: false,
+    };
+    let bases = [ResolvedRef {
+        name: "main".to_owned(),
+        commit_id: base,
+        is_remote: false,
+    }];
+    let inline = InlineFindingsSummary {
+        status: "passed".to_owned(),
+        findings_count: 0,
+        dashboard_findings: Vec::new(),
+    };
+    for (integrity, raw_status, verdict) in [
+        (&clean, CheckStatus::Passed, "PASS"),
+        (&changed, CheckStatus::Passed, "CONDITIONAL"),
+        (&changed, CheckStatus::Failed, "BLOCK"),
+    ] {
+        let output = tempfile::tempdir().unwrap();
+        let checks = [CheckResult {
+            name: "Cargo test".to_owned(),
+            status: raw_status,
+            duration: Duration::ZERO,
+            output: "real result preserved".to_owned(),
+            cached: false,
+            provenance: None,
+        }];
+        let coverage = CoverageDelta {
+            total_source: 0,
+            covered_count: 0,
+            pct: None,
+            uncovered: Vec::new(),
+            covered: Vec::new(),
+            non_code_count: 0,
+            ghost_tests: Vec::new(),
+        };
+        let ledger = crate::ledger::TaskLedger::new();
+        generate_merge_gate(MergeGateInput {
+            dir: output.path(),
+            config: &config,
+            ledger: &ledger,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &coverage,
+            diffs: &[],
+            skipped_checks: &[],
+            resolved_target: &target_ref,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(false, true),
+            snapshot_integrity: Some(integrity),
+        })
+        .unwrap();
+        let dashboard = build_dashboard_context(DashboardContextInput {
+            config: &config,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: Vec::new(),
+            rust_api_delta: None,
+            coverage,
+            diff_dir: output.path(),
+            skipped_checks: Vec::new(),
+            out_dir: output.path(),
+            diffs: &[],
+            ownership_map: Vec::new(),
+            clean_comparison: CleanComparison::for_test(false, true),
+            snapshot_integrity: Some(integrity),
+        });
+        let gate: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output.path().join("MERGE_GATE.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gate["decision"]["verdict"], verdict);
+        assert_eq!(dashboard.verdict, verdict);
+        assert_eq!(gate["checks"][0]["status"], raw_status.as_str());
+        assert_eq!(checks[0].status, raw_status);
+        let gate_caveats = gate["decision"]["review_caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .filter(|c| c.starts_with("Snapshot integrity"))
+            .collect::<Vec<_>>();
+        let dashboard_caveats = dashboard
+            .review_caveats
+            .iter()
+            .filter(|c| c.starts_with("Snapshot integrity"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(gate_caveats, dashboard_caveats);
+        assert_eq!(gate_caveats.len(), usize::from(integrity.requires_review()));
+    }
 }

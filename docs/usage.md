@@ -850,6 +850,26 @@ paths inside an impl can change meaning when it moves modules. Aliases used only
 inside generic arguments can therefore still produce a conservative warning;
 they are not neutralized without compiler-backed name resolution.
 
+#### Changes made inside a review snapshot
+
+Before and after each live check, and after checks finish, prview compares the
+shared snapshot with the original reviewed commit. Tracked/index changes or a changed snapshot HEAD require review; an
+unverifiable comparison also requires review. The original check status and exit
+code stay intact: passing Cargo tests still show PASS, while the pack becomes at
+least CONDITIONAL. Existing blocking failures remain BLOCK.
+
+`20_quality/SNAPSHOT_INTEGRITY.json` and `.md` preserve the original target,
+observed HEAD, complete tracked-path list, and any observation error. AI_INDEX
+points at this evidence. The gate and dashboard carry the same review signal.
+Newly untracked files, including a generated Cargo.lock, do not trigger this rule;
+a changed **tracked** Cargo.lock does. Staged changes, deletions and changes
+committed inside the snapshot are included. Local operator worktrees are outside
+this snapshot rule. An observed change remains visible even if a later check
+restores the file. Check names label observation boundaries and do not identify
+the writer when checks overlap. Results overlapping an observed change are not
+written to cache. These observations are not atomic and do not cover later
+context commands; a change restored between observations can remain undetected.
+
 #### How to read an artifact pack
 
 `report.json` schema 3.0 uses `null` for `quality.breaking_changes.md_path`

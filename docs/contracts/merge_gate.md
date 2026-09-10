@@ -771,3 +771,24 @@ Whether a check's `FAIL` blocks the merge depends on its policy severity:
 - `shadow`: never blocks.
 - `warn`: blocks only `FAIL + block`.
 - `block`: blocks `FAIL + (block | warn)`.
+
+## Shared snapshot integrity signal
+
+When the ledger-owned review snapshot has tracked/index changes against the
+original target, a changed HEAD, or an unknown integrity observation, the decision
+requires review regardless of an otherwise passing Cargo result. The emitter
+raises analysis to at least `degraded`, merge recommendation to at least
+`review_required`, and enforcement disposition to at least `review_required`; it
+never lowers an existing BLOCK or rewrites a check status, exit code or quality
+failure. `decision.review_caveats` names `20_quality/SNAPSHOT_INTEGRITY.md`, whose
+JSON sibling records the complete tracked-path list and source identity. This
+uses the existing decision fields; no gate schema migration is introduced.
+
+Clean shared snapshots and local runs add no signal. Newly untracked files
+(including a generated Cargo.lock) are excluded; modifications to tracked files
+(including a tracked Cargo.lock) and changes committed inside the snapshot are
+not. The evidence retains non-clean observations before/after live checks plus
+the final observation before context tools, so a later restoration does not erase
+an observed change. Boundary check names do not identify the writer. Changes
+restored between observations are not guaranteed to be detected. Results that
+overlap non-clean observations are not written to cache; raw results are preserved.
