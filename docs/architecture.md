@@ -224,7 +224,8 @@ Implementations:
   `--baseline-commit <merge-base>` when the git baseline is clean and available,
   while `--security-full` keeps a full-tree scan. Explicit `--skip-security`
   is carried separately from the heavy-security opt-in and disables this check
-  before tool discovery.
+  before tool discovery. The shared `security disabled` mode-skip reason keeps
+  policy evaluation `skipped` and review-required when the scanner is required.
 - `CargoGeigerCheck` - `cargo geiger`
 - `RuffCheck` - `ruff check`
 - `MypyCheck` - `mypy`

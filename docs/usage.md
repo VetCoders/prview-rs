@@ -410,6 +410,9 @@ prview --help
 An explicit `--skip-security` disables Semgrep before tool discovery, including
 in quick review runs. This is separate from the heavy-security opt-in; an
 ordinary run without `--with-security` still uses the default Semgrep scan.
+The explicit opt-out is a declared mode skip. If policy requires Semgrep at
+`block` severity, the missing scan requires review and leaves analysis incomplete.
+A required scanner that is unavailable without an explicit opt-out still blocks.
 
 By default, Semgrep is scoped to the change when prview can resolve a clean git
 baseline: it passes Semgrep `--baseline-commit <merge-base>` so existing

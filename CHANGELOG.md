@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An explicit Semgrep security opt-out is a declared mode skip, requiring review
+  when policy requires the scanner instead of being classified as unknown.
+
 - Shared review snapshots now preserve tracked/index changes against the original
   target as SNAPSHOT_INTEGRITY evidence and require review without rewriting
   passing or failed Cargo results. Committed changes and unknown observations

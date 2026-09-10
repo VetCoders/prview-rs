@@ -83,6 +83,12 @@ Every element of `checks` is one policy evaluation record:
 | `evidence` | string | `20_quality/<artifact_id>.result.json` for an executed check; otherwise the reason text or `"skipped — no artifact generated"` |
 | `log` | string \| null | `20_quality/<artifact_id>.log` for an executed check, else `null` |
 
+Semgrep disabled by `--skip-security` uses the shared `security disabled` mode
+reason, with `execution_state: skipped` and `outcome: skipped`. At `block`
+severity its policy conclusion is `advisory`, confidence is `incomplete`, and
+merge impact is `review_required`; `blocking` is false. An unavailable required
+scanner without an explicit opt-out retains its blocking policy outcome.
+
 Skipped or unavailable checks carry no executed `CheckResult`, so `duration_secs`
 is `0.0`, `cached` is `null`, `log` is `null`, and `evidence` degrades to a
 non-empty placeholder. These are contract-valid placeholders, never `null`
