@@ -502,7 +502,7 @@ struct BreakingSection {
     has_breaking: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
-    md_path: &'static str,
+    md_path: Option<&'static str>,
     removed_public_symbols_count: usize,
     signature_changes_count: usize,
     new_env_vars_count: usize,
@@ -970,7 +970,13 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                             .then(|| format!("{} breaking findings", ctx.breaking.len()))
                     })
             }),
-            md_path: "20_quality/BREAKING_CHANGES.md",
+            // A Rust API report can exist without a breaking finding. Link the
+            // emitted artifact, rather than inferring its presence from severity.
+            md_path: input
+                .dir
+                .join("20_quality/BREAKING_CHANGES.md")
+                .is_file()
+                .then_some("20_quality/BREAKING_CHANGES.md"),
             removed_public_symbols_count: removed_symbols
                 + rust_counts.map_or(0, |counts| counts.removed),
             signature_changes_count: signature_changes
@@ -1138,7 +1144,7 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         // the loctree counters became omittable, so a decoder written against
         // 1.0 no longer parses every pack. Calling that additive would repeat,
         // at the schema level, the "0/0 is 100%" lie the change removed.
-        schema_version: "2.0",
+        schema_version: "3.0",
         meta,
         gate,
         checks: check_entries,
@@ -1933,6 +1939,16 @@ test result: FAILED. 0 passed; 1 failed
         heuristics: Option<&crate::heuristics::HeuristicsResult>,
         run_heuristics: bool,
     ) -> serde_json::Value {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        report_with_artifact_dir(ctx, heuristics, run_heuristics, tmp.path())
+    }
+
+    fn report_with_artifact_dir(
+        ctx: &crate::artifacts::DashboardContext,
+        heuristics: Option<&crate::heuristics::HeuristicsResult>,
+        run_heuristics: bool,
+        dir: &Path,
+    ) -> serde_json::Value {
         use crate::cli::ExecutionMode;
         use crate::config::test_config;
         use crate::git::ResolvedRef;
@@ -1950,9 +1966,8 @@ test result: FAILED. 0 passed; 1 failed
             commit_id: "cafebabe".to_string(),
             is_remote: false,
         }];
-        let tmp = tempfile::tempdir().expect("tempdir");
         let input = ReportInput {
-            dir: tmp.path(),
+            dir,
             config: &config,
             diffs: &[],
             checks: &[],
@@ -2003,7 +2018,8 @@ test result: FAILED. 0 passed; 1 failed
     #[test]
     fn report_schema_version_states_the_nullable_shape() {
         // The unmeasured cut changed `heuristic_ratio` from a plain number to a
-        // nullable one, and made the loctree counters omittable. Both are shape
+        // nullable one, and made the loctree counters omittable. Schema 3.0 also
+        // makes the breaking-report path nullable. These are shape
         // changes a strict 1.0 decoder cannot survive, so leaving the stamp at
         // "1.0" makes report.json misdescribe itself — the same class of lie the
         // cut was fixing one level down. MINOR would promise old decoders keep
@@ -2017,9 +2033,34 @@ test result: FAILED. 0 passed; 1 failed
         );
         assert_eq!(
             json["schema_version"].as_str(),
-            Some("2.0"),
+            Some("3.0"),
             "a nullable field and omittable counters are not an additive change"
         );
+        assert!(json["quality"]["breaking_changes"]["md_path"].is_null());
+    }
+
+    #[test]
+    fn report_links_an_existing_breaking_artifact_without_breaking_findings() {
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("20_quality/BREAKING_CHANGES.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# Breaking Changes\n\nNo breaking changes.\n").unwrap();
+        let json = report_with_artifact_dir(&ctx, None, false, tmp.path());
+        assert_eq!(json["quality"]["breaking_changes"]["has_breaking"], false);
+        assert_eq!(
+            json["quality"]["breaking_changes"]["md_path"],
+            "20_quality/BREAKING_CHANGES.md"
+        );
+    }
+
+    #[test]
+    fn report_does_not_link_a_directory_named_like_the_breaking_artifact() {
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("20_quality/BREAKING_CHANGES.md")).unwrap();
+        let json = report_with_artifact_dir(&ctx, None, false, tmp.path());
+        assert!(json["quality"]["breaking_changes"]["md_path"].is_null());
     }
 
     #[test]

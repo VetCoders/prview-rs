@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `report.json` schema 3.0 makes `quality.breaking_changes.md_path` nullable.
+  Missing Markdown reports no longer advertise a dead link; existing Rust API
+  reports remain linked even when they contain no breaking findings.
+
 - `MERGE_GATE.json` schema 3.0 records actual policy provenance captured at
   load: `origin: file` with a source path, or `origin: builtin-default` with
   `source: null`. CLI/MCP readers and the validator accept 3.0 while retaining

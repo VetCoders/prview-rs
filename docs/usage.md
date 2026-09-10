@@ -842,6 +842,10 @@ they are not neutralized without compiler-backed name resolution.
 
 #### How to read an artifact pack
 
+`report.json` schema 3.0 uses `null` for `quality.breaking_changes.md_path`
+when the Markdown artifact is absent. Render a link only for a non-null path;
+`has_breaking: false` does not imply that the report is absent.
+
 - `00_summary/MERGE_GATE.json` is the canonical source of check statuses. Schema 3.0 records the loaded policy as `origin: file` with a source path, or `origin: builtin-default` with `source: null`; later filesystem changes do not rewrite that observation.
 - `00_summary/PROVENANCE.json` schema 2.0 answers *what was judged*: `target_sha` and the base commits,
   separately from the pre-check operator checkout (`worktree_head_sha`) and `operator_worktree`

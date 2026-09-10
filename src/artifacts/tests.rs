@@ -7249,3 +7249,18 @@ fn worktree_digest_separates_nested_repositories_by_their_own_state() {
         "the same nested tree must fingerprint identically",
     );
 }
+
+#[test]
+fn breaking_markdown_write_failure_is_not_reported_as_success() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("BREAKING_CHANGES.md")).unwrap();
+    let finding = signal::BreakingFinding {
+        file: "api.ts".to_string(),
+        kind: signal::BreakingKind::RemovedSymbol {
+            symbol_type: "function".to_string(),
+        },
+        line: "export function removed() {}".to_string(),
+        risk_level: signal::BreakingRisk::High,
+    };
+    assert!(signal::write_breaking_changes_with_api(dir.path(), None, &[finding]).is_err());
+}

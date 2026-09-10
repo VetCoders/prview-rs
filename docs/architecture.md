@@ -2696,7 +2696,7 @@ omit the coverage surface entirely — never as a percentage. A real `0/N`
 `quality.coverage.heuristic_ratio` is `null` in the unmeasured case and is
 paired with `measured: false` + `not_measured_reason`. That nullability — with
 the loctree counters becoming omittable for the same reason — is why
-`report.json` carries `schema_version: "2.0"`: a decoder written against `1.0`,
+`report.json` moved to schema 2.0: a decoder written against `1.0`,
 where the ratio was always a number, does not parse every pack.
 
 `report.json`'s `gate.quality_failure_details[]` mirrors `MERGE_GATE.json`'s
@@ -2707,8 +2707,16 @@ together: the arrays admit warning-level baseline signals so the pre-existing
 downgrade can be computed for them, and only a `"failure"` origin can fail the
 quality gate. Emitting it in the gate artifact but not in `report.json` left the
 two artifacts of one run disagreeing about what "failure" meant. The field is
-additive and `report.json` stays `schema_version: "2.0"` — that major is
-unreleased, so no consumer has ever seen a 2.0 without it.
+additive within schema 2.0 and remains present in 3.0.
+
+**Current report schema: 3.0.** `quality.breaking_changes.md_path` is a
+pack-relative string only when `20_quality/BREAKING_CHANGES.md` exists as a
+file at report generation, otherwise it is explicitly `null`. Readers migrating
+from 2.0 must handle null and omit the link. The old hard-coded 2.0 path did not
+prove the file existed. `has_breaking` is independent: a Rust API report can
+exist with no breaking findings, and its link remains available. Artifact write
+errors still abort generation; null does not replace a failed write. The
+coverage nullability and all other report fields retain their prior meaning.
 
 Four-strategy filename heuristic matching:
 1. Exact stem match: `foo.rs` <-> `foo_test.rs` / `test_foo.rs` / `foo.test.ts`
