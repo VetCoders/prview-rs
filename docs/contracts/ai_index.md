@@ -47,7 +47,7 @@ The reading order must always include references to:
 
 `PROVENANCE.json` follows the gate data directly: a verdict is only as good as
 the substrate it was computed on, so the reading order places what was judged
-(target and base commits, working-tree state, the tree each check actually
+(target and base commits, separately named operator checkout state, the tree each check actually
 scanned) next to the judgement itself. It is written after `AI_INDEX.md` and is
 mandatory for every pack, so the reference is unconditional rather than
 existence-guarded.

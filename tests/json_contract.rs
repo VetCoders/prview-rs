@@ -2046,7 +2046,17 @@ fn generated_pack_carries_pack_level_provenance() {
     let temp = create_fixture_repo();
     let repo = temp.path();
 
-    let payload = run_json_quiet(repo, &["feature/json-contract", "main"]);
+    run_git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+    run_git(repo, &["checkout", "main"]);
+    let payload = run_json_quiet(
+        repo,
+        &[
+            "feature/json-contract",
+            "main",
+            "--remote-only",
+            "--no-fetch",
+        ],
+    );
     let output_dir = Path::new(
         payload["output_dir"]
             .as_str()
@@ -2059,7 +2069,7 @@ fn generated_pack_carries_pack_level_provenance() {
     )
     .expect("PROVENANCE.json must be valid JSON");
 
-    assert_eq!(provenance["schema_version"].as_str(), Some("1.0"));
+    assert_eq!(provenance["schema_version"].as_str(), Some("2.0"));
 
     // The pack-level record must agree with RUN.json about what was analysed —
     // two truths about the substrate is exactly the failure mode it prevents.
@@ -2069,13 +2079,17 @@ fn generated_pack_carries_pack_level_provenance() {
     .expect("parse RUN.json");
     assert_eq!(provenance["target_sha"], run["refs"]["target_sha"]);
     assert!(
-        provenance["head_sha"].is_string(),
+        provenance["worktree_head_sha"].is_string(),
         "the locally checked-out commit must be recorded"
     );
     assert!(
         provenance["base_sha"].is_string(),
         "the diff baseline must be recorded"
     );
+    assert_eq!(provenance["worktree_head_sha"], provenance["base_sha"]);
+    assert_ne!(provenance["worktree_head_sha"], provenance["target_sha"]);
+    assert!(provenance.get("head_sha").is_none());
+    assert!(provenance.get("worktree").is_none());
     // Every baseline, named: a multi-base run produces one patch per base, and
     // the scalar is the array's first entry rather than a second truth.
     let bases = provenance["bases"]
@@ -2087,9 +2101,12 @@ fn generated_pack_carries_pack_level_provenance() {
 
     // The fixture repo is committed clean before the run; the digest is present
     // either way, so an audit can distinguish two differently-dirty runs.
-    assert_eq!(provenance["worktree"]["clean"].as_bool(), Some(true));
+    assert_eq!(
+        provenance["operator_worktree"]["clean"].as_bool(),
+        Some(true)
+    );
     assert!(
-        provenance["worktree"]["status_digest"]
+        provenance["operator_worktree"]["status_digest"]
             .as_str()
             .expect("status digest")
             .starts_with("sha256:")

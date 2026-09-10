@@ -83,6 +83,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
         skipped_checks: Vec::new(),
         worktree_clean: Some(true),
         worktree_status_digest: None,
+        worktree_head_sha: None,
         governor,
     })
 }
@@ -6879,8 +6880,17 @@ fn write_provenance_fixture_with_skips(
     skipped_checks: &[crate::checks::SkippedCheck],
     diffs: &[Diff],
 ) -> serde_json::Value {
-    let repo = Repository::open(repo_root).expect("open repo");
     let worktree = capture_worktree_provenance(repo_root);
+    write_provenance_fixture_with_capture(out, checks, skipped_checks, diffs, &worktree)
+}
+
+fn write_provenance_fixture_with_capture(
+    out: &Path,
+    checks: &[CheckResult],
+    skipped_checks: &[crate::checks::SkippedCheck],
+    diffs: &[Diff],
+    worktree: &WorktreeProvenance,
+) -> serde_json::Value {
     let resolved_target = ResolvedRef {
         name: "feature/provenance".to_string(),
         commit_id: "abc1234abc1234abc1234abc1234abc1234ab".to_string(),
@@ -6894,7 +6904,6 @@ fn write_provenance_fixture_with_skips(
 
     generate_provenance_json(ProvenanceJsonInput {
         dir: out,
-        repo: &repo,
         checks,
         skipped_checks,
         diffs,
@@ -6902,6 +6911,7 @@ fn write_provenance_fixture_with_skips(
         resolved_bases: &resolved_bases,
         worktree_clean: worktree.clean,
         worktree_status_digest: worktree.status_digest.as_deref(),
+        worktree_head_sha: worktree.head_sha.as_deref(),
     })
     .expect("generate_provenance_json");
 
@@ -6928,13 +6938,15 @@ fn provenance_json_records_pack_level_substrate() {
 
     let json = write_provenance_fixture(repo_tmp.path(), out.path(), &checks);
 
-    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["schema_version"], "2.0");
     assert_eq!(json["target_sha"], "abc1234abc1234abc1234abc1234abc1234ab");
     assert_eq!(json["base_sha"], "def5678def5678def5678def5678def5678de");
-    assert_eq!(json["head_sha"], head);
-    assert_eq!(json["worktree"]["clean"], true);
+    assert_eq!(json["worktree_head_sha"], head);
+    assert!(json.get("head_sha").is_none());
+    assert!(json.get("worktree").is_none());
+    assert_eq!(json["operator_worktree"]["clean"], true);
     assert!(
-        json["worktree"]["status_digest"]
+        json["operator_worktree"]["status_digest"]
             .as_str()
             .expect("digest")
             .starts_with("sha256:"),
@@ -6962,6 +6974,37 @@ fn provenance_json_records_pack_level_substrate() {
     let heuristics = &rows[2];
     assert!(heuristics["cwd"].is_null());
     assert!(heuristics["tree_state"].is_null());
+}
+
+#[test]
+fn provenance_json_keeps_captured_operator_head_after_checkout_moves() {
+    let (repo_tmp, before) = provenance_fixture_repo();
+    let captured = capture_worktree_provenance(repo_tmp.path());
+    let after = write_commit_fixture(repo_tmp.path(), "later.rs", "pub fn later() {}\n");
+    assert_ne!(before, after);
+
+    let out = tempfile::tempdir().expect("out tempdir");
+    let json = write_provenance_fixture_with_capture(out.path(), &[], &[], &[], &captured);
+    assert_eq!(json["worktree_head_sha"], before);
+    assert_ne!(json["worktree_head_sha"], after);
+    assert_eq!(json["operator_worktree"]["clean"], true);
+    assert_eq!(json["schema_version"], "2.0");
+}
+
+#[test]
+fn provenance_json_keeps_unknown_operator_state_null() {
+    let out = tempfile::tempdir().expect("out tempdir");
+    let json = write_provenance_fixture_with_capture(
+        out.path(),
+        &[],
+        &[],
+        &[],
+        &WorktreeProvenance::default(),
+    );
+    assert!(json["worktree_head_sha"].is_null());
+    assert!(json["operator_worktree"]["clean"].is_null());
+    assert!(json["operator_worktree"]["status_digest"].is_null());
+    assert!(json["target_sha"].is_string());
 }
 
 #[test]
@@ -7102,17 +7145,17 @@ fn provenance_json_worktree_reflects_dirty_tree() {
     let out = tempfile::tempdir().expect("out tempdir");
 
     let clean = write_provenance_fixture(repo_tmp.path(), out.path(), &[]);
-    assert_eq!(clean["worktree"]["clean"], true);
+    assert_eq!(clean["operator_worktree"]["clean"], true);
 
     fs::write(repo_tmp.path().join("uncommitted.rs"), "pub fn oops() {}\n").expect("dirty file");
 
     let dirty = write_provenance_fixture(repo_tmp.path(), out.path(), &[]);
     assert_eq!(
-        dirty["worktree"]["clean"], false,
+        dirty["operator_worktree"]["clean"], false,
         "an untracked file makes the tree dirty"
     );
     assert_ne!(
-        dirty["worktree"]["status_digest"], clean["worktree"]["status_digest"],
+        dirty["operator_worktree"]["status_digest"], clean["operator_worktree"]["status_digest"],
         "the digest must fingerprint WHAT is dirty, not just that something is"
     );
 }

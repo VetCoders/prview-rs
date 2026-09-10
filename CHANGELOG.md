@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PROVENANCE.json` schema 2.0 separates review identity (`target_sha`) from
+  operator state (`worktree_head_sha`, `operator_worktree`). The ambiguous 1.0
+  field names are removed from new records. Operator HEAD is now captured
+  before checks, so a later commit cannot change the recorded starting state.
+  The architecture documentation includes the 1.0-to-2.0 reader migration.
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.
 

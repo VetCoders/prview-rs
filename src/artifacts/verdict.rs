@@ -950,13 +950,16 @@ fn check_scans_target_snapshot(check_id: &str) -> bool {
     matches!(check_id, "semgrep_scan" | "ruff" | "eslint" | "stylelint")
 }
 
-/// Working-tree state frozen at the start of a run: whether the tree was clean,
+/// Operator checkout state frozen at the start of a run: HEAD, cleanliness,
 /// and a fingerprint of exactly what was dirty.
 ///
-/// Both halves come from ONE status read, so the pack can never claim a clean
+/// Cleanliness and digest come from ONE status read, so the pack cannot claim a clean
 /// tree next to a digest of uncommitted changes.
 #[derive(Debug, Clone, Default)]
 pub struct WorktreeProvenance {
+    /// Operator checkout commit captured before checks. `None` for an unborn
+    /// or unreadable HEAD; never substituted with the reviewed target SHA.
+    pub head_sha: Option<String>,
     /// No staged, unstaged, or untracked changes at capture time. `None` when
     /// the status could not be read — cleanliness unestablished, never assumed.
     pub clean: Option<bool>,
@@ -983,7 +986,7 @@ pub struct WorktreeProvenance {
 ///   `has_base_diff`. `Some(true)` preserves the historical permissive shape;
 /// - a repository whose status cannot be read (unreadable or malformed index):
 ///   cleanliness was NOT established. Reporting `true` there certifies a tree
-///   nobody inspected — it reaches `PROVENANCE.json.worktree.clean` as a fact
+///   nobody inspected — it reaches `PROVENANCE.json.operator_worktree.clean` as a fact
 ///   and lets `CleanComparison` downgrade out-of-diff failures to pre-existing.
 ///   That is the one direction this record exists to prevent, so it stays
 ///   `None`: unknown, and treated as untrusted.
@@ -992,16 +995,23 @@ pub(crate) fn capture_worktree_provenance(repo_root: &std::path::Path) -> Worktr
 
     let Ok(repo) = git2::Repository::discover(repo_root) else {
         return WorktreeProvenance {
+            head_sha: None,
             clean: Some(true),
             status_digest: None,
         };
     };
+    let head_sha = repo
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .ok()
+        .map(|commit| commit.id().to_string());
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(true)
         .renames_head_to_index(true);
     let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
         return WorktreeProvenance {
+            head_sha,
             clean: None,
             status_digest: None,
         };
@@ -1014,6 +1024,7 @@ pub(crate) fn capture_worktree_provenance(repo_root: &std::path::Path) -> Worktr
     hasher.update(fingerprint.as_bytes());
 
     WorktreeProvenance {
+        head_sha,
         clean: Some(statuses.is_empty()),
         status_digest: Some(format!("sha256:{:x}", hasher.finalize())),
     }

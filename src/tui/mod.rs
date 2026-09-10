@@ -552,6 +552,7 @@ pub async fn run_analysis(
         base_snap,
         worktree_clean,
         worktree_status_digest,
+        worktree_head_sha,
     ) = crate::governor::blocking_stage(|| -> Result<_> {
         let app = App::from_config(config)?;
         // Freeze cleanliness before any check runs or artifact is written (R4-19).
@@ -560,6 +561,7 @@ pub async fn run_analysis(
         let worktree = crate::artifacts::capture_worktree_provenance(&app.config.repo_root);
         let worktree_clean = worktree.clean;
         let worktree_status_digest = worktree.status_digest;
+        let worktree_head_sha = worktree.head_sha;
         app.repo.prepare_refs(&app.config)?;
         let target = app.repo.resolve_target(&app.config)?;
         let bases = app.repo.resolve_bases(&app.config)?;
@@ -595,6 +597,7 @@ pub async fn run_analysis(
             base_snap,
             worktree_clean,
             worktree_status_digest,
+            worktree_head_sha,
         ))
     })?;
 
@@ -666,6 +669,7 @@ pub async fn run_analysis(
             skipped_checks,
             worktree_clean,
             worktree_status_digest,
+            worktree_head_sha,
             governor: &governor,
         })
     })?;

@@ -159,6 +159,9 @@ pub struct GenerateInput<'a> {
     /// `worktree_clean`. Recorded in `00_summary/PROVENANCE.json`; `None` when
     /// the repository could not be inspected.
     pub worktree_status_digest: Option<String>,
+    /// Operator checkout HEAD captured before checks, independently of the
+    /// reviewed target. Never read again while publishing provenance.
+    pub worktree_head_sha: Option<String>,
     /// The run's machine-wide budget, shared with the checks stage.
     ///
     /// The context stage shells out to the same class of tools the gates do — a
@@ -521,6 +524,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         skipped_checks,
         worktree_clean,
         worktree_status_digest,
+        worktree_head_sha,
         governor,
     } = input;
     let t_total = Instant::now();
@@ -1017,7 +1021,6 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     let t = Instant::now();
     generate_provenance_json(ProvenanceJsonInput {
         dir: &summary_dir,
-        repo: &repo,
         checks: &all_checks,
         skipped_checks: &skipped_checks,
         diffs,
@@ -1025,6 +1028,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         resolved_bases,
         worktree_clean,
         worktree_status_digest: worktree_status_digest.as_deref(),
+        worktree_head_sha: worktree_head_sha.as_deref(),
     })?;
     stage_timings.push(finish_timing(emit_human_stdout, "PROVENANCE.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::Provenance)?;
@@ -1751,7 +1755,6 @@ fn generate_heuristics_gate_result(
 
 struct ProvenanceJsonInput<'a> {
     dir: &'a Path,
-    repo: &'a Repository,
     checks: &'a [CheckResult],
     /// Checks that were configured but never executed. They are gates too: a
     /// consumer must be able to tell "deliberately not run, for this reason"
@@ -1764,6 +1767,7 @@ struct ProvenanceJsonInput<'a> {
     resolved_bases: &'a [ResolvedRef],
     worktree_clean: Option<bool>,
     worktree_status_digest: Option<&'a str>,
+    worktree_head_sha: Option<&'a str>,
 }
 
 /// Every baseline the pack's diffs were actually produced from, named.
@@ -1806,12 +1810,11 @@ fn provenance_bases<'a>(
 /// involved, the state of the local working tree at the moment the run started,
 /// and one row per check naming the tree that check actually read.
 ///
-/// Purely additive: no existing pack file changes shape because of it.
+/// Schema 2.0 names operator state explicitly and uses the pre-check capture.
 fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
     use serde_json::json;
     let ProvenanceJsonInput {
         dir,
-        repo,
         checks,
         skipped_checks,
         diffs,
@@ -1819,6 +1822,7 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
         resolved_bases,
         worktree_clean,
         worktree_status_digest,
+        worktree_head_sha,
     } = input;
 
     let executed = checks.iter().map(|c| {
@@ -1861,7 +1865,7 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
         .collect();
 
     let provenance = json!({
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "generated_at": chrono::Local::now().to_rfc3339(),
         // Commit whose tree the pack judges.
         "target_sha": resolved_target.commit_id,
@@ -1873,10 +1877,9 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
         // Every baseline, named: a multi-base run produces one patch per base,
         // and a reviewer holding the pack must be able to place each of them.
         "bases": base_rows,
-        // Commit checked out locally. Equal to target_sha for an ordinary local
-        // review; different when a fetched ref is analysed (`--pr`/`--remote`).
-        "head_sha": repo.head_commit_id().ok(),
-        "worktree": {
+        // Operator checkout captured before checks; not the review identity.
+        "worktree_head_sha": worktree_head_sha,
+        "operator_worktree": {
             // Frozen before checks ran and before any artifact was written
             // (R4-19), so tool output cannot flip a clean scan to "dirty".
             "clean": worktree_clean,

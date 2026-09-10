@@ -721,6 +721,21 @@ parses replays with no provenance instead of failing the run.
 
 #### Pack-level provenance — `00_summary/PROVENANCE.json`
 
+The current schema is **2.0**, independently versioned from `RUN.json`,
+`report.json`, and `MERGE_GATE.json`. It separates the reviewed revision from
+operator checkout observations:
+
+| Schema 1.0 | Schema 2.0 | Meaning |
+|---|---|---|
+| `target_sha` | `target_sha` | The reviewed commit, unchanged |
+| `head_sha` | `worktree_head_sha` | Operator checkout HEAD; 1.0 read it during artifact generation, 2.0 captures it before checks |
+| `worktree` | `operator_worktree` | Operator cleanliness and status digest, captured before checks |
+
+Readers supporting both versions must select the documented shape using
+`schema_version`. Neither version's operator HEAD is a substitute for
+`target_sha`. Old 1.0 records retain their original meaning and observation
+phase; new records omit the ambiguous `head_sha` and `worktree` aliases.
+
 The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
 "what did *this pack* judge", once, for a reviewer holding only the artifacts:
 
@@ -736,9 +751,12 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   baselines there are and fill the array instead;
 - `base_sha` — the first entry's `sha`, kept for consumers that predate
   `bases[]`. It is derived from that array, so the two cannot disagree;
-- `head_sha` — commit checked out locally (equal to `target_sha` for an ordinary
-  local review, different under `--pr`/`--remote`);
-- `worktree.clean` — whether the local tree had uncommitted changes, frozen
+- `worktree_head_sha` — operator checkout commit captured before checks,
+  during the same capture phase as `operator_worktree`. It can differ from
+  `target_sha` under `--pr`/`--remote`. A later checkout or commit cannot replace
+  this observation when artifacts are written. An unborn or unreadable HEAD
+  remains `null`, even when the reviewed target is known;
+- `operator_worktree.clean` — whether the local tree had uncommitted changes, frozen
   **before** any check ran or artifact was written (R4-19). `null` when the
   status could not be read at all (an unreadable or malformed index): the two
   failure modes are not the same, and only one of them is safe to answer
@@ -748,7 +766,7 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   both publish a fact nobody checked and let the pre-existing downgrade silence
   findings on a tree that was never inspected. The downgrade requires a proven
   `true`, so unknown suppresses it;
-- `worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
+- `operator_worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
   working-tree status, from the *same* read as `clean`. Each line is
   `XY <path>\0<content>`, where `<content>` fingerprints the file the entry
   points at: `blob:<len>:<sha256>` for a regular file (streamed, so a large file
