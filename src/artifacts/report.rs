@@ -1,4 +1,4 @@
-//! report.json v2 generator
+//! report.json v3 generator
 //!
 //! Single source of truth for the dashboard and external tooling.
 //! All data the dashboard needs is serialized here; the HTML renderer
@@ -1142,10 +1142,9 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         .collect();
 
     Report {
-        // 2.0, not 1.1: `quality.coverage.heuristic_ratio` became nullable and
-        // the loctree counters became omittable, so a decoder written against
-        // 1.0 no longer parses every pack. Calling that additive would repeat,
-        // at the schema level, the "0/0 is 100%" lie the change removed.
+        // 3.0: `quality.breaking_changes.md_path` is nullable, `meta` uses
+        // `base_refs`/`target_ref`, and `gate.status` carries the canonical
+        // PASS/CONDITIONAL/BLOCK verdict. Readers must migrate from 2.0.
         schema_version: "3.0",
         meta,
         gate,
