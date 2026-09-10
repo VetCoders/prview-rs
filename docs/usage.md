@@ -100,7 +100,7 @@ Effective profile:
 | Surface | Gate behavior |
 |---------|---------------|
 | Rust / Cargo | `Cargo check` runs; `Clippy`, `Rustfmt`, `Cargo test`, and `Cargo audit` stay visible as skipped checks |
-| Security | Semgrep runs when the `semgrep` binary is available |
+| Security | Semgrep runs when the `semgrep` binary is available, unless `--skip-security` is explicit |
 | Geiger | `Cargo geiger` is out of the gate profile |
 | Tests, lint, bundle, heuristics | Disabled for the pre-push gate budget |
 | JS/TS | Existing JS checks only run when repo-local `node_modules` tools exist; they are not part of the measured budget below |
@@ -229,6 +229,8 @@ packages. Each uv pool is the minimum of the run plan, a positive inherited
 environment value, and the matching project value from `uv.toml` or
 `[tool.uv]`; `uv.toml` wins when both project files exist. Invalid or
 unreadable concurrency authority fails closed instead of widening the run.
+Pytest configuration reads are also capped at 1 MiB; an oversized candidate
+fails the check before collection rather than falling back to another config.
 The selected project-scoped uv authority is opened only as a regular file and
 read up to 1 MiB before parsing; a FIFO, device, or oversized `uv.toml` or
 `pyproject.toml` therefore cannot block or exhaust the synchronous planner.
@@ -256,7 +258,9 @@ Pytest also receives `PYTEST_XDIST_AUTO_NUM_WORKERS`; when project or inherited 
 xdist (`-n auto`, `logical`, or explicit `-n N`), prview caps only a dynamic or
 too-large pool. An explicit smaller count and `-n 0` remain unchanged. A short,
 isolated probe of the actual project pytest selects the matching supported
-major/minor config-discovery rules; unsupported versions fail closed. Prview then
+major/minor config-discovery rules; unsupported versions fail closed. The probe
+disables conftest loading, so discovering the version does not execute project
+`conftest.py` code. Prview then
 passes `-c` for the single highest-precedence config inside the reviewed root,
 or an explicit empty config when none exists, and fixes `--rootdir` to that
 root. Malformed, unreadable, non-UTF-8, or conflicting recognized config and
@@ -274,6 +278,30 @@ universally capped child pool. The same boundary applies to executable project
 `conftest.py` code and third-party pytest plugins: Pytest remains Exclusive, but
 prview does not claim to infer arbitrary plugin-created processes or xdist hook
 mutations.
+
+When Pytest runs in a reviewed snapshot, prview first starts it with a null
+config, disabled plugin autoload, empty plugin/addopts environment and no
+conftests. A temporary bootstrap plugin supplies fresh `HOME`,
+`USERPROFILE`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`,
+`XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `APPDATA` and `LOCALAPPDATA` directories.
+The bootstrap then restores the original pytest environment and calls
+`pytest.main` with the original bounded test arguments. Project and environment
+addopts keep their native precedence, including early `-p` plugins and ini
+overrides; pytest-managed project plugins and tests load after HOME is redirected.
+Tests that census the default home directory therefore see snapshot-local data,
+rather than the operator's live stores. The pytest log identifies this as
+`prview: snapshot-local HOME/XDG`; command provenance includes both the
+bootstrap options and the original test arguments after `--`.
+The directories and plugin are retained through the run and removed together
+when pytest finishes. Each concurrent run gets its own home.
+
+The uv/pytest launcher still uses the existing tool and dependency environment.
+Python's user package base is pinned before redirecting HOME, so user-installed
+pytest and xdist subprocess imports continue to work. Existing `PYTHONPATH`
+entries and explicit application-specific paths remain available. This is
+isolation of default home/config lookups, not an OS filesystem sandbox. A local
+checkout review keeps its original HOME/XDG behavior; only a snapshot enables
+the temporary plugin. Ruff, Mypy and uv dependency preparation are unaffected.
 
 Before checks start, the human preflight prints the requested/effective budget,
 parent and child caps, expensive tools, and the cheap-first execution schedule.
@@ -374,10 +402,14 @@ prview --help
 | `--with-bundle` | Enable the bundle build |
 | `--skip-bundle` | Skip the bundle build |
 | `--with-security` | Raise the heavy security posture (does not add cargo-geiger or full-tree Semgrep) |
-| `--skip-security` | Skip heavy security checks |
+| `--skip-security` | Skip Semgrep and heavy security checks; lightweight cargo-audit remains enabled |
 | `--security-full` | Full security tier: runs full-tree Semgrep and adds cargo-geiger's unsafe scan (slow; off even under `--deep`) |
 | `--resource-budget safe\|balanced` | Select the whole-machine envelope (`safe` is the default; `balanced` is capped and load-aware) |
 | `--tests-pattern PATTERN` | Filter Vitest by regex or Cargo/libtest by literal substring; Mixed uses the literal intersection and Pytest remains unfiltered |
+
+An explicit `--skip-security` disables Semgrep before tool discovery, including
+in quick review runs. This is separate from the heavy-security opt-in; an
+ordinary run without `--with-security` still uses the default Semgrep scan.
 
 By default, Semgrep is scoped to the change when prview can resolve a clean git
 baseline: it passes Semgrep `--baseline-commit <merge-base>` so existing

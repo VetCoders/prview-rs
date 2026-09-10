@@ -19,9 +19,9 @@ pub struct RuffCheck;
 pub struct MypyCheck;
 pub struct PytestCheck;
 
-/// Project-scoped uv configuration is inspected synchronously before the
-/// governed child exists. Keep that planning read finite on every platform.
-const MAX_UV_CONFIG_BYTES: u64 = 1024 * 1024;
+/// Project-scoped uv and pytest configuration is inspected before the check
+/// child runs. Keep those planning reads finite on every platform.
+const MAX_PYTHON_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Skip reason when the REVIEWED commit is not a Python project.
 ///
@@ -700,14 +700,25 @@ fn read_pytest_config(path: &Path) -> Result<Option<String>> {
     if !metadata.is_file() {
         return Ok(None);
     }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!("pytest config {} exists but cannot be read", path.display())
-            });
-        }
-    };
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Preserve pytest's existing symlink discovery semantics. Nonblocking
+        // open plus the shared post-open file check bounds replacement races.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let bytes = options
+        .open(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|file| read_bounded_python_config(file, "pytest config"))
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{error:#}; pytest config cannot be read: {}",
+                path.display()
+            )
+        })?;
     String::from_utf8(bytes)
         .map(Some)
         .with_context(|| format!("pytest config {} is not valid UTF-8", path.display()))
@@ -886,12 +897,13 @@ fn parse_pytest_version(value: &str) -> Result<(PytestConfigDialect, String)> {
 }
 
 /// Ask the exact pytest launcher used by the check which discovery dialect it
-/// implements. The null config, explicit root and scrubbed addopts/plugin env
-/// keep ambient parents and plugins out of this version oracle.
+/// implements. The null config, explicit root, disabled conftests and scrubbed
+/// addopts/plugin env keep conftests and ambient pytest plugins out of this oracle.
 async fn probe_pytest_runtime(
     root: &Path,
     base_env: &[(String, String)],
     use_uv: bool,
+    home_plugin: Option<&str>,
 ) -> Result<(PytestConfigDialect, String)> {
     let null_config = empty_pytest_config().display().to_string();
     let root_dir = root.display().to_string();
@@ -899,11 +911,15 @@ async fn probe_pytest_runtime(
     if use_uv {
         args.extend(["run".to_owned(), "pytest".to_owned()]);
     }
+    if let Some(plugin) = home_plugin {
+        args.extend(["-p".to_owned(), plugin.to_owned()]);
+    }
     args.extend([
         "-c".to_owned(),
         null_config,
         "--rootdir".to_owned(),
         root_dir,
+        "--noconftest".to_owned(),
         "--version".to_owned(),
     ]);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1180,8 +1196,6 @@ fn uv_concurrency_limits_from_file(
 /// Read one already-contained uv authority without blocking on special files
 /// or allocating from an attacker-controlled length.
 fn read_bounded_regular_uv_config(path: &Path) -> Result<String> {
-    use std::io::Read as _;
-
     // Reject a special file before open as well as after it. O_NONBLOCK keeps
     // ordinary Unix FIFOs safe, but not every device driver is required to
     // honor that flag; the post-open fstat below closes the replacement race.
@@ -1198,18 +1212,27 @@ fn read_bounded_regular_uv_config(path: &Path) -> Result<String> {
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
 
-    let file = options.open(path)?;
+    let bytes = read_bounded_python_config(options.open(path)?, "uv configuration")?;
+    String::from_utf8(bytes).context("uv configuration is not UTF-8")
+}
+
+/// Bound allocation and reads using the opened file, not only pathname metadata.
+/// The extra byte detects growth after the metadata check without an unbounded read.
+fn read_bounded_python_config(file: std::fs::File, label: &str) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_UV_CONFIG_BYTES {
-        anyhow::bail!("uv configuration is not a bounded regular file");
+    if !metadata.is_file() || metadata.len() > MAX_PYTHON_CONFIG_BYTES {
+        anyhow::bail!("{label} is not a bounded regular file (limit: 1 MiB)");
     }
 
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_UV_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_UV_CONFIG_BYTES {
-        anyhow::bail!("uv configuration exceeds the bounded read limit");
+    file.take(MAX_PYTHON_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PYTHON_CONFIG_BYTES {
+        anyhow::bail!("{label} exceeds the bounded read limit (1 MiB)");
     }
-    String::from_utf8(bytes).context("uv configuration is not UTF-8")
+    Ok(bytes)
 }
 
 fn positive_uv_concurrency_limit(
@@ -1593,19 +1616,31 @@ impl Check for PytestCheck {
         let use_uv = which::which("uv").is_ok();
         let plan = plan_python_tool_run(config, use_uv)?;
         let run_dir = &plan.cwd;
+        let home =
+            super::pytest_home::SnapshotPytestHome::for_run(&config.repo_root, run_dir, |key| {
+                std::env::var_os(key)
+            })?;
+        let base_env = home
+            .as_ref()
+            .map(|home| home.child_env(&plan.env))
+            .unwrap_or_else(|| plan.env.clone());
+        let home_plugin = home.as_ref().map(|home| home.module_name());
         let (pytest_dialect, pytest_version) =
-            probe_pytest_runtime(run_dir, &plan.env, use_uv).await?;
+            probe_pytest_runtime(run_dir, &base_env, use_uv, home_plugin).await?;
         let inherited_addopts = checked_pytest_addopts(std::env::var("PYTEST_ADDOPTS"))?;
         let inherited_auto_workers =
             checked_xdist_auto_workers(std::env::var("PYTEST_XDIST_AUTO_NUM_WORKERS"))?;
-        let (pytest_args, pytest_env) = bounded_pytest_invocation_with_auto_workers(
+        let (mut pytest_args, pytest_env) = bounded_pytest_invocation_with_auto_workers(
             run_dir,
-            &plan.env,
+            &base_env,
             config.resource_plan.worker_limit,
             inherited_addopts.as_deref(),
             inherited_auto_workers.as_deref(),
             pytest_dialect,
         )?;
+        if let Some(home) = &home {
+            pytest_args = home.wrap_args(run_dir, &empty_pytest_config(), pytest_args);
+        }
         let pytest_arg_refs: Vec<&str> = pytest_args.iter().map(String::as_str).collect();
 
         let output = if use_uv {
@@ -2472,7 +2507,7 @@ mod tests {
             let root = tempfile::tempdir().expect("reviewed root");
             std::fs::write(
                 root.path().join(name),
-                vec![b' '; MAX_UV_CONFIG_BYTES as usize + 1],
+                vec![b' '; MAX_PYTHON_CONFIG_BYTES as usize + 1],
             )
             .expect("oversized uv authority");
 
@@ -2491,7 +2526,7 @@ mod tests {
         let root = tempfile::tempdir().expect("reviewed root");
         std::fs::write(
             root.path().join("uv.toml"),
-            vec![b' '; MAX_UV_CONFIG_BYTES as usize],
+            vec![b' '; MAX_PYTHON_CONFIG_BYTES as usize],
         )
         .expect("exact-cap uv authority");
 
@@ -3499,6 +3534,64 @@ mod tests {
         assert_eq!(path, empty_pytest_config());
     }
 
+    #[test]
+    fn pytest_config_refuses_oversized_files_before_parsing() {
+        for name in PYTEST_NINE_CONFIG_FILES {
+            let root = tempfile::tempdir().expect("pytest project");
+            let project = root.path().join("long-project-path-".repeat(12));
+            std::fs::create_dir(&project).unwrap();
+            let path = project.join(name);
+            let file = std::fs::File::create(&path).expect("config file");
+            file.set_len(1024 * 1024 * 1024)
+                .expect("sparse oversized config");
+            let error = selected_pytest_config(&project, PytestConfigDialect::Nine)
+                .expect_err("oversized config must fail before parsing or choosing a fallback");
+            assert!(
+                error
+                    .to_string()
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+                    .contains("limit: 1 MiB"),
+                "{name}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn pytest_config_accepts_the_exact_read_limit() {
+        let root = tempfile::tempdir().expect("pytest project");
+        let mut contents = String::from("[pytest]\naddopts = -n 1\n#");
+        contents.extend(std::iter::repeat_n(
+            ' ',
+            MAX_PYTHON_CONFIG_BYTES as usize - contents.len(),
+        ));
+        std::fs::write(root.path().join("pytest.ini"), contents).unwrap();
+        let (_, addopts) = selected_pytest_config(root.path(), PytestConfigDialect::Nine)
+            .expect("exact-limit config remains readable");
+        assert_eq!(addopts, Some(vec!["-n".to_owned(), "1".to_owned()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pytest_config_preserves_regular_symlinks_and_bounds_their_targets() {
+        let root = tempfile::tempdir().expect("pytest project");
+        let target = root.path().join("shared.ini");
+        std::fs::write(&target, "[pytest]\naddopts = -q\n").unwrap();
+        std::os::unix::fs::symlink(&target, root.path().join("pytest.ini")).unwrap();
+        let (_, addopts) = selected_pytest_config(root.path(), PytestConfigDialect::Nine).unwrap();
+        assert_eq!(addopts, Some(vec!["-q".to_owned()]));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_len(MAX_PYTHON_CONFIG_BYTES + 1)
+            .unwrap();
+        let error = selected_pytest_config(root.path(), PytestConfigDialect::Nine)
+            .expect_err("symlink targets have the same size bound");
+        assert!(error.to_string().contains("limit: 1 MiB"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn unreadable_existing_pytest_config_fails_closed() {
@@ -3895,6 +3988,29 @@ mod tests {
             "def test_from_scan_dir():\n    assert True\n",
         )
         .unwrap();
+        let operator_home = dirs::home_dir().expect("operator home");
+        let operator_home = serde_json::to_string(&operator_home).expect("home literal");
+        std::fs::write(
+            scan_dir.path().join("conftest.py"),
+            format!(
+                r#"import json
+import os
+from pathlib import Path
+
+home = Path.home().resolve()
+assert home != Path({operator_home}).resolve(), "snapshot read operator HOME"
+assert not (home / ".codex").exists(), "snapshot inherited an existing home store"
+for key in ("USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+            "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "APPDATA", "LOCALAPPDATA"):
+    value = Path(os.environ[key]).resolve()
+    assert value == home or home in value.parents, (key, value)
+receipt = Path(__file__).with_name("home-receipt.json")
+count = json.loads(receipt.read_text())["count"] if receipt.exists() else 0
+receipt.write_text(json.dumps({{"home": str(home), "count": count + 1}}))
+"#
+            ),
+        )
+        .unwrap();
 
         let mut config = test_config_builder()
             .profile(test_python_profile(true))
@@ -3919,9 +4035,24 @@ mod tests {
             "Pytest executed in repo_root instead of the reviewed scan dir. Output: {}",
             result.output
         );
+        assert!(result.output.contains("prview: snapshot-local HOME/XDG"));
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(scan_dir.path().join("home-receipt.json")).expect("conftest receipt"),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["count"], 1,
+            "version discovery must not execute project conftest code"
+        );
+        assert!(
+            !Path::new(receipt["home"].as_str().unwrap()).exists(),
+            "the owned home must be removed after pytest and its children exit"
+        );
 
         // Provenance must not claim a cwd the run never used.
-        let cwd = result.provenance.expect("provenance").cwd;
+        let provenance = result.provenance.expect("provenance");
+        assert!(provenance.command.contains(" -p _prview_pytest_home_"));
+        let cwd = provenance.cwd;
         assert_eq!(
             std::fs::canonicalize(&cwd).unwrap(),
             std::fs::canonicalize(scan_dir.path()).unwrap(),

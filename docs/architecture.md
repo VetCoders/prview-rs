@@ -222,7 +222,9 @@ Implementations:
 - `CargoAuditCheck` - `cargo audit`
 - `SemgrepCheck` - Semgrep JSON scan; default is diff-scoped with
   `--baseline-commit <merge-base>` when the git baseline is clean and available,
-  while `--security-full` keeps a full-tree scan
+  while `--security-full` keeps a full-tree scan. Explicit `--skip-security`
+  is carried separately from the heavy-security opt-in and disables this check
+  before tool discovery.
 - `CargoGeigerCheck` - `cargo geiger`
 - `RuffCheck` - `ruff check`
 - `MypyCheck` - `mypy`
@@ -345,6 +347,28 @@ dependency set is still installed and judged, in a prview-owned environment kept
 warm across runs. A local review sets no override and uses the checkout's own
 environment exactly as before.
 
+Pytest adds `SnapshotPytestHome` for a snapshot run. A per-run temporary module
+loaded via `-p` in a neutral outer invocation redirects HOME, USERPROFILE, XDG
+and Windows application-data selectors. The outer invocation uses a null config,
+`--noconftest`, no plugin autoload and empty pytest plugin/addopts environment.
+Its command hook restores the original pytest environment and invokes the public
+`pytest.main` API with the bounded arguments carried after `--`. This keeps
+pytest in charge of configuration precedence while ensuring even plugins in ini
+or environment addopts load after the home redirect. Redirection happens
+inside pytest: the uv launcher and Python startup still find their existing
+interpreter, dependencies and user-installed pytest. The plugin pins Python's
+original user package base for child/xdist bootstraps, preserving an explicit
+`PYTHONUSERBASE` when present. Its directory is prepended to the existing
+`PYTHONPATH`; each run uses a unique module name and private home. The owner
+retains the module, JSON environment description and directories through the
+check, then removes them together. The pytest header and command provenance
+identify the isolation. It is a default home/config view, not OS-level access
+control or a claim that all explicit host paths have been removed. Local
+checkout tests retain their environment. The version probe uses the same
+plugin in snapshot mode and always passes `--noconftest` to prevent conftest
+execution during version discovery.
+
+
 The cold `uv sync` pre-step is resolved only after the run-wide target snapshot
 exists, through that same `plan_python_run()`. Its cwd and
 `UV_PROJECT_ENVIRONMENT` are therefore identical to the later gates; it never
@@ -383,7 +407,10 @@ Pytest 7.2-8.x recognizes `.pytest.ini` as a candidate but does not select an
 empty hidden file unconditionally; that behavior begins with pytest 9. The
 versioned discovery model preserves this distinction instead of treating every
 recognized basename as an automatic winner.
-Existing but unreadable, non-UTF-8, malformed, or conflicting recognized config
+Pytest and uv share a 1 MiB read cap checked against the opened regular file,
+with at most one extra byte read to detect growth. Pytest retains its existing
+regular-file symlink discovery; non-file candidates remain ignored. Existing
+but oversized, unreadable, non-UTF-8, malformed, or conflicting recognized config
 is an execution error, not absence. Pytest-xdist gets the same upper bound
 through its auto-worker environment and a final CLI override only when the
 effective shell-tokenized config/environment request exceeds that bound or is
@@ -1269,6 +1296,11 @@ Job Object contract cannot disappear with an unrelated dependency change.
   makes two locks deadlock-free, and this direction also avoids parking half the
   budget on a cargo check that is still queueing for `target/`. Nothing acquires
   the cargo lock once it holds budget, so there is no cycle the other way.
+  Regression coverage exercises all six cargo-family names: a waiter leaves
+  the whole budget available while the target lock is held, remains queued
+  while waiting for budget after taking that lock, and releases the target
+  lock when cancellation interrupts the budget wait. A separate regression
+  checks cancellation while the target lock itself is still held.
 
 #### Queued vs running
 
