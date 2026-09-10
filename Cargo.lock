@@ -29,6 +29,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "aicx"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6fda9eb391a89ce5572cca0e04aa89e37cfc60721832b028457b595c76ac761"
+dependencies = [
+ "aicx-parser",
+ "anyhow",
+ "blake3",
+ "chrono",
+ "dirs",
+ "getrandom 0.3.4",
+ "globset",
+ "hex",
+ "libc",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "shlex",
+ "siphasher",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
+name = "aicx-parser"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd45260b57074d771dc5ab864c7aa2d2ae3ac464e9558942e1653cfb7657945"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "siphasher",
+ "toml 0.8.23",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,6 +166,12 @@ name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+
+[[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "assert_cmd"
@@ -272,6 +323,19 @@ name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+
+[[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.0",
+]
 
 [[package]]
 name = "block-buffer"
@@ -532,7 +596,7 @@ dependencies = [
  "convert_case 0.6.0",
  "pathdiff",
  "serde_core",
- "toml",
+ "toml 1.0.6+spec-1.1.0",
  "winnow",
 ]
 
@@ -2156,10 +2220,11 @@ dependencies = [
 
 [[package]]
 name = "loctree"
-version = "0.13.0"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48c8373fe675329cdc21e6c8ccbcfe23b9581da665aa88abea3da9aa6c90cc77"
+checksum = "bb53dd325c734340caf026bad67fa16afbb9d351be2c3d497a731875eb030a14"
 dependencies = [
+ "aicx",
  "anyhow",
  "chrono",
  "colored",
@@ -2176,6 +2241,7 @@ dependencies = [
  "json-five",
  "libc",
  "loctree-ast",
+ "nix 0.31.3",
  "notify",
  "notify-debouncer-full",
  "once_cell",
@@ -2197,7 +2263,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "toml",
+ "toml 1.0.6+spec-1.1.0",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-cpp",
@@ -2210,9 +2276,9 @@ dependencies = [
 
 [[package]]
 name = "loctree-ast"
-version = "0.13.0"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0f99aabbd8849d4d07f8be80878e88843a314de3d058b3928876279dca0d3f9"
+checksum = "67b9cddb9b08d42345c6a86c6ec06fe8828b43173daf974710b889a5c006bab3"
 dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
@@ -3247,7 +3313,7 @@ dependencies = [
  "syn 2.0.117",
  "tempfile",
  "tokio",
- "toml",
+ "toml 1.0.6+spec-1.1.0",
  "unicode-normalization",
  "unicode-segmentation",
  "unicode-width",
@@ -3540,9 +3606,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "report-leptos"
-version = "0.13.0"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b4ce71b72301605c571da75d0e63331c3c5dc4d6f4071ad383d9a690c110f79"
+checksum = "c29cd7d44fc4d520b9c6d2b38d6a4ed92c53a877ec1387d7d02998be87f370db"
 dependencies = [
  "leptos",
  "serde",
@@ -3808,6 +3874,15 @@ dependencies = [
  "percent-encoding",
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -4448,17 +4523,38 @@ dependencies = [
 
 [[package]]
 name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "serde",
+ "serde_spanned 0.6.9",
+ "toml_datetime 0.6.11",
+ "toml_edit",
+]
+
+[[package]]
+name = "toml"
 version = "1.0.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "399b1124a3c9e16766831c6bba21e50192572cdd98706ea114f9502509686ffc"
 dependencies = [
  "indexmap",
  "serde_core",
- "serde_spanned",
- "toml_datetime",
+ "serde_spanned 1.0.4",
+ "toml_datetime 1.0.0+spec-1.1.0",
  "toml_parser",
  "toml_writer",
  "winnow",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -4471,6 +4567,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned 0.6.9",
+ "toml_datetime 0.6.11",
+ "toml_write",
+ "winnow",
+]
+
+[[package]]
 name = "toml_parser"
 version = "1.0.9+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4478,6 +4588,12 @@ checksum = "702d4415e08923e7e1ef96cd5727c0dfed80b4d2fa25db9647fe5eb6f7c5a4c4"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_write"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"

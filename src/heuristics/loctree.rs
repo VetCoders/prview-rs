@@ -27,8 +27,13 @@ const LOCTREE_WORKER_TIMEOUT_SECS: u64 = 300;
 /// token; a governed process boundary is the hard-stop contract.
 pub fn run_loctree_worker(root: &Path) -> Result<()> {
     let roots = vec![root.to_path_buf()];
-    loctree::snapshot::run_init(&roots, &ParsedArgs::default())
-        .context("Failed to run loctree worker scan")
+    // Reviewed revisions are deliberate source-only `git archive` directories,
+    // so they have no `.git`. Loctree 0.14 requires explicit non-git scan opt-in.
+    let parsed = ParsedArgs {
+        force_non_git: true,
+        ..ParsedArgs::default()
+    };
+    loctree::snapshot::run_init(&roots, &parsed).context("Failed to run loctree worker scan")
 }
 
 /// Loctree-suite analysis results
@@ -357,11 +362,8 @@ async fn create_snapshot(
     // A libtest executable cannot enter `src/main.rs`'s private worker mode.
     // Functional snapshot tests stay in-process; the governed process boundary
     // is covered separately by `worker_process_is_killed_on_cancel`.
-    let roots = vec![root.to_path_buf()];
-    let parsed = ParsedArgs::default();
-    tokio::task::spawn_blocking(move || loctree::snapshot::run_init(&roots, &parsed))
-        .await?
-        .context("Failed to run loctree scan")
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || run_loctree_worker(&root)).await?
 }
 
 #[cfg(any(not(test), unix))]

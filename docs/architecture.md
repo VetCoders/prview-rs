@@ -2870,6 +2870,17 @@ rendering), `assets.rs` (embedded CSS/JS (system font stack)), and `tests.rs`/`t
 
 ### heuristics/
 
+prview compiles against the Loctree 0.14.4 library (the exact dependency graph
+is recorded in `Cargo.lock`); installing a different `loctree` CLI does not
+change its analyzer. Snapshot creation stays inside the governed same-binary
+worker, with the existing timeout and cancellation cleanup. The library
+upgrade retains the source-only base/target archives and their SHA provenance.
+These deliberate archives contain no `.git`, so the integration explicitly
+sets Loctree's `force_non_git` option; library tests use the same scan function
+as the production worker. No operator environment opt-in is required.
+Loctree 0.14.4 uses snapshot schema 0.11.0; schema compatibility and Git
+freshness are checked before an existing snapshot is reused.
+
 Structural code analysis:
 - `loctree.rs` — universal heuristic (works with any profile): cycles, dead
   exports, unused symbols, exact twins across Rust/JS/TS/Python
