@@ -81,7 +81,17 @@ impl Check for SemgrepCheck {
         );
         let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        let output = run_command("semgrep", &args_ref, cwd).await?;
+        // Windows Command only adds .exe during PATH lookup. Use the same
+        // discovery policy as eligibility, including .cmd fixtures.
+        #[cfg(windows)]
+        let executable_path = which::which("semgrep")?;
+        #[cfg(windows)]
+        let executable = executable_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Semgrep executable path is not UTF-8"))?;
+        #[cfg(not(windows))]
+        let executable = "semgrep";
+        let output = run_command(executable, &args_ref, cwd).await?;
         let finished_at = Local::now().to_rfc3339();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -110,7 +120,7 @@ impl Check for SemgrepCheck {
             provenance: Some(
                 ProvenanceBuilder {
                     check: self.name(),
-                    cmd: "semgrep",
+                    cmd: executable,
                     args: &args_ref,
                     cwd,
                     repo_root: &config.repo_root,
@@ -403,23 +413,41 @@ struct SemgrepScanPlan {
 fn plan_semgrep_scan(config: &Config) -> std::result::Result<SemgrepScanPlan, String> {
     let repo_root = config.repo_root.clone();
 
-    let Ok(repo) = Repository::open(&repo_root) else {
-        // Not a git repository (or unreadable) — scan in place with no baseline.
-        return Ok(SemgrepScanPlan {
-            scan_dir: repo_root,
-            baseline_commit: None,
-            _snapshot: None,
-        });
+    let repo = match Repository::open(&repo_root) {
+        Ok(repo) => repo,
+        Err(error) => {
+            if config.pinned_target.is_some() {
+                return Err(format!(
+                    "semgrep: cannot open repository for pinned review target: {error:#}"
+                ));
+            }
+            // Unpinned, non-repository scans retain their in-place behavior.
+            return Ok(SemgrepScanPlan {
+                scan_dir: repo_root,
+                baseline_commit: None,
+                _snapshot: None,
+            });
+        }
     };
 
-    let (Ok(target), Ok(head)) = (repo.resolve_target(config), repo.head_commit_id()) else {
-        // Refs did not resolve — fall back to an in-place scan; the in-place
-        // baseline helper degrades to a full scan on the same failure.
-        return Ok(SemgrepScanPlan {
-            baseline_commit: semgrep_baseline_commit(config, &repo_root),
-            scan_dir: repo_root,
-            _snapshot: None,
-        });
+    let resolution = repo
+        .resolve_target(config)
+        .and_then(|target| repo.head_commit_id().map(|head| (target, head)));
+    let (target, head) = match resolution {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            if config.pinned_target.is_some() {
+                return Err(format!(
+                    "semgrep: cannot plan scan for pinned review target: {error:#}"
+                ));
+            }
+            // An unresolved, unpinned input retains its in-place fallback.
+            return Ok(SemgrepScanPlan {
+                baseline_commit: semgrep_baseline_commit(config, &repo_root),
+                scan_dir: repo_root,
+                _snapshot: None,
+            });
+        }
     };
 
     if head == target.commit_id {
@@ -925,6 +953,38 @@ mod tests {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .count()
+    }
+
+    #[test]
+    fn pinned_semgrep_target_unavailable_never_scans_operator_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q", "-b", "main"]);
+        write_commit(tmp.path(), "a.txt", "operator checkout\n");
+        let mut config = test_config();
+        config.repo_root = tmp.path().to_path_buf();
+        config.pinned_target = Some(ResolvedRef {
+            name: "missing reviewed target".to_owned(),
+            commit_id: "f".repeat(40),
+            is_remote: true,
+        });
+        assert!(plan_semgrep_scan(&config).is_err());
+        assert_eq!(worktree_count(tmp.path()), 1);
+    }
+
+    #[test]
+    fn pinned_semgrep_target_requires_its_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.repo_root = tmp.path().to_path_buf();
+        config.pinned_target = Some(ResolvedRef {
+            name: "missing reviewed repository".to_owned(),
+            commit_id: "f".repeat(40),
+            is_remote: true,
+        });
+        assert!(plan_semgrep_scan(&config).is_err());
+        config.pinned_target = None;
+        let unpinned = plan_semgrep_scan(&config).unwrap();
+        assert_eq!(unpinned.scan_dir, config.repo_root);
     }
 
     #[test]

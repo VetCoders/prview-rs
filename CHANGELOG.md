@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pinned targets use exact commit lookup even when a branch has the SHA as its
+  name; Semgrep cannot fall back to the operator checkout for an unavailable pin.
+  Snapshot boundary comparisons run off the async dispatcher and retain worker
+  failures as unknown evidence. Windows Semgrep invocation honors discovered
+  batch executables, with native CI coverage of the owned contract fixture.
+
 - Snapshot caveats retain observed HEAD changes after restoration, including
   empty commits with no tracked-path changes. Security option help names the
   Semgrep opt-out and no longer promises unconditional cargo-audit execution.

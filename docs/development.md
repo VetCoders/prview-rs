@@ -64,6 +64,11 @@ dogfood remain separate. Library pipeline/watch fixtures explicitly set
 does not disable Semgrep. The shared `test_config()` does not opt out of
 Semgrep, so eligibility tests can still exercise default discovery. The test double has POSIX shell and Windows command
 script implementations; runtime evidence must still name the platform exercised.
+On Windows, Semgrep resolves the executable with the same `which` discovery used
+for eligibility and passes its full path to the command runner. Rust's default
+extensionless lookup only adds `.exe`; it would miss the owned `.cmd` fixture.
+The Windows CI job runs both the fixture executable test and a real CLI review
+whose provenance must identify that exact temporary scanner path.
 
 Process-tree cancellation has platform-specific proof. Unix coverage runs in the
 normal Linux/macOS suites. `.github/workflows/ci.yml` also runs the Windows-only

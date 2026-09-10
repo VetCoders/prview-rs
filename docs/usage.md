@@ -909,10 +909,15 @@ human caveat after HEAD is restored, including an empty commit with no changed
 paths. Results overlapping an observed change are not
 written to cache. These observations are not atomic and do not cover later
 context commands; a change restored between observations can remain undetected.
+Boundary comparisons run on a blocking worker so progress and cancellation can
+still be polled. A failed comparison worker requires review and prevents caching
+the affected result.
 
 Checks use the commit resolved for the diff, even if its branch or PR ref moves
 or is deleted before snapshot creation. If that commit is unavailable, planning
-fails instead of scanning the operator checkout. A new watch iteration resolves
+fails instead of scanning the operator checkout, including Semgrep's planner.
+A branch named exactly like the captured SHA cannot redirect the pinned object.
+A new watch iteration resolves
 the target again. As a final consistency check, `shared snapshot target mismatch`
 aborts publication if the snapshot creation SHA differs from the diff target.
 Changes made inside an already created snapshot still follow the integrity rule

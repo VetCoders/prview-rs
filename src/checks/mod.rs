@@ -1469,11 +1469,15 @@ async fn execute_live_check(
 
     let initial_epoch = ledger.map(TaskLedger::snapshot_integrity_epoch);
     if let Some(ledger) = ledger {
-        ledger.observe_snapshot("before-check", Some(&name));
+        ledger
+            .observe_snapshot_async("before-check", Some(&name))
+            .await;
     }
     let outcome = check.run(config).await;
     if let Some(ledger) = ledger {
-        ledger.observe_snapshot("after-check", Some(&name));
+        ledger
+            .observe_snapshot_async("after-check", Some(&name))
+            .await;
     }
     // Any non-clean observation while this check was running makes its source
     // unsuitable for a cache entry under the original target key. Another
@@ -2385,6 +2389,32 @@ mod tests {
         share_target_snapshot(&mut config, &[], &ledger).unwrap();
         assert!(ledger.scan_dir().is_none());
         assert_eq!(config.scan_dir_override.as_ref(), Some(&config.repo_root));
+    }
+
+    #[test]
+    fn pinned_target_is_an_object_even_when_a_branch_has_its_hex_name() {
+        let (repo, target) = repo_with_off_head_target();
+        let mut config = test_config();
+        config.repo_root = repo.path().to_path_buf();
+        config.target = Some("feature".to_owned());
+        let owner = crate::git::Repository::open(repo.path()).unwrap();
+        config.pinned_target = Some(owner.resolve_target(&config).unwrap());
+        let git = git2::Repository::open(repo.path()).unwrap();
+        git.reference(
+            &format!("refs/heads/{target}"),
+            git.head().unwrap().target().unwrap(),
+            false,
+            "fixture branch shadows an object id",
+        )
+        .unwrap();
+
+        assert_eq!(owner.resolve_target(&config).unwrap().commit_id, target);
+        let plan = plan_check_run(&config).unwrap();
+        assert_ne!(plan.scan_dir, config.repo_root);
+        assert_eq!(
+            std::fs::read_to_string(plan.scan_dir.join("tracked.txt")).unwrap(),
+            "two\n"
+        );
     }
 
     /// PRV-CONTEXT-SNAPSHOT-PROVENANCE, half one: the shared snapshot used to be

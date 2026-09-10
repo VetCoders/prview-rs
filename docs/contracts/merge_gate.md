@@ -800,10 +800,14 @@ HEAD is restored and the changed-path list is empty. Boundary check names do not
 identify the writer. Changes
 restored between observations are not guaranteed to be detected. Results that
 overlap non-clean observations are not written to cache; raw results are preserved.
+Check-boundary comparisons are awaited blocking-worker jobs; worker failure is
+retained as `unknown`, not treated as a clean observation or cache permission.
 
 Checks pin the commit resolved for the diff before dispatch; moving or deleting
 the configured ref cannot redirect snapshot planning to the operator checkout.
-An unavailable pinned commit is a planning error, not permission to publish a
+Pinned SHAs are looked up as exact commit objects, including when a symbolic
+branch has the same hexadecimal name. Semgrep's planner also rejects unavailable
+pinned repositories or commits. An unavailable pinned commit is a planning error, not permission to publish a
 local-tree pack. Every observation uses the snapshot's immutable creation SHA. If that SHA differs
 from the resolved target used for the diff, artifact generation fails before
 allocating the output directory. No gate or successful pack is published for

@@ -752,11 +752,14 @@ parses replays with no provenance instead of failing the run.
 Headless and TUI pipelines copy the resolved diff target into the run's
 `Config.pinned_target` before dispatching checks; update-mode clones preserve it.
 It is runtime-only state, not a CLI/manifest setting. `Repository::resolve_target`
-then resolves that commit object, preserving its original display name and remote
-classification, instead of re-reading a moving branch or PR ref. A deleted ref
+then parses the captured SHA as an object ID and requires that exact commit,
+preserving its original display name and remote classification. A branch whose
+name is the forty-character SHA cannot shadow it. A deleted ref
 does not invalidate an available commit. An unavailable pinned commit or
 repository is a planning error, including runs with no snapshot-backed gates;
-it cannot fall back to the operator checkout. Local targets that still match HEAD
+it cannot fall back to the operator checkout. The independent Semgrep planner
+enforces the same rule; only unpinned scans retain in-place fallback behavior.
+Local targets that still match HEAD
 keep the operator checkout. Each new watch iteration resolves its target anew.
 
 `checks::snapshot_integrity::SnapshotObservation` compares the ledger-owned
@@ -770,7 +773,12 @@ instead of combining two review identities. Comparisons union target-tree→inde
 index→worktree paths: staged changes and test-created commits remain visible.
 Newly untracked files are excluded; tracked lockfile changes, deletions and type
 changes remain. A changed HEAD or unreadable/foreign/raced observation cannot
-certify clean. Git reads run outside ledger locks; no lock spans an await.
+certify clean. Check-boundary Git reads run in a blocking worker, outside ledger
+data locks. Async admission limits a run to one observation at a time without
+blocking the dispatcher, even on a current-thread runtime. Both boundaries are
+awaited before the result can be cached; worker failure retains `unknown`
+evidence. Native libgit2 walks already running are not preemptible, and retain
+their observation permit until completion if the async waiter is cancelled.
 
 Modified or unknown observations emit `20_quality/SNAPSHOT_INTEGRITY.json/.md`;
 clean runs and runs without a shared snapshot emit no extra file. JSON schema 1.0

@@ -26,11 +26,11 @@
 //! plan site already knows which gate it is compensating for and hands that name
 //! over instead of leaving the label to be reverse-engineered here.
 //!
-//! This module is the data model only: it records outcomes and answers lookups.
-//! It never runs, skips or caches anything itself.
+//! This module records outcomes, answers lookups, and retains read-only snapshot
+//! observations. It never executes, skips, or caches a check itself.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::checks::{ScanSubstrate, TreeState};
@@ -167,6 +167,8 @@ pub struct TaskLedger {
     shared_snapshot: Mutex<Option<WorktreeSnapshot>>,
     resolved_substrate: Mutex<Option<SubstrateKey>>,
     snapshot_observations: Mutex<Vec<crate::checks::snapshot_integrity::SnapshotObservation>>,
+    // One blocking diff at a time per run; waiting never parks an async worker.
+    snapshot_observation_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TaskLedger {
@@ -327,8 +329,16 @@ impl TaskLedger {
     pub(crate) fn current_snapshot_observation(
         &self,
     ) -> Option<crate::checks::snapshot_integrity::SnapshotObservation> {
-        let source = self
-            .shared_snapshot
+        self.snapshot_observation_source()
+            .map(|(path, root, target)| {
+                crate::checks::snapshot_integrity::SnapshotObservation::observe(
+                    &path, &root, &target,
+                )
+            })
+    }
+
+    fn snapshot_observation_source(&self) -> Option<(PathBuf, PathBuf, String)> {
+        self.shared_snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
@@ -338,23 +348,85 @@ impl TaskLedger {
                     snapshot.repo_root.clone(),
                     snapshot.original_target_sha.clone(),
                 )
-            });
-        source.map(|(path, root, target)| {
-            crate::checks::snapshot_integrity::SnapshotObservation::observe(&path, &root, &target)
-        })
+            })
     }
 
     /// Observe outside the ledger locks; retain only non-clean boundaries.
+    #[cfg(test)]
     pub(crate) fn observe_snapshot(&self, phase: &'static str, check_name: Option<&str>) {
-        if let Some(mut observation) = self.current_snapshot_observation() {
-            observation.phase = phase;
-            observation.check_name = check_name.map(str::to_owned);
-            if observation.requires_review() {
-                self.snapshot_observations
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(observation);
-            }
+        if let Some(observation) = self.current_snapshot_observation() {
+            self.retain_snapshot_observation(observation, phase, check_name);
+        }
+    }
+
+    /// Keep libgit2's synchronous tree walk off the async check dispatcher.
+    /// Await the observation before starting the check or deciding cache safety.
+    pub(crate) async fn observe_snapshot_async(
+        &self,
+        phase: &'static str,
+        check_name: Option<&str>,
+    ) {
+        self.observe_snapshot_with(
+            phase,
+            check_name,
+            crate::checks::snapshot_integrity::SnapshotObservation::observe,
+        )
+        .await;
+    }
+
+    async fn observe_snapshot_with(
+        &self,
+        phase: &'static str,
+        check_name: Option<&str>,
+        observe: impl FnOnce(
+            &std::path::Path,
+            &std::path::Path,
+            &str,
+        ) -> crate::checks::snapshot_integrity::SnapshotObservation
+        + Send
+        + 'static,
+    ) {
+        let Some((path, root, target)) = self.snapshot_observation_source() else {
+            return;
+        };
+        let permit = Arc::clone(&self.snapshot_observation_gate)
+            .lock_owned()
+            .await;
+        let expected_target = target.clone();
+        let observation = tokio::task::spawn_blocking(move || {
+            // Retain admission until the native walk ends even if its waiter
+            // is cancelled. Native libgit2 calls are not preemptible.
+            let _permit = permit;
+            observe(&path, &root, &target)
+        })
+        .await
+        .unwrap_or_else(
+            |error| crate::checks::snapshot_integrity::SnapshotObservation {
+                expected_target_sha: expected_target,
+                observed_head_sha: None,
+                status: crate::checks::snapshot_integrity::SnapshotIntegrityStatus::Unknown,
+                changed_paths: None,
+                error: Some(format!("snapshot observation worker failed: {error}")),
+                phase,
+                check_name: None,
+            },
+        );
+        self.retain_snapshot_observation(observation, phase, check_name);
+    }
+
+    fn retain_snapshot_observation(
+        &self,
+        mut observation: crate::checks::snapshot_integrity::SnapshotObservation,
+        phase: &'static str,
+        check_name: Option<&str>,
+    ) {
+        observation.phase = phase;
+        observation.check_name = check_name.map(str::to_owned);
+        if observation.requires_review() {
+            self.snapshot_observations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(observation);
         }
     }
 
@@ -842,5 +914,91 @@ mod tests {
 
         ledger.set_shared_snapshot(None);
         assert!(ledger.scan_dir().is_none());
+    }
+
+    fn ledger_with_snapshot() -> (tempfile::TempDir, TaskLedger) {
+        let root = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(root.path()).unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let signature = git2::Signature::now("fixture", "fixture@example.invalid").unwrap();
+        let target = repo
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "fixture",
+                &repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+        let snapshot =
+            crate::git::create_worktree_snapshot(root.path(), &target.to_string()).unwrap();
+        let ledger = TaskLedger::new();
+        ledger.set_shared_snapshot(Some(snapshot));
+        (root, ledger)
+    }
+
+    async fn assert_snapshot_observation_does_not_block_dispatcher() {
+        let (_root, ledger) = ledger_with_snapshot();
+        let dispatcher_thread = std::thread::current().id();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let observe = ledger.observe_snapshot_with(
+            "before-check",
+            Some("fixture"),
+            move |path, root, target| {
+                started_tx.send(std::thread::current().id()).unwrap();
+                release_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("the async sibling must run while observation is blocked");
+                crate::checks::snapshot_integrity::SnapshotObservation::observe(path, root, target)
+            },
+        );
+        let sibling = async {
+            let observer_thread = started_rx.await.unwrap();
+            // Release even when the following assertion catches a regression.
+            release_tx.send(()).unwrap();
+            assert_ne!(dispatcher_thread, observer_thread);
+        };
+        tokio::join!(observe, sibling);
+        assert_eq!(ledger.snapshot_integrity_epoch(), 0);
+        ledger.cleanup_shared_snapshot().unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_observation_keeps_current_thread_dispatcher_responsive() {
+        assert_snapshot_observation_does_not_block_dispatcher().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn snapshot_observation_keeps_single_worker_dispatcher_responsive() {
+        assert_snapshot_observation_does_not_block_dispatcher().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_observation_worker_failure_retains_unknown_evidence() {
+        let (_root, ledger) = ledger_with_snapshot();
+        ledger
+            .observe_snapshot_with("after-check", Some("fixture"), |_, _, _| {
+                panic!("controlled observer failure")
+            })
+            .await;
+        assert_eq!(ledger.snapshot_integrity_epoch(), 1);
+        let observations = ledger.snapshot_observations();
+        let observation = &observations[0];
+        assert_eq!(
+            observation.status,
+            crate::checks::snapshot_integrity::SnapshotIntegrityStatus::Unknown
+        );
+        assert_eq!(observation.phase, "after-check");
+        assert_eq!(observation.check_name.as_deref(), Some("fixture"));
+        assert!(
+            observation
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("worker failed")
+        );
+        ledger.cleanup_shared_snapshot().unwrap();
     }
 }

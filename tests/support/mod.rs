@@ -39,6 +39,14 @@ impl ContractEnvironment {
         command
     }
 
+    pub fn scanner_path(&self) -> std::path::PathBuf {
+        self.root.path().join("bin").join(if cfg!(windows) {
+            "semgrep.cmd"
+        } else {
+            "semgrep"
+        })
+    }
+
     fn configure(&self, command: &mut Command) {
         let mut paths = vec![self.root.path().join("bin")];
         paths.extend(std::env::split_paths(
@@ -50,12 +58,11 @@ impl ContractEnvironment {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn contract_scanner_is_executable_and_environment_is_owned() {
     let environment = ContractEnvironment::new();
     let root = environment.root.path().to_owned();
-    let mut scanner = Command::new("semgrep");
+    let mut scanner = Command::new(environment.scanner_path());
     environment.configure(&mut scanner);
     let output = scanner.output().expect("run contract scanner");
     assert!(output.status.success());

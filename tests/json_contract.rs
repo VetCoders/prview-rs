@@ -237,6 +237,50 @@ fn json_quiet_writes_machine_safe_json_to_stdout() {
 }
 
 #[test]
+fn json_review_uses_the_owned_contract_scanner() {
+    let repo = create_fixture_repo();
+    let environment = support::ContractEnvironment::new();
+    let output = environment
+        .command()
+        .current_dir(repo.path())
+        .args([
+            "feature/json-contract",
+            "main",
+            "--quick",
+            "--profile",
+            "generic",
+            "--json",
+            "--quiet",
+            "--no-fetch",
+            "--no-cache",
+            "--no-zip",
+            "--no-heuristics",
+        ])
+        .output()
+        .expect("run review with contract scanner");
+    assert!(output.status.success(), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report_path = Path::new(payload["output_dir"].as_str().unwrap()).join("report.json");
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+    let scanner = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "semgrep_scan")
+        .expect("Semgrep result");
+    assert_eq!(scanner["status"], "PASS", "{scanner}");
+    #[cfg(windows)]
+    assert!(
+        scanner["command"]
+            .as_str()
+            .unwrap()
+            .starts_with(environment.scanner_path().to_string_lossy().as_ref()),
+        "Windows must run the owned batch fixture, not a host scanner: {scanner}"
+    );
+}
+
+#[test]
 fn update_json_quiet_without_new_commits_still_returns_json_payload() {
     let temp = create_fixture_repo();
     let repo = temp.path();
