@@ -868,6 +868,8 @@ quality, policy, and permission axes beside that explanation.
 - `00_summary/PROVENANCE.json` schema 2.0 answers *what was judged*: `target_sha` and the base commits,
   separately from the pre-check operator checkout (`worktree_head_sha`) and `operator_worktree`
   cleanliness/digest (including dirty content). Unknown operator observations remain `null`.
+  A HEAD change detected between the start and end of capture makes all operator fields
+  `null`; capture is bounded and does not lock files or provide an atomic filesystem snapshot.
   Schema 1.0 called the operator fields `head_sha` and `worktree`; its HEAD was read later, during
   artifact generation. Use `target_sha` for review identity in both versions. The record also carries,
   per check, the directory and commit it actually read. `bases[]` names every baseline the pack's patches

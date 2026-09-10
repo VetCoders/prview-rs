@@ -954,7 +954,8 @@ fn check_scans_target_snapshot(check_id: &str) -> bool {
 /// and a fingerprint of exactly what was dirty.
 ///
 /// Cleanliness and digest come from ONE status read, so the pack cannot claim a clean
-/// tree next to a digest of uncommitted changes.
+/// tree next to a digest of uncommitted changes. A HEAD change detected across
+/// that read invalidates all three fields; this is not an atomic filesystem snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct WorktreeProvenance {
     /// Operator checkout commit captured before checks. `None` for an unborn
@@ -991,6 +992,13 @@ pub struct WorktreeProvenance {
 ///   That is the one direction this record exists to prevent, so it stays
 ///   `None`: unknown, and treated as untrusted.
 pub(crate) fn capture_worktree_provenance(repo_root: &std::path::Path) -> WorktreeProvenance {
+    capture_worktree_provenance_inner(repo_root, || {})
+}
+
+fn capture_worktree_provenance_inner(
+    repo_root: &Path,
+    after_fingerprint: impl FnOnce(),
+) -> WorktreeProvenance {
     use sha2::{Digest, Sha256};
 
     let Ok(repo) = git2::Repository::discover(repo_root) else {
@@ -1000,11 +1008,13 @@ pub(crate) fn capture_worktree_provenance(repo_root: &std::path::Path) -> Worktr
             status_digest: None,
         };
     };
-    let head_sha = repo
-        .head()
-        .and_then(|head| head.peel_to_commit())
-        .ok()
-        .map(|commit| commit.id().to_string());
+    let read_head = || {
+        repo.head()
+            .and_then(|head| head.peel_to_commit())
+            .ok()
+            .map(|commit| commit.id().to_string())
+    };
+    let head_sha = read_head();
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(true)
@@ -1022,6 +1032,14 @@ pub(crate) fn capture_worktree_provenance(repo_root: &std::path::Path) -> Worktr
     let fingerprint = render_status_fingerprint(&statuses, workdir.as_deref(), 0, &mut budget);
     let mut hasher = Sha256::new();
     hasher.update(fingerprint.as_bytes());
+    after_fingerprint();
+
+    // A commit/checkout during status or content reads mixes two observations.
+    // Discard them instead of certifying the raced checkout clean. This bounds
+    // the check; it does not lock the worktree or detect a HEAD change and revert.
+    if read_head() != head_sha {
+        return WorktreeProvenance::default();
+    }
 
     WorktreeProvenance {
         head_sha,
@@ -2423,6 +2441,44 @@ mod tests {
             classify_quality_failure("cargo_test", &findings, true),
             QualityFailureClass::Introduced
         );
+    }
+
+    #[test]
+    fn capture_worktree_provenance_rejects_a_head_change_during_capture() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let first = repo
+            .commit(Some("HEAD"), &signature, &signature, "first", &tree, &[])
+            .unwrap();
+        let parent = repo.find_commit(first).unwrap();
+        let second = repo
+            .commit(None, &signature, &signature, "second", &tree, &[&parent])
+            .unwrap();
+
+        let capture = capture_worktree_provenance_inner(tmp.path(), || {
+            repo.set_head_detached(second).unwrap();
+        });
+        assert_eq!(repo.head().unwrap().target(), Some(second));
+        assert!(
+            capture.head_sha.is_none(),
+            "a moving HEAD has no coherent capture"
+        );
+        assert!(
+            capture.clean.is_none(),
+            "do not certify a raced checkout clean"
+        );
+        assert!(
+            capture.status_digest.is_none(),
+            "discard the mixed observation"
+        );
+
+        let stable = capture_worktree_provenance(tmp.path());
+        assert_eq!(stable.head_sha, Some(second.to_string()));
+        assert_eq!(stable.clean, Some(true));
+        assert!(stable.status_digest.is_some());
     }
 
     #[test]

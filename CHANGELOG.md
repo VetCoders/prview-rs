@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator state (`worktree_head_sha`, `operator_worktree`). The ambiguous 1.0
   field names are removed from new records. Operator HEAD is now captured
   before checks, so a later commit cannot change the recorded starting state.
+  A HEAD change detected during status fingerprinting invalidates all operator
+  fields instead of combining different checkouts; this is not a worktree lock.
   The architecture documentation includes the 1.0-to-2.0 reader migration.
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.

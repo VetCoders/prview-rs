@@ -766,6 +766,12 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   both publish a fact nobody checked and let the pre-existing downgrade silence
   findings on a tree that was never inspected. The downgrade requires a proven
   `true`, so unknown suppresses it;
+  HEAD is read again after status fingerprinting. If the two commit observations
+  differ, `worktree_head_sha`, `operator_worktree.clean`, and
+  `operator_worktree.status_digest` are all `null`, preventing a mixed observation
+  from authorizing the clean-tree downgrade. There is no retry or worktree lock:
+  this detects a changed endpoint, not edits under an unchanged HEAD or a change
+  followed by a return to the original commit (ABA);
 - `operator_worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
   working-tree status, from the *same* read as `clean`. Each line is
   `XY <path>\0<content>`, where `<content>` fingerprints the file the entry
