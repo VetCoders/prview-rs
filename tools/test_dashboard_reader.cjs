@@ -367,13 +367,37 @@ async function runReaderGate() {
     skipped.dataset.i18nTemplate = 'message.skippedCheckDetail';
     skipped.dataset.reason = 'tests disabled';
     doc.body.append(skipped);
+    // A check that never ran must never read as a passing one, in any locale.
+    const notRun = [];
+    for (const key of ['status.skipped', 'status.error']) {
+      const element = doc.createElement('p');
+      element.dataset.i18n = key;
+      element.textContent = key;
+      doc.body.append(element);
+      notRun.push([key, element]);
+    }
+    for (const key of ['message.lintNotExecuted', 'message.notExecutedHere']) {
+      const element = doc.createElement('p');
+      element.dataset.i18nTemplate = key;
+      doc.body.append(element);
+      notRun.push([key, element]);
+    }
+    const successWords = /\b(clean|pass|passed|passing|ok|success|no issues|no findings|udane|czysto|brak problem|brak uwag|bez zastrze)/i;
+    function checkNotRunLabels(language) {
+      for (const [key, element] of notRun) {
+        assert(element.textContent && element.textContent !== key, key + ' must translate in ' + language);
+        assert(!successWords.test(element.textContent), key + ' must not read as success in ' + language + ': ' + element.textContent);
+      }
+    }
     click(doc.getElementById('lang-toggle-en'));
     assert.equal(warningReason.textContent, warningReason.dataset.decisionReason, 'Switching to English retains original recorded wording');
     assert(skipped.textContent.includes('Reason: tests disabled.'));
+    checkNotRunLabels('English');
     click(doc.getElementById('lang-toggle-pl'));
     assert.equal(warningReason.textContent, '1 sygnał ostrzegawczy: 1 bez ustalonego pochodzenia; 10 sygnałów wymaga uwagi');
     assert.equal(signals.textContent, 'heuristics_loctree — pominięto: analiza strukturalna wyłączona · Analiza Semgrep była częściowa; pliki sparsowane nie w pełni: src/example.rs · Zmiany API Rust: 1 obserwacja o nieustalonym znaczeniu');
     assert(skipped.textContent.includes('Powód: testy wyłączone.'));
+    checkNotRunLabels('Polish');
     open('20_quality/search.md');
     setSearch(dom, 'needle');
     assert.equal(count.textContent, 'Trafienie 1 z 3 na tej stronie');

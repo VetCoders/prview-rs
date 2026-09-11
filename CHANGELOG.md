@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dashboard and on stdout), `Heuristics OK` is `Loctree structural signals: 0`,
   and `Checks OK (x/y)` is `Checks passed: x/y`. The PR comment export uses the
   same wording.
+- Security cards report "not executed" for a scanner that was skipped or
+  errored instead of scraping a metric out of its skip reason.
 
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.

@@ -3679,11 +3679,21 @@ pub(super) fn build_security_section(checks: &[CheckResult], ctx: &DashboardCont
     for check in &security_checks {
         let card_class = security_card_class(check.status);
         let icon = check_icon(check.status);
-        let metric = extract_security_metric(&check.name, &check.output);
-        let metric_html = if metric == "See log for details" {
-            i18n_template("message.seeLogForDetails", "See log for details", &[])
+        // A check that never ran has no metric to report. Say so instead of
+        // letting a scraped number or a neutral phrase stand in for evidence.
+        let metric_html = if matches!(check.status, CheckStatus::Skipped | CheckStatus::Error) {
+            i18n_template(
+                "message.notExecutedHere",
+                "Not executed by this PrView run. External CI status not included.",
+                &[],
+            )
         } else {
-            escape_html(&metric)
+            let metric = extract_security_metric(&check.name, &check.output);
+            if metric == "See log for details" {
+                i18n_template("message.seeLogForDetails", "See log for details", &[])
+            } else {
+                escape_html(&metric)
+            }
         };
 
         // Find the gate ID for log link
@@ -3822,7 +3832,7 @@ pub(super) fn build_lint_metrics_section(ctx: &DashboardContext, diffs: &[Diff])
                 r#"<div class="lint-card-stats"><span class="lint-stat-unknown">{}</span></div>"#,
                 i18n_template(
                     "message.lintNotExecuted",
-                    "Not executed by this PrView run — no findings were produced",
+                    "Not executed by this PrView run; no result was produced",
                     &[],
                 ),
             );

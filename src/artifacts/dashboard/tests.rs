@@ -1554,3 +1554,164 @@ fn archive_download_is_present_only_when_archive_creation_is_enabled() {
     assert!(!enabled.contains("data-evidence-path=\"artifacts.zip\""));
     assert!(!build_artifacts_section(&ctx, &[], false).contains("artifacts.zip"));
 }
+
+// ---------------------------------------------------------------------------
+// Canonical check status → UI label (no invented verdicts)
+// ---------------------------------------------------------------------------
+
+const ALL_CHECK_STATUSES: [CheckStatus; 5] = [
+    CheckStatus::Passed,
+    CheckStatus::Failed,
+    CheckStatus::Warnings,
+    CheckStatus::Skipped,
+    CheckStatus::Error,
+];
+
+fn executed(status: CheckStatus) -> bool {
+    matches!(
+        status,
+        CheckStatus::Passed | CheckStatus::Failed | CheckStatus::Warnings
+    )
+}
+
+fn status_check(name: &str, status: CheckStatus, output: &str) -> CheckResult {
+    CheckResult {
+        name: name.into(),
+        status,
+        duration: Duration::from_secs(1),
+        output: output.into(),
+        cached: false,
+        provenance: None,
+    }
+}
+
+/// Words that assert a check did its job. None of them may appear in the row of
+/// a check that never produced a result.
+fn asserts_success(fragment: &str) -> Option<String> {
+    let re = Regex::new(
+        r"(?i)\b(clean|pass|passed|passing|ok|success|successful|no issues|no findings)\b",
+    )
+    .expect("success-word regex");
+    re.find(fragment).map(|m| m.as_str().to_string())
+}
+
+fn check_row(html: &str) -> String {
+    let start = html
+        .find("<tr class=\"check-row")
+        .expect("check row present");
+    let end = html[start..].find("</tr>").expect("check row closed") + start;
+    html[start..end].to_string()
+}
+
+#[test]
+fn checks_table_renders_every_canonical_status_verbatim() {
+    for status in ALL_CHECK_STATUSES {
+        let checks = vec![status_check(
+            "tool-check",
+            status,
+            "runner reported: nothing to report",
+        )];
+        let ctx = mock_ctx();
+        let html = build_checks_section(&checks, &ctx);
+        let row = check_row(&html);
+
+        assert!(
+            row.contains(&format!(
+                r#"data-i18n="status.{key}">{key}<"#,
+                key = status.as_str()
+            )),
+            "{:?} must render its canonical label 1:1, got: {row}",
+            status
+        );
+
+        if !executed(status) {
+            assert!(
+                asserts_success(&row).is_none(),
+                "{:?} row must not claim success ({:?}): {row}",
+                status,
+                asserts_success(&row)
+            );
+            assert!(
+                !row.contains("badge-success"),
+                "{:?} must not be styled as a passing check",
+                status
+            );
+        }
+    }
+}
+
+#[test]
+fn skipped_checks_keep_their_reason_and_never_read_as_clean() {
+    for reason in [
+        "tool not installed",
+        "no matching files in diff",
+        "disabled by profile",
+        "reason unavailable",
+    ] {
+        let checks = vec![status_check("tool-check", CheckStatus::Skipped, reason)];
+        let mut ctx = mock_ctx();
+        ctx.skipped_checks = vec![SkippedCheck {
+            id: "tool_check".into(),
+            name: "tool-check".into(),
+            reason: reason.into(),
+        }];
+        let html = build_checks_section(&checks, &ctx);
+
+        assert!(
+            html.contains(&format!(r#"data-reason="{reason}""#)),
+            "skip reason `{reason}` must reach the reader verbatim"
+        );
+        assert!(
+            html.contains(r#"data-i18n="message.notExecutedHere""#),
+            "a skipped check must say it was not executed"
+        );
+        let row = check_row(&html);
+        assert!(
+            asserts_success(&row).is_none(),
+            "skip reason `{reason}` must not be rendered as a passing check: {row}"
+        );
+    }
+}
+
+#[test]
+fn security_cards_never_report_a_metric_for_a_check_that_did_not_run() {
+    for status in ALL_CHECK_STATUSES {
+        // A skipped scanner's output is its skip reason; an audit parser would
+        // happily scrape a number out of anything that looks like one.
+        let checks = vec![status_check(
+            "cargo audit",
+            status,
+            "{\"vulnerabilities\":{\"count\":0}}",
+        )];
+        let ctx = mock_ctx();
+        let html = build_security_section(&checks, &ctx);
+
+        assert!(
+            html.contains(&format!(
+                r#"data-i18n="status.{key}">{key}<"#,
+                key = status.as_str()
+            )),
+            "{:?} must render its canonical label 1:1 in the security card",
+            status
+        );
+
+        if !executed(status) {
+            assert!(
+                html.contains(r#"data-i18n-template="message.notExecutedHere""#),
+                "{:?} security card must say it was not executed",
+                status
+            );
+            assert!(
+                !html.contains("0 vulnerabilities"),
+                "{:?} security card must not report a scanned metric",
+                status
+            );
+        } else {
+            assert!(
+                html.contains("0 vulnerabilities"),
+                "{:?} security card keeps the metric the scanner produced",
+                status
+            );
+        }
+    }
+}

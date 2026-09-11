@@ -152,7 +152,7 @@
   "message.lintChangedFilesWithFindings": "Changed files with findings: {count}",
   "message.lintInChangedFiles": "{count} in changed files",
   "message.lintNoFindingsReported": "No findings reported by this check",
-  "message.lintNotExecuted": "Not executed by this PrView run — no findings were produced",
+  "message.lintNotExecuted": "Not executed by this PrView run; no result was produced",
   "message.lintOriginUnknown": "{count} origin unknown",
   "message.lintOutsideChangedFiles": "{count} outside changed files",
   "message.lintScopeNote": "Counts regroup the locations the tools reported. A finding in a changed file is a location signal, not proof that this change created it.",

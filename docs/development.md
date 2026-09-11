@@ -140,8 +140,10 @@ Use Node 20.19+, 22.13+, or 24+. The fixture should contain the merge gate,
 provenance, failure summary, review narratives, SARIF, and full patch. The test
 adds in-memory stress fixtures for pagination and relative Markdown links.
 It covers Markdown/raw switching, source preview, exact repeated search matches,
-preserved inline links, original download content, English/Polish, and script
-errors. File-origin navigation is checked without URL rewriting; HTTP navigation
+preserved inline links, original download content, English/Polish, script
+errors, and that the labels for checks which never ran (`status.skipped`,
+`status.error`, and the not-executed messages) never read as success in either
+locale. File-origin navigation is checked without URL rewriting; HTTP navigation
 retains section hashes. The DOM stubs do not establish visual layout, native downloads, or browser
 `file://` behavior; check those separately in a real browser on desktop and a
 narrow viewport.

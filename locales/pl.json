@@ -152,7 +152,7 @@
   "message.lintChangedFilesWithFindings": "Zmienione pliki z wynikami: {count}",
   "message.lintInChangedFiles": "W zmienionych plikach: {count}",
   "message.lintNoFindingsReported": "Ta kontrola nie zgłosiła żadnych wyników",
-  "message.lintNotExecuted": "Nie wykonano w tym przebiegu PrView — nie powstały żadne wyniki",
+  "message.lintNotExecuted": "Nie wykonano w tym przebiegu PrView; nie powstał żaden wynik",
   "message.lintOriginUnknown": "Pochodzenie nieustalone: {count}",
   "message.lintOutsideChangedFiles": "Poza zmienionymi plikami: {count}",
   "message.lintScopeNote": "Liczniki grupują lokalizacje zgłoszone przez narzędzia. Wynik w zmienionym pliku to sygnał lokalizacji, a nie dowód, że powstał wskutek tej zmiany.",

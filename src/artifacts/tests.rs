@@ -4656,6 +4656,68 @@ fn standard_review_html_is_generated_from_pack_markdown() {
 }
 
 #[test]
+fn review_html_renders_the_gate_verdict_verbatim() {
+    // A verdict the gate could not reach is not a pass. The standard export
+    // must repeat exactly what the canonical gate decided and must never
+    // upgrade an absent or unavailable verdict into a passing badge.
+    for (verdict, expected_class) in [
+        ("ALLOW", "v-pass"),
+        ("BLOCK", "v-block"),
+        ("CONDITIONAL", "v-warn"),
+        ("HOLD", "v-hold"),
+        ("UNAVAILABLE", "v-hold"),
+        ("NOT_RUN", "v-hold"),
+        ("SKIPPED", "v-hold"),
+        ("UNKNOWN", "v-hold"),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path();
+        fs::create_dir_all(out.join("00_summary")).expect("create 00_summary");
+        fs::write(
+            out.join("00_summary/MERGE_GATE.json"),
+            format!(
+                r#"{{"decision":{{"verdict":"{verdict}","decision_reason":"recorded reason"}}}}"#
+            ),
+        )
+        .expect("write MERGE_GATE.json");
+
+        generate_standard_review_html(out).expect("generate_standard_review_html");
+        let html = fs::read_to_string(out.join("review.html")).expect("read review.html");
+
+        assert!(
+            html.contains(&format!(
+                r#"<span class="badge {expected_class}">{verdict}</span>"#
+            )),
+            "`{verdict}` must render verbatim with class `{expected_class}`"
+        );
+        if expected_class != "v-pass" {
+            assert!(
+                !html.contains(r#"<span class="badge v-pass">"#),
+                "`{verdict}` must not be rendered as a passing verdict"
+            );
+        }
+    }
+}
+
+#[test]
+fn review_html_states_a_missing_gate_instead_of_assuming_one() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path();
+
+    generate_standard_review_html(out).expect("generate_standard_review_html");
+    let html = fs::read_to_string(out.join("review.html")).expect("read review.html");
+
+    assert!(
+        html.contains(r#"<span class="badge v-hold">UNKNOWN</span>"#),
+        "a missing MERGE_GATE.json is an unknown verdict, not a pass"
+    );
+    assert!(
+        html.contains("No gate reason recorded"),
+        "the export must say the reason is missing"
+    );
+}
+
+#[test]
 fn changed_tests_filters_correctly() {
     use crate::git::{DiffStats, FileChange, FileStatus};
 
