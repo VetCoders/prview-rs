@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The dashboard evidence inventory excludes the `prview mcp` launcher control
+  files (`RUNNING.json`, `run.log`, `run.stderr.log`) that the manifest and the
+  archive already exclude. They are mutable launcher state, not pack payload,
+  and the reader no longer presents them as immutable evidence.
+
 - Pytest locations are recognized in repository paths containing spaces and in
   non-Python files reported by doctest or plugin collectors (`.rst`, `.txt`,
   `.md`). Both were previously dropped, so `INLINE_FINDINGS.sarif` and

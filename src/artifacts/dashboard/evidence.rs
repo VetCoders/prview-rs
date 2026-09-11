@@ -24,6 +24,13 @@ pub(super) fn inventory(dir: &Path) -> Vec<EvidenceFile> {
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| e.path().strip_prefix(dir).ok().map(Path::to_path_buf))
         .filter(|p| !matches!(p.extension().and_then(|s| s.to_str()), Some("html" | "zip")))
+        // An `prview mcp` run leaves its liveness and launcher logs in the
+        // output directory while this walk happens. They are mutable launcher
+        // controls, not pack payload — `RUNNING.json` is deleted when the run
+        // ends and `run.log` can still grow after this snapshot — which is why
+        // the manifest and the archive exclude them. The inventory must use the
+        // same rule, or the reader presents them as immutable evidence.
+        .filter(|p| !crate::artifacts::is_mcp_control_file(p))
         .collect();
     // Preserve the required handoff and failure evidence before duplicate patches
     // can consume the embedding budget.
@@ -294,6 +301,22 @@ mod tests {
                 assert!(html.contains("PROVENANCE.json"));
             }
         }
+    }
+
+    #[test]
+    fn inventory_excludes_mcp_control_files() {
+        // The same rule the manifest and the archive apply: an MCP run's
+        // liveness and launcher logs sit in the output directory but are not
+        // pack evidence, and `run.log` can still grow after this snapshot.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PR_REVIEW.md"), "summary").unwrap();
+        std::fs::write(dir.path().join("RUNNING.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("run.log"), "launcher stdout").unwrap();
+        std::fs::write(dir.path().join("run.stderr.log"), "launcher stderr").unwrap();
+
+        let files = inventory(dir.path());
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["PR_REVIEW.md"]);
     }
 
     #[test]
