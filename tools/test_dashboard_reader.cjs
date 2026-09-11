@@ -22,8 +22,9 @@ if (currentUi) {
   }
   const locale = lang => fs.readFileSync(path.join(root, 'locales/' + lang + '.json'), 'utf8').replace(/<\//g, '<\\/');
   const script = rawConstant('JS_PREFIX') + locale('en') + rawConstant('JS_BETWEEN_LOCALES') + locale('pl') + rawConstant('JS_SUFFIX') + fs.readFileSync(path.join(root, 'src/artifacts/dashboard/evidence.js'), 'utf8');
-  assert.equal((html.match(/<script>/g) || []).length, 1, 'Expected one executable inline dashboard script');
-  html = html.replace(/<script>[\s\S]*?<\/script>/, () => '<script>' + script + '</script>');
+  // Not a sanitizer: swaps the pack's own single inline script tag (case-insensitive to satisfy CodeQL js/bad-tag-filter).
+  assert.equal((html.match(/<script>/gi) || []).length, 1, 'Expected one executable inline dashboard script');
+  html = html.replace(/<script>[\s\S]*?<\/script>/i, () => '<script>' + script + '</script>');
 }
 
 function createDom(url) {
