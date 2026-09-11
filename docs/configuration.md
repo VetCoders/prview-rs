@@ -85,37 +85,51 @@ Tunes how the merge-gate verdict reacts to structural signals.
 
 ## 2. `.prview-policy.yml` — merge rules (CI/gate)
 
-Where `prview.toml` deals only with analytical drivers and parsers, the optional
-`.prview-policy.yml` teaches prview **what counts as an acceptable review and
-what fails**. It defines the thresholds for letting a PR through (the *merge
-gate*): coverage levels, warning budgets, and so on.
+The optional `.prview-policy.yml` assigns policy severity to checks and controls
+when a failed check becomes a policy block. It does not select which checks run
+or configure coverage thresholds, complexity limits, or warning budgets.
+
+The loader reads `version`, `mode`, `default_severity`, and `checks` at the YAML
+root. `checks` maps canonical check IDs, such as `cargo_audit`, `cargo_test`,
+`pytest`, and `semgrep_scan`, to `block`, `warn`, or `ignore`.
 
 ### Action modes
 
 The mode is set by the `mode` field in the file. It can be overridden from the
 command line with `--policy-mode`:
 
-* **`shadow` (default)**: the repo is evaluated silently. Policy gaps are only
-  flagged as potential "Risk" notes in the generated Markdown. The process exit
-  code is always zero.
-* **`warn`**: emits a non-blocking alert about violations. The verdict is
-  reported, but the run still exits successfully.
-* **`block`**: hard failure with a non-zero exit code (`exit 1`), failing the CI
-  pipeline and stopping the PR flow.
+* **`shadow`**: no check becomes a policy block.
+* **`warn` (default)**: a failed check blocks only when its configured severity
+  is `block`.
+* **`block`**: a failed check blocks when its configured severity is `block` or
+  `warn`.
+
+Severity `ignore` never creates a policy block. These rules apply to failed or
+errored checks, not to every warning. Quality failures and incomplete analysis
+remain visible even when policy does not block, so `shadow` does not guarantee
+a `PASS` verdict. Process exit codes also depend on the invocation (`--ci`,
+`gate`, and their enforcement flags); see [merge gate](contracts/merge_gate.md).
+
+Each severity applies to its check ID. The aggregate `inline_findings` is
+evaluated separately, so setting `semgrep_scan: ignore` does not also ignore
+that aggregate.
+
+Without a policy file, the defaults are version `1`, mode `warn`, and severity
+`warn`, with no per-check overrides. When a policy file is loaded, omitted
+values use those defaults and `cargo_audit` defaults to severity `block` unless
+the file explicitly overrides it.
 
 ### Example
 
 ```yaml
 version: 1
-policy:
-  mode: shadow # or: warn, block
-
-rules:
-  no_todos: true                    # Flag newly introduced "// TODO" or "// FIXME" comments
-  max_complexity: 15                # No limit by default (disabled from static analysis)
-  require_tests: true               # Require fresh tests when new code is introduced (coverage delta)
-  max_warnings: 0                   # Warning budget below which the PR is considered clean
-  allow_unsafe: false               # Block new `unsafe` blocks in Rust files
+mode: warn # or: shadow, block
+default_severity: warn
+checks:
+  cargo_audit: block
+  cargo_test: block
+  semgrep_scan: warn
+  inline_findings: warn
 ```
 
 For the architectural contract of the gate itself, see

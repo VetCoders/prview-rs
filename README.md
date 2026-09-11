@@ -203,10 +203,10 @@ step.
 |------|---------------|
 | `AI_INDEX.md` | Compact entry point for human/agent review |
 | `PR_REVIEW.md` | Unified review narrative |
-| `report.json` | Machine-readable findings |
+| `report.json` | Machine-readable findings (schema 3.0; canonical gate status and nullable breaking report path) |
 | `dashboard.html` | Visual summary of the analysis |
 | `00_summary/MERGE_GATE.json` | Pass/fail gate for automation |
-| `00_summary/PROVENANCE.json` | Commits, working-tree state, and the tree each check scanned |
+| `00_summary/PROVENANCE.json` | Schema 2.0: reviewed commits, separate operator checkout state, the tree each check scanned, and any `PROVENANCE_CONTRADICTION` between them |
 | `20_quality/PUBLIC_API_DIFF.json` | Additive API contract: compatibility rows plus lossless repo-backed Rust delta |
 | `20_quality/BREAKING_CHANGES.json` | Lossless repo-backed Rust breaking/API delta (optional) |
 | `20_quality/BREAKING_CHANGES.md` | Human Rust API truth plus bounded JS/TS and env signals (optional) |

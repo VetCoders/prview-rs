@@ -13,6 +13,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `report.json` schema 3.0 makes `quality.breaking_changes.md_path` nullable.
+  Missing Markdown reports no longer advertise a dead link; existing Rust API
+  reports remain linked even when they contain no breaking findings.
+  The same schema uses the canonical PASS/CONDITIONAL/BLOCK vocabulary for
+  `gate.status`, matching `gate.verdict` instead of projecting merge permission
+  as ALLOW/BLOCK. MERGE_GATE.md explains non-blocking quality failures beside
+  the policy and merge-permission axes.
+
+- `MERGE_GATE.json` schema 3.0 records actual policy provenance captured at
+  load: `origin: file` with a source path, or `origin: builtin-default` with
+  `source: null`. CLI/MCP readers and the validator accept 3.0 while retaining
+  older schema contracts and the typed enforcement requirements from 2.3.
+
+- `PROVENANCE.json` schema 2.0 also cross-checks its own two statements about
+  the substrate. A new `consistency` object reports how many run/check
+  comparisons were made and every `PROVENANCE_CONTRADICTION` found between them:
+  an operator tree frozen clean but read `local-dirty` by a check (or the
+  reverse), a check that scanned a commit other than the reviewed target, and a
+  check that ran in a checkout that is not this repository. Cache replays and
+  rows without provenance are not compared, so a replayed or missing observation
+  is never reported as a contradiction. `MERGE_GATE.json` schema 3.0 publishes
+  the identical rows as an additive `provenance_contradictions` array and one
+  `PROVENANCE_CONTRADICTION` review signal each, MERGE_GATE.md explains the
+  class, and `CONSISTENCY_CHECK.json` reports `consistent: false` while one
+  stands. `report.json` publishes the same fact rather than a narrower one: its
+  `quality.consistency` gains `provenance_contradictions` (the identical rows)
+  and `provenance_comparisons` (the identical count), and folds them into its own
+  `consistent` flag through the same `merge_provenance` reduction the summary
+  checker uses — so `report.json` can no longer read `consistent: true` for a run
+  `CONSISTENCY_CHECK.json` calls inconsistent. A contradiction is a
+  provenance/confidence problem, not a verified failure: no quality failure,
+  blocking issue or verdict axis is derived from it, and a run without
+  contradictions keeps a byte-identical decision.
+
+- `PROVENANCE.json` schema 2.0 separates review identity (`target_sha`) from
+  operator state (`worktree_head_sha`, `operator_worktree`). The ambiguous 1.0
+  field names are removed from new records. Operator HEAD is now captured
+  before checks, so a later commit cannot change the recorded starting state.
+  A HEAD change detected during status fingerprinting invalidates all operator
+  fields instead of combining different checkouts; this is not a worktree lock.
+  The architecture documentation includes the 1.0-to-2.0 reader migration.
+
 - Updated the bundled Loctree library from 0.13.0 to 0.14.4, together with
   its `loctree-ast` and `report-leptos` dependencies. Structural analysis uses
   this compiled library independently of any installed Loctree CLI.
@@ -26,6 +68,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clippy now covers `--all-targets`, and in an explicitly invoked `make check`.
 
 ### Fixed
+
+- `tools/validate_merge_gate.py` no longer certifies a schema-3.0 gate that
+  omits `provenance_contradictions`, that carries contradiction rows with no
+  `decision.review_caveats` array, that attributes a row to a `check_id` absent
+  from its own `checks[]`, or whose `PROVENANCE_CONTRADICTION` signals merely
+  COUNT the rows. Signals are now matched to rows one-to-one as a multiset on
+  the exact `<code>: <explanation>` spelling, so a duplicated, missing or
+  unsupported signal is an error. `tools/tests/test_validate_merge_gate.py`
+  pins all five cases against real gates in `tools/fixtures/merge-gate/`, and
+  CI runs every `tools/tests/test_*.py` rather than one named file.
+
+- Provenance contradictions are published as review signals by every artifact,
+  not only `MERGE_GATE.json`. The signal strings now come from one renderer
+  (`ProvenanceConsistency::review_caveats`) that the merge gate and the
+  dashboard context share, and the dashboard context is built with the run's
+  substrate cross-check — so `report.json`'s `gate.review_caveats`, the
+  dashboard, and the dashboard's "Copy PR comment" carry the identical
+  `PROVENANCE_CONTRADICTION` entry instead of staying silent about a
+  disagreement the gate names. `quality.consistency` already folded the
+  contradictions in and is unchanged.
+
+- Pre-existing failure classification uses the operator HEAD captured before
+  checks. A later checkout can invalidate stability but cannot grant a new
+  downgrade; unknown captured HEAD no longer takes a permissive local fallback.
 
 - MCP process-ownership tests wait for a *complete* published pid instead of the
   bare existence of the pid file. A shell's `>` redirection creates the file

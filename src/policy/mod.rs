@@ -30,6 +30,10 @@ pub enum PolicySeverity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
+    /// File actually read by `load_policy`, frozen before checks. `None` means
+    /// built-in defaults; runtime provenance cannot be supplied through YAML.
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
     pub version: u32,
     pub mode: PolicyMode,
     pub default_severity: PolicySeverity,
@@ -40,6 +44,7 @@ pub struct PolicyConfig {
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
+            source: None,
             version: 1,
             mode: PolicyMode::Warn,
             default_severity: PolicySeverity::Warn,
@@ -139,6 +144,7 @@ pub fn load_policy(path: &Path, mode_override: Option<PolicyMode>) -> Result<Pol
             .or_insert(PolicySeverity::Block);
 
         PolicyConfig {
+            source: Some(path.to_path_buf()),
             version: parsed.version.unwrap_or(1),
             mode: parsed.mode.unwrap_or_default(),
             default_severity: parsed.default_severity.unwrap_or_default(),
@@ -166,6 +172,28 @@ mod tests {
         assert_eq!(p.version, 1);
         assert_eq!(p.mode, PolicyMode::Warn);
         assert_eq!(p.default_severity, PolicySeverity::Warn);
+        assert!(p.source.is_none());
+    }
+
+    #[test]
+    fn loaded_policy_source_survives_file_removal_and_mode_override() {
+        let repo = tempdir().unwrap();
+        let path = repo.path().join("policy.yml");
+        std::fs::write(&path, "mode: shadow\n").unwrap();
+        let policy = load_policy(&path, Some(PolicyMode::Block)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(policy.source.as_deref(), Some(path.as_path()));
+        assert_eq!(policy.mode, PolicyMode::Block);
+    }
+
+    #[test]
+    fn default_policy_source_stays_absent_when_file_appears_later() {
+        let repo = tempdir().unwrap();
+        let path = repo.path().join("policy.yml");
+        let policy = load_policy(&path, Some(PolicyMode::Shadow)).unwrap();
+        std::fs::write(&path, "mode: block\n").unwrap();
+        assert!(policy.source.is_none());
+        assert_eq!(policy.mode, PolicyMode::Shadow);
     }
 
     #[test]

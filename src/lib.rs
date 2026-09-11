@@ -265,6 +265,7 @@ impl App {
                 skipped_checks,
                 worktree_clean: worktree.clean,
                 worktree_status_digest: worktree.status_digest.clone(),
+                worktree_head_sha: worktree.head_sha.clone(),
                 governor: &self.governor,
             })
         })?;
@@ -592,6 +593,7 @@ impl App {
                 skipped_checks: vec![],
                 worktree_clean: worktree.clean,
                 worktree_status_digest: worktree.status_digest.clone(),
+                worktree_head_sha: worktree.head_sha.clone(),
                 governor: &self.governor,
             })
         })?;
@@ -1146,12 +1148,12 @@ mod tests {
         .expect("parse PROVENANCE.json");
 
         assert_eq!(
-            provenance["worktree"]["clean"], false,
+            provenance["operator_worktree"]["clean"], false,
             "the pack must describe the tree this iteration ran on, not the one \
              the watcher started with",
         );
         assert_ne!(
-            provenance["worktree"]["status_digest"].as_str(),
+            provenance["operator_worktree"]["status_digest"].as_str(),
             watcher_start.status_digest.as_deref(),
             "a re-frozen digest must differ from the watcher's start-of-process one",
         );

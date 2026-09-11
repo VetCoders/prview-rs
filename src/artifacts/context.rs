@@ -100,6 +100,7 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
         diffs,
         ownership_map,
         clean_comparison,
+        provenance,
     } = input;
     use crate::policy::engine::{AnalysisStatus, MergeRecommendation, PolicyEngine};
 
@@ -215,6 +216,13 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
             names
         ));
     }
+    // Substrate contradictions, in the same trailing position and from the same
+    // renderer the merge gate uses. This context is what report.json's
+    // `gate.review_caveats`, the dashboard and the "Copy PR comment" projection
+    // read, so without this line those three omit a signal MERGE_GATE.json
+    // carries — the pack would name a contradiction in one artifact and hide it
+    // in the three an operator actually reads.
+    review_caveats.extend(provenance.review_caveats());
 
     let findings = inline
         .dashboard_findings

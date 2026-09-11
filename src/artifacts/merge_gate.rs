@@ -355,6 +355,27 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
         ));
     }
 
+    // Provenance/confidence, deliberately NOT a verified failure: when the run's
+    // substrate and a check's own row disagree, the evidence may describe
+    // another tree — that is a reason to doubt the evidence, not a defect of the
+    // product under review. The rows are re-derived from the SAME pure function
+    // and the SAME inputs `PROVENANCE.json` publishes (the checks of this run,
+    // the reviewed target, and the operator cleanliness frozen before the run),
+    // so the two artifacts cannot name different contradictions.
+    let provenance = detect_provenance_contradictions(
+        RunProvenance {
+            target_sha: &resolved_target.commit_id,
+            operator_worktree_clean: clean_comparison.operator_worktree_clean(),
+        },
+        checks,
+    );
+    //
+    // The signal strings come from `ProvenanceConsistency::review_caveats` — the
+    // single renderer the dashboard context (and through it report.json and the
+    // "Copy PR comment" projection) reads as well, so no surface can name a
+    // contradiction another one spells differently or omits.
+    all_review_caveats.extend(provenance.review_caveats());
+
     if worst_merge == MergeRecommendation::ReviewRequired && all_review_caveats.is_empty() {
         all_review_caveats.push("Partial or degraded analysis coverage".to_string());
     }
@@ -398,7 +419,8 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
             "version": config.policy.version,
             "mode": config.policy.mode_str(),
             "default_severity": policy_severity_to_str(config.policy.default_severity),
-            "source": config.policy_file.display().to_string()
+            "source": config.policy.source.as_ref().map(|path| path.display().to_string()),
+            "origin": if config.policy.source.is_some() { "file" } else { "builtin-default" }
         },
         "checks": &gate_checks,
         "inline_findings": {
@@ -419,6 +441,12 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
         // about the pack, not an axis of it. The decision object is closed by
         // contract, and every field in it ranks the verdict — this one must not.
         "stale_cache_caveats": stale_cache_caveats,
+        // Additive and OUTSIDE `decision` for the same reason: a substrate
+        // contradiction ranks no axis of the verdict. It says the evidence the
+        // axes rest on may not describe the reviewed commit, and every row is
+        // also carried as a review signal so no reader has to parse this array
+        // to see it.
+        "provenance_contradictions": provenance.contradictions,
         "decision": {
             "enforcement_disposition": enforcement_disposition,
             "analysis_status": worst_confidence,
@@ -471,6 +499,41 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
         decision.state.gate_label(),
         decision.reason,
     ));
+    md.push_str(&format!(
+        "- Quality checks passed: `{}`\n- Policy has no hard blockers: `{}`\n- Allow merge: `{}`\n\n",
+        quality_pass, policy_allow_merge, decision_fields.allow_merge,
+    ));
+    if decision.state == MergeDecisionState::Hold && policy_allow_merge && !quality_pass {
+        md.push_str(
+            "A non-blocking check can still fail quality. `HOLD` recommends reviewing \
+             that failed evidence even though policy has no hard blocker; the canonical \
+             verdict above remains authoritative.\n\n",
+        );
+    }
+    if !provenance.is_empty() {
+        let _ = write!(
+            md,
+            "{} provenance contradiction{} (`{}`) {} detected: the run and at least one check \
+             describe different substrates. This is a confidence problem about the evidence, not \
+             a verified check failure — no quality failure or blocking issue is derived from it, \
+             and the verdict above is unchanged. Re-read every affected result as possibly \
+             describing another tree; the rows are listed below and in \
+             `00_summary/PROVENANCE.json`.\n\n",
+            provenance.contradictions.len(),
+            if provenance.contradictions.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            crate::artifacts::signal::PROVENANCE_CONTRADICTION_CODE,
+            if provenance.contradictions.len() == 1 {
+                "was"
+            } else {
+                "were"
+            },
+        );
+    }
+    append_review_signals(&mut md, all_review_caveats.iter().map(String::as_str));
     md.push_str("## Checks\n\n");
     md.push_str("| Check | Status | Class | Blocking |\n");
     md.push_str("|---|---|---|---|\n");
@@ -486,6 +549,26 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
     }
     fs::write(dir.join("MERGE_GATE.md"), md)?;
     Ok(())
+}
+
+/// Render the canonical caveats without truncating or reclassifying them.
+/// Continuation lines stay within their Markdown list item.
+pub(super) fn append_review_signals<'a>(
+    md: &mut String,
+    caveats: impl IntoIterator<Item = &'a str>,
+) {
+    let caveats: Vec<_> = caveats.into_iter().collect();
+    if caveats.is_empty() {
+        return;
+    }
+    if !md.ends_with("\n\n") {
+        md.push('\n');
+    }
+    let _ = writeln!(md, "## Review signals ({})\n", caveats.len());
+    for caveat in caveats {
+        let _ = writeln!(md, "- {}", caveat.replace('\n', "\n  "));
+    }
+    md.push('\n');
 }
 
 /// Merge-gate axes and issue lists after the pre-existing downgrade has been
@@ -681,6 +764,373 @@ mod tests {
                 is_remote: false,
             }],
         )
+    }
+
+    fn review_signal_documents(count: usize) -> (String, String, Vec<String>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let summary = tmp.path().join("00_summary");
+        fs::create_dir(&summary).expect("summary directory");
+        let mut config = test_config();
+        config.profile.kind = crate::config::ProfileKind::Generic;
+        let skipped: Vec<_> = (0..count)
+            .map(|i| SkippedCheck {
+                id: format!("audit_{i}"),
+                name: format!("Audit {i}"),
+                reason: format!("not requested: {i}\nadditional context: {i}"),
+            })
+            .collect();
+        let inline = InlineFindingsSummary {
+            status: "passed".into(),
+            findings_count: 0,
+            dashboard_findings: vec![],
+        };
+        let coverage = empty_coverage();
+        let (target, bases) = resolved_refs();
+        generate_merge_gate(MergeGateInput {
+            dir: &summary,
+            config: &config,
+            ledger: &empty_ledger(),
+            checks: &[],
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &coverage,
+            diffs: &[],
+            skipped_checks: &skipped,
+            resolved_target: &target,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(true, true),
+        })
+        .expect("merge gate");
+        generate_ai_index(tmp.path(), &config, &[], &[], &coverage).expect("index");
+        let gate: serde_json::Value =
+            serde_json::from_slice(&fs::read(summary.join("MERGE_GATE.json")).unwrap()).unwrap();
+        let caveats = serde_json::from_value(gate["decision"]["review_caveats"].clone())
+            .expect("canonical string list");
+        (
+            fs::read_to_string(summary.join("MERGE_GATE.md")).unwrap(),
+            fs::read_to_string(tmp.path().join("AI_INDEX.md")).unwrap(),
+            caveats,
+        )
+    }
+
+    #[test]
+    fn merge_gate_markdown_explains_a_nonblocking_quality_failure_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config
+            .policy
+            .checks
+            .insert("cargo_test".into(), PolicySeverity::Warn);
+        let checks = [CheckResult {
+            name: "Cargo test".into(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::from_secs(1),
+            output: "test result: FAILED. 0 passed; 1 failed".into(),
+            cached: false,
+            provenance: None,
+        }];
+        let inline = InlineFindingsSummary {
+            status: "passed".into(),
+            findings_count: 0,
+            dashboard_findings: vec![],
+        };
+        let (target, bases) = resolved_refs();
+        generate_merge_gate(MergeGateInput {
+            dir: tmp.path(),
+            config: &config,
+            ledger: &empty_ledger(),
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &empty_coverage(),
+            diffs: &[],
+            skipped_checks: &[],
+            resolved_target: &target,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(true, true),
+        })
+        .unwrap();
+        let gate: serde_json::Value =
+            serde_json::from_slice(&fs::read(tmp.path().join("MERGE_GATE.json")).unwrap()).unwrap();
+        assert_eq!(gate["decision"]["verdict"], "CONDITIONAL");
+        assert_eq!(gate["decision"]["recommended_label"], "HOLD");
+        assert_eq!(gate["decision"]["quality_pass"], false);
+        assert_eq!(gate["decision"]["policy_allow_merge"], true);
+        assert_eq!(gate["checks"][0]["blocking"], false);
+        let md = fs::read_to_string(tmp.path().join("MERGE_GATE.md")).unwrap();
+        assert!(md.contains("- Quality checks passed: `false`"));
+        assert!(md.contains("- Policy has no hard blockers: `true`"));
+        assert!(md.contains("- Allow merge: `false`"));
+        assert!(md.contains("A non-blocking check can still fail quality"));
+    }
+
+    /// Run the gate over `checks` with everything else neutral, on a run whose
+    /// operator tree was frozen clean.
+    fn run_gate_over(checks: &[CheckResult]) -> (serde_json::Value, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = test_config();
+        let inline = InlineFindingsSummary {
+            status: "passed".into(),
+            findings_count: 0,
+            dashboard_findings: vec![],
+        };
+        let (target, bases) = resolved_refs();
+        generate_merge_gate(MergeGateInput {
+            dir: tmp.path(),
+            config: &config,
+            ledger: &empty_ledger(),
+            checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &empty_coverage(),
+            diffs: &[],
+            skipped_checks: &[],
+            resolved_target: &target,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(true, true),
+        })
+        .expect("merge gate");
+        (
+            serde_json::from_slice(&fs::read(tmp.path().join("MERGE_GATE.json")).unwrap()).unwrap(),
+            fs::read_to_string(tmp.path().join("MERGE_GATE.md")).unwrap(),
+        )
+    }
+
+    fn passing_check_on(cwd: &str, tree_state: crate::checks::TreeState) -> CheckResult {
+        CheckResult {
+            name: "Cargo fmt".into(),
+            status: CheckStatus::Passed,
+            duration: Duration::from_secs(1),
+            output: String::new(),
+            cached: false,
+            provenance: Some(crate::checks::CheckProvenance {
+                command: "cargo fmt --check".into(),
+                tool_version: None,
+                cwd: cwd.into(),
+                target_sha: Some(resolved_refs().0.commit_id),
+                tree_state: Some(tree_state),
+                exit_code: Some(0),
+                started_at: "2026-09-11T10:00:00+02:00".into(),
+                finished_at: "2026-09-11T10:00:01+02:00".into(),
+                hard_fail_signatures: Vec::new(),
+                cache_key: None,
+            }),
+        }
+    }
+
+    /// A substrate contradiction is a confidence problem, not a verified
+    /// failure: it must be named as a review signal and a typed row, and it
+    /// must not manufacture a quality failure or a blocking issue.
+    #[test]
+    fn a_substrate_contradiction_is_reported_as_a_provenance_signal() {
+        let (gate, md) = run_gate_over(&[passing_check_on(
+            "/repo",
+            crate::checks::TreeState::LocalDirty,
+        )]);
+
+        let rows = gate["provenance_contradictions"]
+            .as_array()
+            .expect("provenance_contradictions array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["code"], "PROVENANCE_CONTRADICTION");
+        assert_eq!(rows[0]["kind"], "operator-worktree-state");
+        assert_eq!(rows[0]["check_id"], "cargo_fmt");
+
+        let caveats = gate["decision"]["review_caveats"]
+            .as_array()
+            .expect("review caveats");
+        assert_eq!(
+            caveats
+                .iter()
+                .filter(|caveat| caveat
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("PROVENANCE_CONTRADICTION")))
+                .count(),
+            1,
+            "the contradiction must also be readable as a review signal"
+        );
+        assert_eq!(
+            gate["decision"]["quality_failures"]
+                .as_array()
+                .expect("quality failures")
+                .len(),
+            0,
+            "a provenance contradiction must not be counted as a verified failure"
+        );
+        assert_eq!(
+            gate["decision"]["blocking_issues"]
+                .as_array()
+                .expect("blocking issues")
+                .len(),
+            0
+        );
+        assert!(
+            md.contains("1 provenance contradiction (`PROVENANCE_CONTRADICTION`) was detected")
+        );
+        assert!(md.contains("not a verified check failure"));
+        assert!(md.contains("## Review signals (1)"));
+    }
+
+    /// Regression: a run whose rows agree keeps the gate it always had, and
+    /// gains only an empty typed array.
+    #[test]
+    fn a_run_without_contradictions_keeps_its_gate_unchanged() {
+        let (agreeing, md) = run_gate_over(&[passing_check_on(
+            "/tmp/snapshot",
+            crate::checks::TreeState::Snapshot,
+        )]);
+
+        assert_eq!(agreeing["decision"]["verdict"], "PASS");
+        assert_eq!(agreeing["decision"]["allow_merge"], true);
+        assert!(
+            agreeing["provenance_contradictions"]
+                .as_array()
+                .expect("provenance_contradictions array")
+                .is_empty()
+        );
+        assert!(
+            !md.contains("provenance contradiction"),
+            "no contradiction, no wording about one"
+        );
+    }
+
+    /// One canonical review-signal list, not three that happen to agree.
+    ///
+    /// The contradiction used to reach `MERGE_GATE.json` alone: report.json's
+    /// `gate.review_caveats`, the dashboard, and the dashboard's "Copy PR
+    /// comment" (which reads that very field out of the embedded report) all
+    /// derive from the dashboard context, and the context was built with no
+    /// provenance at all. The pack therefore named the disagreement in the
+    /// artifact machines read and hid it from the three a human reads. Every
+    /// surface now takes the string from
+    /// `ProvenanceConsistency::review_caveats`, so the signal is not merely
+    /// present in each — it is the identical string.
+    #[test]
+    fn one_provenance_signal_reaches_gate_report_and_dashboard_identically() {
+        let checks = [passing_check_on(
+            "/repo",
+            crate::checks::TreeState::LocalDirty,
+        )];
+        let (target, bases) = resolved_refs();
+        let provenance = detect_provenance_contradictions(
+            RunProvenance {
+                target_sha: &target.commit_id,
+                // The same value `CleanComparison::for_test(true, true)` gives
+                // the gate below, so all three surfaces judge one substrate.
+                operator_worktree_clean: Some(true),
+            },
+            &checks,
+        );
+        let expected = provenance.review_caveats();
+        assert_eq!(
+            expected.len(),
+            1,
+            "fixture must plant exactly one contradiction"
+        );
+
+        let (gate, _md) = run_gate_over(&checks);
+        let gate_caveats: Vec<String> = gate["decision"]["review_caveats"]
+            .as_array()
+            .expect("gate review caveats")
+            .iter()
+            .map(|value| value.as_str().expect("caveat string").to_string())
+            .collect();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = test_config();
+        let inline = InlineFindingsSummary {
+            status: "passed".into(),
+            findings_count: 0,
+            dashboard_findings: vec![],
+        };
+        let dashboard = build_dashboard_context(DashboardContextInput {
+            config: &config,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: Vec::new(),
+            rust_api_delta: None,
+            coverage: empty_coverage(),
+            diff_dir: tmp.path(),
+            skipped_checks: Vec::new(),
+            out_dir: tmp.path(),
+            diffs: &[],
+            ownership_map: Vec::new(),
+            clean_comparison: CleanComparison::for_test(true, true),
+            provenance: &provenance,
+        });
+
+        crate::artifacts::report::generate(&crate::artifacts::report::ReportInput {
+            dir: tmp.path(),
+            config: &config,
+            diffs: &[],
+            checks: &checks,
+            resolved_target: &target,
+            resolved_bases: &bases,
+            ctx: &dashboard,
+            run_started_at: "2026-09-11T00:00:00Z",
+            heuristics: None,
+            regression: None,
+            provenance: &provenance,
+        })
+        .expect("report.json");
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(tmp.path().join("report.json")).expect("read report"))
+                .expect("parse report.json");
+        let report_caveats: Vec<String> = report["gate"]["review_caveats"]
+            .as_array()
+            .expect("report review caveats")
+            .iter()
+            .map(|value| value.as_str().expect("caveat string").to_string())
+            .collect();
+
+        let expected_signals: Vec<&String> = expected.iter().collect();
+        for (surface, caveats) in [
+            ("MERGE_GATE.json decision.review_caveats", &gate_caveats),
+            (
+                "dashboard context review_caveats",
+                &dashboard.review_caveats,
+            ),
+            ("report.json gate.review_caveats", &report_caveats),
+        ] {
+            let signals: Vec<&String> = caveats
+                .iter()
+                .filter(|caveat| {
+                    caveat.starts_with(crate::artifacts::signal::PROVENANCE_CONTRADICTION_CODE)
+                })
+                .collect();
+            assert_eq!(
+                signals, expected_signals,
+                "{surface} must carry the identical provenance review signal"
+            );
+        }
+    }
+
+    #[test]
+    fn review_signals_markdown_lists_all_canonical_caveats_in_both_readers() {
+        let (gate, index, caveats) = review_signal_documents(13);
+        assert_eq!(caveats.len(), 13);
+        for document in [gate, index] {
+            assert!(document.contains("## Review signals (13)\n\n"));
+            for caveat in &caveats {
+                let entry = format!("- {}\n", caveat.replace('\n', "\n  "));
+                assert!(document.contains(&entry), "missing signal: {caveat}");
+            }
+        }
+    }
+
+    #[test]
+    fn review_signals_markdown_omits_empty_sections_in_both_readers() {
+        let (gate, index, caveats) = review_signal_documents(0);
+        assert!(caveats.is_empty());
+        assert!(!gate.contains("## Review signals"));
+        assert!(!index.contains("## Review signals"));
     }
 
     #[test]
@@ -1155,6 +1605,7 @@ mod tests {
             diffs: &[],
             ownership_map: Vec::new(),
             clean_comparison: CleanComparison::for_test(true, true),
+            provenance: &ProvenanceConsistency::default(),
         });
 
         assert_eq!(
@@ -1219,6 +1670,7 @@ mod tests {
             diffs: &[],
             ownership_map: Vec::new(),
             clean_comparison: CleanComparison::for_test(true, true),
+            provenance: &ProvenanceConsistency::default(),
         });
 
         assert_eq!(gate["decision"]["verdict"].as_str(), Some("CONDITIONAL"));

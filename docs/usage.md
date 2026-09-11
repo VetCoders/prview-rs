@@ -89,7 +89,7 @@ not compute a second verdict path.
 
 `--json` makes stdout machine-readable (`schema_version: "gate-json/v1"`) with
 the verdict, `enforcement_disposition`, caveats, blocking issues, and artifact
-paths. Only a schema 2.3 pack with typed warning proof can use the warnings-only
+paths. Only a schema 2.3 or 3.x pack with typed warning proof can use the warnings-only
 strict exception; older or malformed packs remain strict-rejected.
 
 Local pre-push hook recipes and the recommended Shadow -> Warn -> Block rollout
@@ -547,6 +547,16 @@ array, which also carries any verdict the reader had to normalize.
 
 ## Output
 
+`REVIEW_SUMMARY.md` and its rendered view in `review.html` include an
+**Available Artifacts** section only when at least one listed context artifact
+exists (pattern scan, dependency delta, Cargo/npm SBOM, or inline SARIF).
+The summary does not emit an empty **Artifact Map** placeholder.
+
+When a review has caveats, `00_summary/MERGE_GATE.md` and `AI_INDEX.md`
+include a **Review signals (N)** section listing every canonical caveat.
+The list explains the headline count without requiring JSON inspection;
+it is omitted when empty and does not change the merge recommendation.
+
 Artifacts are written to `$PRVIEW_HOME/runs/<repo>/<branch>/<run_id>/`
 or, when `PRVIEW_HOME` is unset, to
 `$HOME/.prview/runs/<repo>/<branch>/<run_id>/` in an ordered numbered layout.
@@ -625,7 +635,7 @@ $HOME/.prview/runs/my-repo/feature-x/20260225-185357/
 
 ├── 00_summary/
 │   ├── RUN.json             # Run metadata, execution mode, check inventory
-│   ├── PROVENANCE.json      # What was analysed: base/head/target SHAs, worktree state, per-check substrate
+│   ├── PROVENANCE.json      # What was analysed: base/target SHAs, operator checkout, per-check substrate
 │   ├── FAILURES_SUMMARY.md  # Compact blocking failures without raw dumps
 │   ├── MANIFEST.json        # SHA256 hashes for generated files
 │   ├── SANITY.json          # Integrity validation results
@@ -852,14 +862,42 @@ they are not neutralized without compiler-backed name resolution.
 
 #### How to read an artifact pack
 
-- `00_summary/MERGE_GATE.json` is the canonical source of check statuses.
-- `00_summary/PROVENANCE.json` answers *what was judged*: the target/base/head commits, whether the local
-  working tree was clean when the run started (plus a digest fingerprinting what was dirty, content included),
-  and, per check, the directory and commit it actually read. `bases[]` names every baseline the pack's patches
+`report.json` schema 3.0 uses `null` for `quality.breaking_changes.md_path`
+when the Markdown artifact is absent. Render a link only for a non-null path;
+`has_breaking: false` does not imply that the report is absent.
+
+In the same schema, `gate.status` equals `gate.verdict`: `PASS`, `CONDITIONAL`,
+or `BLOCK`. Do not derive it from `allow_merge`: that permission is false for
+both CONDITIONAL and BLOCK. Older report schemas used ALLOW/BLOCK for status;
+use their `gate.verdict` when reading the canonical outcome. `recommended_label`
+is human guidance: HOLD can accompany a non-blocking failed check because
+quality failed even though policy did not hard-block. MERGE_GATE.md names the
+quality, policy, and permission axes beside that explanation.
+
+- `00_summary/MERGE_GATE.json` is the canonical source of check statuses. Schema 3.0 records the loaded policy as `origin: file` with a source path, or `origin: builtin-default` with `source: null`; later filesystem changes do not rewrite that observation.
+- `00_summary/PROVENANCE.json` schema 2.0 answers *what was judged*: `target_sha` and the base commits,
+  separately from the pre-check operator checkout (`worktree_head_sha`) and `operator_worktree`
+  cleanliness/digest (including dirty content). Unknown operator observations remain `null`.
+  A HEAD change detected between the start and end of capture makes all operator fields
+  `null`; capture is bounded and does not lock files or provide an atomic filesystem snapshot.
+  A later checkout cannot retroactively make operator-scanned findings target findings.
+  The pre-existing downgrade requires captured identity and the same operator HEAD
+  through artifact generation. Recorded starting provenance stays unchanged.
+  Schema 1.0 called the operator fields `head_sha` and `worktree`; its HEAD was read later, during
+  artifact generation. Use `target_sha` for review identity in both versions. The record also carries,
+  per check, the directory and commit it actually read. `bases[]` names every baseline the pack's patches
   were computed from — the merge base of each diff, not the tip of the base branch — and `base_sha` is its first
   entry, kept for older consumers. A `cached: true` row replays the provenance of the earlier run
   that filled the cache entry, and a row with a non-null `skipped` is a gate that was ruled out
-  before it ran, with the reason.
+  before it ran, with the reason. `consistency` holds the file's own cross-check: how many run/check
+  substrate statements were compared, and every `PROVENANCE_CONTRADICTION` between them — a tree frozen
+  clean but read dirty, a check that scanned another commit, or a check that ran in another checkout.
+  The same rows appear in `MERGE_GATE.json.provenance_contradictions`, in `report.json` as
+  `quality.consistency.provenance_contradictions` (beside `provenance_comparisons`), and as review
+  signals; they mark
+  evidence you cannot yet trust to describe the reviewed commit, not a failure of the code under review.
+  Any contradiction turns `consistent` to `false` in BOTH `00_summary/CONSISTENCY_CHECK.json` and
+  `report.json`'s `quality.consistency`, so no reader can pick a surface that calls the run clean.
 - `PR_REVIEW.md` is a concise review narrative, not a raw log dump.
 - `00_summary/FAILURES_SUMMARY.md` summarizes blocking failures and advisories without copying whole JSON files.
 - When `30_context/INLINE_FINDINGS.sarif` exists, it emits findings per location/advisory and is suitable for annotation integrations.

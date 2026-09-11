@@ -728,6 +728,21 @@ parses replays with no provenance instead of failing the run.
 
 #### Pack-level provenance — `00_summary/PROVENANCE.json`
 
+The current schema is **2.0**, independently versioned from `RUN.json`,
+`report.json`, and `MERGE_GATE.json`. It separates the reviewed revision from
+operator checkout observations:
+
+| Schema 1.0 | Schema 2.0 | Meaning |
+|---|---|---|
+| `target_sha` | `target_sha` | The reviewed commit, unchanged |
+| `head_sha` | `worktree_head_sha` | Operator checkout HEAD; 1.0 read it during artifact generation, 2.0 captures it before checks |
+| `worktree` | `operator_worktree` | Operator cleanliness and status digest, captured before checks |
+
+Readers supporting both versions must select the documented shape using
+`schema_version`. Neither version's operator HEAD is a substitute for
+`target_sha`. Old 1.0 records retain their original meaning and observation
+phase; new records omit the ambiguous `head_sha` and `worktree` aliases.
+
 The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
 "what did *this pack* judge", once, for a reviewer holding only the artifacts:
 
@@ -743,9 +758,12 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   baselines there are and fill the array instead;
 - `base_sha` — the first entry's `sha`, kept for consumers that predate
   `bases[]`. It is derived from that array, so the two cannot disagree;
-- `head_sha` — commit checked out locally (equal to `target_sha` for an ordinary
-  local review, different under `--pr`/`--remote`);
-- `worktree.clean` — whether the local tree had uncommitted changes, frozen
+- `worktree_head_sha` — operator checkout commit captured before checks,
+  during the same capture phase as `operator_worktree`. It can differ from
+  `target_sha` under `--pr`/`--remote`. A later checkout or commit cannot replace
+  this observation when artifacts are written. An unborn or unreadable HEAD
+  remains `null`, even when the reviewed target is known;
+- `operator_worktree.clean` — whether the local tree had uncommitted changes, frozen
   **before** any check ran or artifact was written (R4-19). `null` when the
   status could not be read at all (an unreadable or malformed index): the two
   failure modes are not the same, and only one of them is safe to answer
@@ -755,7 +773,20 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   both publish a fact nobody checked and let the pre-existing downgrade silence
   findings on a tree that was never inspected. The downgrade requires a proven
   `true`, so unknown suppresses it;
-- `worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
+  HEAD is read again after status fingerprinting. If the two commit observations
+  differ, `worktree_head_sha`, `operator_worktree.clean`, and
+  `operator_worktree.status_digest` are all `null`, preventing a mixed observation
+  from authorizing the clean-tree downgrade. There is no retry or worktree lock:
+  this detects a changed endpoint, not edits under an unchanged HEAD or a change
+  followed by a return to the original commit (ABA);
+  The gate's pre-existing downgrade also uses the captured HEAD, never a later
+  checkout to infer where checks ran. With no captured HEAD no downgrade is
+  authorized. HEAD must still match at artifact generation for any downgrade;
+  this extra stability check does not re-read cleanliness or rewrite recorded
+  starting provenance. With a stable captured non-target checkout, only checks
+  known to read a target snapshot remain eligible. A detected checkout change
+  disables the downgrade for the run, including these checks;
+- `operator_worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
   working-tree status, from the *same* read as `clean`. Each line is
   `XY <path>\0<content>`, where `<content>` fingerprints the file the entry
   points at: `blob:<len>:<sha256>` for a regular file (streamed, so a large file
@@ -811,6 +842,39 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   archive` extraction of the target commit in snapshot mode,
   or `repo_root` when no snapshot could be made — and a gating signal whose
   substrate is unstated is unauditable.
+- `consistency` — the file's own cross-check: `{comparisons, contradictions[]}`.
+  Stating the substrate twice (once for the run, once per check) is only worth
+  anything if the two are held against each other, so every comparable row is,
+  and a disagreement is named rather than left for a reader to spot. Each
+  contradiction carries `{code: "PROVENANCE_CONTRADICTION", kind, check_id,
+  field, run_value, check_value, explanation}` with `kind` one of
+  `operator-worktree-state` (the tree frozen clean before the run, read
+  `local-dirty` by a check, or the reverse), `check-target-sha` (a check scanned
+  a commit other than the reviewed target) or `foreign-substrate` (a check ran in
+  a checkout that is not this repository). Commit ids are compared allowing a
+  git-style abbreviation on either side; an abbreviation is not a disagreement.
+  Cache replays are excluded — their provenance describes the ORIGINAL
+  execution's tree, and they are dated by the gate's `stale_cache_caveats`
+  instead — as are rows with no provenance at all, which are an evidence gap, not
+  a contradiction. `comparisons` counts what was actually compared, so "checked
+  and consistent" stays distinguishable from "nothing could be checked". The
+  identical list is published as `MERGE_GATE.json.provenance_contradictions`, as
+  `report.json`'s `quality.consistency.provenance_contradictions`, once per row as
+  a `PROVENANCE_CONTRADICTION` review signal, and as a warning in
+  `00_summary/CONSISTENCY_CHECK.json`. Both consistency sections — the summary
+  checker's and `report.json`'s narrower counter view — fold the same rows in
+  through `ConsistencyReport::merge_provenance`, so `consistent` is `false` on
+  both while any contradiction stands, and `provenance_comparisons` carries the
+  same count `PROVENANCE.json` reports as `comparisons`. It is a confidence
+  problem about the evidence, not a
+  verified failure: no quality failure, blocking issue or verdict axis is derived
+  from it.
+
+The human Markdown gate and AI index render the complete canonical
+`decision.review_caveats` list with a matching count. Both use the shared
+`append_review_signals` formatter, retaining order and multiline item text;
+they omit the section for an empty list. The index reads the finalized gate
+JSON, so presentation never recomputes policy or invents review-signal origins.
 
 The three check inventories are projections of the same policy evaluations,
 but intentionally answer different questions. `00_summary/RUN.json.checks[]`
@@ -2702,7 +2766,7 @@ omit the coverage surface entirely — never as a percentage. A real `0/N`
 `quality.coverage.heuristic_ratio` is `null` in the unmeasured case and is
 paired with `measured: false` + `not_measured_reason`. That nullability — with
 the loctree counters becoming omittable for the same reason — is why
-`report.json` carries `schema_version: "2.0"`: a decoder written against `1.0`,
+`report.json` moved to schema 2.0: a decoder written against `1.0`,
 where the ratio was always a number, does not parse every pack.
 
 `report.json`'s `gate.quality_failure_details[]` mirrors `MERGE_GATE.json`'s
@@ -2713,8 +2777,25 @@ together: the arrays admit warning-level baseline signals so the pre-existing
 downgrade can be computed for them, and only a `"failure"` origin can fail the
 quality gate. Emitting it in the gate artifact but not in `report.json` left the
 two artifacts of one run disagreeing about what "failure" meant. The field is
-additive and `report.json` stays `schema_version: "2.0"` — that major is
-unreleased, so no consumer has ever seen a 2.0 without it.
+additive within schema 2.0 and remains present in 3.0.
+
+**Current report schema: 3.0.** `quality.breaking_changes.md_path` is a
+pack-relative string only when `20_quality/BREAKING_CHANGES.md` exists as a
+file at report generation, otherwise it is explicitly `null`. Readers migrating
+from 2.0 must handle null and omit the link. The old hard-coded 2.0 path did not
+prove the file existed. `has_breaking` is independent: a Rust API report can
+exist with no breaking findings, and its link remains available. Artifact write
+errors still abort generation; null does not replace a failed write. The
+coverage nullability retains its prior meaning.
+
+Schema 3.0 also makes `gate.status` a projection of the same canonical verdict
+as `gate.verdict` (`PASS` / `CONDITIONAL` / `BLOCK`). Report schemas 1.x/2.x
+instead projected `allow_merge` as ALLOW/BLOCK, which mislabeled CONDITIONAL as
+BLOCK. Older packs must be read through their explicit `gate.verdict`; their
+status cannot recover the lost distinction. The writer consumes the derived
+dashboard context and does not add another policy evaluator. The human
+`recommended_label` and policy/quality/permission axes keep their meanings;
+MERGE_GATE.md displays those axes and explains a non-blocking quality HOLD.
 
 Four-strategy filename heuristic matching:
 1. Exact stem match: `foo.rs` <-> `foo_test.rs` / `test_foo.rs` / `foo.test.ts`

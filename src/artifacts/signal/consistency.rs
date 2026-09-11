@@ -91,6 +91,35 @@ pub struct ConsistencyReport {
     pub consistent: bool,
 }
 
+impl ConsistencyReport {
+    /// Fold the provenance cross-check into this report.
+    ///
+    /// A contradiction between what the run says about its substrate and what a
+    /// check says about the tree it read is a consistency failure like any
+    /// counter mismatch: the pack cannot be published as `consistent` while two
+    /// of its own statements describe different trees.
+    pub fn merge_provenance(&mut self, provenance: &ProvenanceConsistency) {
+        self.checked_fields += provenance.comparisons;
+        for contradiction in &provenance.contradictions {
+            self.warnings.push(ConsistencyWarning {
+                field: contradiction.field.to_string(),
+                sources: vec![
+                    ConsistencySource {
+                        artifact: "PROVENANCE.json (run)".to_string(),
+                        value: contradiction.run_value.clone(),
+                    },
+                    ConsistencySource {
+                        artifact: format!("PROVENANCE.json (check {})", contradiction.check_id),
+                        value: contradiction.check_value.clone(),
+                    },
+                ],
+                message: format!("{}: {}", contradiction.code, contradiction.explanation),
+            });
+        }
+        self.consistent = self.warnings.is_empty();
+    }
+}
+
 /// Snapshot of key counters collected from different artifact surfaces.
 #[derive(Debug, Default)]
 pub struct ArtifactCounters {
@@ -254,6 +283,220 @@ fn check_pair<T: PartialEq + std::fmt::Display>(
         }
         _ => 0,
     }
+}
+
+/// The code every provenance contradiction carries, so a reader greps one
+/// token across PROVENANCE.json, CONSISTENCY_CHECK.json and MERGE_GATE.json.
+pub const PROVENANCE_CONTRADICTION_CODE: &str = "PROVENANCE_CONTRADICTION";
+
+/// Which pair of statements disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProvenanceContradictionKind {
+    /// The run froze the operator working tree as clean (or dirty) before the
+    /// checks ran, and a check that read THAT SAME tree recorded the opposite.
+    OperatorWorktreeState,
+    /// A check scanned a commit that is not the commit the pack judges.
+    CheckTargetSha,
+    /// A check ran in a checkout that is not this repository at all, so its
+    /// evidence belongs to a substrate the pack never declared.
+    ForeignSubstrate,
+}
+
+/// One named disagreement between the run's substrate and a check's substrate.
+///
+/// Both sides are carried verbatim: a reader must be able to see WHICH two
+/// statements cannot both be true without re-deriving them from the pack.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProvenanceContradiction {
+    pub code: &'static str,
+    pub kind: ProvenanceContradictionKind,
+    pub check_id: String,
+    /// The run-level field the check row contradicts.
+    pub field: &'static str,
+    pub run_value: String,
+    pub check_value: String,
+    pub explanation: String,
+}
+
+/// Outcome of the provenance cross-check: what was compared, and what did not
+/// add up. `comparisons` is reported even when nothing is wrong — "checked and
+/// agreed" and "never checked" are different results (class 19).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ProvenanceConsistency {
+    pub comparisons: usize,
+    pub contradictions: Vec<ProvenanceContradiction>,
+}
+
+impl ProvenanceConsistency {
+    pub fn is_empty(&self) -> bool {
+        self.contradictions.is_empty()
+    }
+
+    /// The review signals these contradictions contribute, rendered ONCE here.
+    ///
+    /// Every surface that publishes review caveats reads this list:
+    /// `MERGE_GATE.json`'s `decision.review_caveats`, `report.json`'s
+    /// `gate.review_caveats`, and — through the dashboard context both the
+    /// dashboard HTML and its "Copy PR comment" projection sit on — the
+    /// operator-facing summary. The format is the contract
+    /// (`docs/contracts/merge_gate.md`): `<code>: <explanation>`, one entry per
+    /// row, which `tools/validate_merge_gate.py` matches against the typed rows
+    /// as a multiset.
+    ///
+    /// It is a method rather than a copied `format!` at each consumer because
+    /// that copy is exactly how the surfaces drifted: the gate named a
+    /// contradiction that report.json and the PR comment did not.
+    pub fn review_caveats(&self) -> Vec<String> {
+        self.contradictions
+            .iter()
+            .map(|contradiction| format!("{}: {}", contradiction.code, contradiction.explanation))
+            .collect()
+    }
+}
+
+/// The run-level substrate every check row is held against.
+#[derive(Debug, Clone, Copy)]
+pub struct RunProvenance<'a> {
+    /// The commit whose tree the pack judges (`PROVENANCE.json.target_sha`).
+    pub target_sha: &'a str,
+    /// Operator working-tree cleanliness frozen before the checks ran
+    /// (`PROVENANCE.json.operator_worktree.clean`). `None` is unknown and is
+    /// never compared — an absent observation contradicts nothing.
+    pub operator_worktree_clean: Option<bool>,
+}
+
+/// Two commit ids name the same commit when one abbreviates the other.
+///
+/// Provenance rows are written by different producers (a `git2` object id, a
+/// recorded analysis sha, a resolved ref), and an abbreviation is not a
+/// disagreement. Seven hex characters is git's own floor for an abbreviated id,
+/// so anything shorter is treated as no evidence rather than a match.
+fn commit_ids_agree(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() || b.is_empty() {
+        return true;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if short.len() < 7 {
+        return true;
+    }
+    long.get(..short.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(short))
+}
+
+/// Cross-check every check's recorded substrate against the run's own.
+///
+/// PROVENANCE.json states the substrate twice — once for the pack, once per
+/// check — and before this checker the two could disagree in the same file
+/// without anything noticing (class 10/11). Three disagreements are provable
+/// from the rows alone, and each one means the evidence may not describe the
+/// reviewed commit:
+///
+/// 1. the operator tree is frozen clean while a check that read that live tree
+///    recorded `local-dirty` (or the reverse);
+/// 2. a check scanned a commit other than the reviewed target;
+/// 3. a check ran in a checkout that is not this repository.
+///
+/// Rows replayed from cache are excluded from all three: their provenance
+/// describes the ORIGINAL execution's tree, so holding it against THIS run's
+/// substrate would claim a contradiction where there is only a cache hit
+/// (`CheckResult::cached` is what marks it, and stale replays are already named
+/// by the gate's stale-cache caveats). A check with no provenance at all is not
+/// compared either — silence is not a contradiction, it is an evidence gap the
+/// PROVENANCE rows already show as nulls.
+pub fn detect_provenance_contradictions(
+    run: RunProvenance<'_>,
+    checks: &[crate::checks::CheckResult],
+) -> ProvenanceConsistency {
+    use crate::checks::TreeState;
+
+    let mut out = ProvenanceConsistency::default();
+
+    for check in checks {
+        if check.cached {
+            continue;
+        }
+        let Some(prov) = check.provenance.as_ref() else {
+            continue;
+        };
+        let check_id = crate::check_id::check_id_from_name(&check.name);
+
+        // A foreign tree's HEAD belongs to another project, so its `target_sha`
+        // mismatch is the same single fact as its identity — reported once.
+        if prov.tree_state == Some(TreeState::Foreign) {
+            out.comparisons += 1;
+            out.contradictions.push(ProvenanceContradiction {
+                code: PROVENANCE_CONTRADICTION_CODE,
+                kind: ProvenanceContradictionKind::ForeignSubstrate,
+                check_id: check_id.clone(),
+                field: "checks[].cwd",
+                run_value: format!("this repository at {}", run.target_sha),
+                check_value: prov.cwd.clone(),
+                explanation: format!(
+                    "Check `{check_id}` ran in `{}`, a checkout that is not this repository, so its \
+                     evidence cannot be attributed to the declared substrate of {}.",
+                    prov.cwd, run.target_sha
+                ),
+            });
+            continue;
+        }
+
+        if let (Some(run_clean), Some(state)) = (run.operator_worktree_clean, prov.tree_state) {
+            let check_local_clean = match state {
+                TreeState::LocalClean => Some(true),
+                TreeState::LocalDirty => Some(false),
+                // Snapshot states describe an ephemeral worktree, not the
+                // operator's checkout; they cannot contradict its cleanliness.
+                _ => None,
+            };
+            if let Some(check_clean) = check_local_clean {
+                out.comparisons += 1;
+                if check_clean != run_clean {
+                    out.contradictions.push(ProvenanceContradiction {
+                        code: PROVENANCE_CONTRADICTION_CODE,
+                        kind: ProvenanceContradictionKind::OperatorWorktreeState,
+                        check_id: check_id.clone(),
+                        field: "operator_worktree.clean",
+                        run_value: if run_clean {
+                            "clean".to_string()
+                        } else {
+                            "dirty".to_string()
+                        },
+                        check_value: state.as_str().to_string(),
+                        explanation: format!(
+                            "The run froze the operator working tree as {}, but check `{check_id}` \
+                             recorded `{}` for that same tree, so the pack states two different \
+                             states for one substrate.",
+                            if run_clean { "clean" } else { "dirty" },
+                            state.as_str()
+                        ),
+                    });
+                }
+            }
+        }
+
+        if let Some(check_sha) = prov.target_sha.as_deref() {
+            out.comparisons += 1;
+            if !commit_ids_agree(check_sha, run.target_sha) {
+                out.contradictions.push(ProvenanceContradiction {
+                    code: PROVENANCE_CONTRADICTION_CODE,
+                    kind: ProvenanceContradictionKind::CheckTargetSha,
+                    check_id: check_id.clone(),
+                    field: "target_sha",
+                    run_value: run.target_sha.to_string(),
+                    check_value: check_sha.to_string(),
+                    explanation: format!(
+                        "Check `{check_id}` scanned commit {check_sha}, which is not the reviewed \
+                         target {}, so its result does not describe the tree this pack judges.",
+                        run.target_sha
+                    ),
+                });
+            }
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -459,5 +702,211 @@ mod tests {
         assert!(!report.consistent);
         // files_changed mismatch + findings SARIF vs report mismatch
         assert!(report.warnings.len() >= 2);
+    }
+
+    // ── provenance contradictions (truth hardening, classes 10/11) ──
+
+    const RUN_TARGET: &str = "abc1234abc1234abc1234abc1234abc1234ab12";
+
+    fn checked_with(
+        name: &str,
+        cwd: &str,
+        target_sha: Option<&str>,
+        tree_state: Option<crate::checks::TreeState>,
+    ) -> crate::checks::CheckResult {
+        crate::checks::CheckResult {
+            name: name.to_string(),
+            status: crate::checks::CheckStatus::Passed,
+            duration: std::time::Duration::from_secs(1),
+            output: String::new(),
+            cached: false,
+            provenance: Some(crate::checks::CheckProvenance {
+                command: format!("{name} --check"),
+                tool_version: None,
+                cwd: cwd.to_string(),
+                target_sha: target_sha.map(str::to_string),
+                tree_state,
+                exit_code: Some(0),
+                started_at: "2026-09-11T10:00:00+02:00".to_string(),
+                finished_at: "2026-09-11T10:00:01+02:00".to_string(),
+                hard_fail_signatures: Vec::new(),
+                cache_key: None,
+            }),
+        }
+    }
+
+    fn run_at(clean: Option<bool>) -> RunProvenance<'static> {
+        RunProvenance {
+            target_sha: RUN_TARGET,
+            operator_worktree_clean: clean,
+        }
+    }
+
+    #[test]
+    fn agreeing_provenance_reports_the_comparisons_and_no_contradiction() {
+        use crate::checks::TreeState;
+        let checks = [
+            checked_with(
+                "Cargo clippy",
+                "/tmp/snapshot",
+                Some(RUN_TARGET),
+                Some(TreeState::Snapshot),
+            ),
+            // An abbreviated id is the same commit, not a second one.
+            checked_with(
+                "Cargo fmt",
+                "/repo",
+                Some(&RUN_TARGET[..12]),
+                Some(TreeState::LocalClean),
+            ),
+        ];
+
+        let result = detect_provenance_contradictions(run_at(Some(true)), &checks);
+
+        assert!(result.is_empty(), "{:?}", result.contradictions);
+        assert_eq!(
+            result.comparisons, 3,
+            "two target shas plus one local tree state were actually compared"
+        );
+    }
+
+    #[test]
+    fn a_clean_operator_tree_contradicts_a_check_that_read_it_dirty() {
+        use crate::checks::TreeState;
+        let checks = [checked_with(
+            "Cargo clippy",
+            "/repo",
+            Some(RUN_TARGET),
+            Some(TreeState::LocalDirty),
+        )];
+
+        let result = detect_provenance_contradictions(run_at(Some(true)), &checks);
+
+        assert_eq!(result.contradictions.len(), 1);
+        let contradiction = &result.contradictions[0];
+        assert_eq!(contradiction.code, PROVENANCE_CONTRADICTION_CODE);
+        assert_eq!(
+            contradiction.kind,
+            ProvenanceContradictionKind::OperatorWorktreeState
+        );
+        assert_eq!(contradiction.check_id, "cargo_clippy");
+        assert_eq!(contradiction.run_value, "clean");
+        assert_eq!(contradiction.check_value, "local-dirty");
+        assert!(contradiction.explanation.contains("cargo_clippy"));
+    }
+
+    #[test]
+    fn a_check_scanning_another_commit_contradicts_the_reviewed_target() {
+        use crate::checks::TreeState;
+        let other = "9999999999999999999999999999999999999999";
+        let checks = [checked_with(
+            "Cargo test",
+            "/tmp/snapshot",
+            Some(other),
+            Some(TreeState::Snapshot),
+        )];
+
+        let result = detect_provenance_contradictions(run_at(Some(true)), &checks);
+
+        assert_eq!(result.contradictions.len(), 1);
+        let contradiction = &result.contradictions[0];
+        assert_eq!(
+            contradiction.kind,
+            ProvenanceContradictionKind::CheckTargetSha
+        );
+        assert_eq!(contradiction.run_value, RUN_TARGET);
+        assert_eq!(contradiction.check_value, other);
+    }
+
+    #[test]
+    fn a_foreign_checkout_contradicts_the_declared_substrate_once() {
+        use crate::checks::TreeState;
+        let checks = [checked_with(
+            "Cargo check",
+            "/elsewhere/other-repo",
+            // A foreign checkout's HEAD is another project's commit; the row
+            // must be named once as a foreign substrate, not twice.
+            Some("5555555555555555555555555555555555555555"),
+            Some(TreeState::Foreign),
+        )];
+
+        let result = detect_provenance_contradictions(run_at(Some(true)), &checks);
+
+        assert_eq!(result.contradictions.len(), 1);
+        let contradiction = &result.contradictions[0];
+        assert_eq!(
+            contradiction.kind,
+            ProvenanceContradictionKind::ForeignSubstrate
+        );
+        assert_eq!(contradiction.check_value, "/elsewhere/other-repo");
+    }
+
+    #[test]
+    fn a_cache_replay_and_an_unknown_operator_state_are_not_contradictions() {
+        use crate::checks::TreeState;
+        let mut replayed = checked_with(
+            "Cargo clippy",
+            "/repo",
+            Some("5555555555555555555555555555555555555555"),
+            Some(TreeState::LocalDirty),
+        );
+        replayed.cached = true;
+        let unknown_operator_state = checked_with(
+            "Cargo fmt",
+            "/repo",
+            Some(RUN_TARGET),
+            Some(TreeState::LocalDirty),
+        );
+        let no_provenance = crate::checks::CheckResult {
+            provenance: None,
+            ..checked_with("Cargo test", "/repo", None, None)
+        };
+
+        let result = detect_provenance_contradictions(
+            run_at(None),
+            &[replayed, unknown_operator_state, no_provenance],
+        );
+
+        assert!(result.is_empty(), "{:?}", result.contradictions);
+        assert_eq!(
+            result.comparisons, 1,
+            "only the fresh row's target sha could be compared"
+        );
+    }
+
+    #[test]
+    fn a_contradiction_makes_the_consistency_report_inconsistent() {
+        use crate::checks::TreeState;
+        let checks = [checked_with(
+            "Cargo clippy",
+            "/repo",
+            Some(RUN_TARGET),
+            Some(TreeState::LocalDirty),
+        )];
+        let provenance = detect_provenance_contradictions(run_at(Some(true)), &checks);
+
+        let mut report = ArtifactCounters {
+            files_changed_diff: Some(3),
+            files_changed_report: Some(3),
+            ..Default::default()
+        }
+        .check_consistency();
+        assert!(report.consistent);
+        let counter_fields = report.checked_fields;
+
+        report.merge_provenance(&provenance);
+
+        assert!(!report.consistent);
+        assert_eq!(
+            report.checked_fields,
+            counter_fields + provenance.comparisons
+        );
+        let warning = report
+            .warnings
+            .iter()
+            .find(|warning| warning.field == "operator_worktree.clean")
+            .expect("the contradiction must surface as a consistency warning");
+        assert!(warning.message.starts_with(PROVENANCE_CONTRADICTION_CODE));
+        assert_eq!(warning.sources.len(), 2);
     }
 }

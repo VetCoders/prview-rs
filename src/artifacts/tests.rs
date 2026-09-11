@@ -83,6 +83,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
         skipped_checks: Vec::new(),
         worktree_clean: Some(true),
         worktree_status_digest: None,
+        worktree_head_sha: None,
         governor,
     })
 }
@@ -3491,8 +3492,8 @@ fn merge_gate_names_the_origin_of_every_quality_failure_entry() {
     );
     assert_eq!(
         crate::gate::MERGE_GATE_SCHEMA_VERSION,
-        "2.3",
-        "typed enforcement disposition and its proof bump the MINOR after origin"
+        "3.0",
+        "nullable policy source changes the MAJOR while retaining typed enforcement proof"
     );
 }
 
@@ -6369,7 +6370,7 @@ fn review_summary_includes_gate_and_checks() {
     assert!(summary.contains("## Review"));
     assert!(summary.contains("Looks good overall"));
     assert!(summary.contains("## Available Artifacts"));
-    assert!(summary.contains("## Available Artifacts"));
+    assert!(!summary.contains("## Artifact Map"));
     assert!(summary.contains("PATTERN_SCAN.json"));
     assert!(summary.contains("DEPS_DELTA.json"));
 }
@@ -6384,7 +6385,7 @@ fn review_summary_handles_missing_files() {
 
     let summary = fs::read_to_string(out.join("REVIEW_SUMMARY.md")).unwrap();
     assert!(summary.contains("# PR Review Summary"));
-    assert!(summary.contains("## Available Artifacts"));
+    assert!(!summary.contains("## Available Artifacts"));
     // Should NOT have Gate/Review/Artifact Map sections
     assert!(
         !summary.contains("## Gate Decision"),
@@ -6394,7 +6395,7 @@ fn review_summary_handles_missing_files() {
         !summary.contains("## Review"),
         "No review section when PR_REVIEW.md is missing"
     );
-    assert!(summary.contains("## Artifact Map"));
+    assert!(!summary.contains("## Artifact Map"));
 }
 
 #[test]
@@ -6419,7 +6420,30 @@ fn review_summary_partial_sources_gate_only() {
         !summary.contains("## Review"),
         "No review section when PR_REVIEW.md is missing"
     );
-    assert!(summary.contains("## Artifact Map"));
+    assert!(!summary.contains("## Artifact Map"));
+}
+
+#[test]
+fn review_summary_preserves_each_available_artifact() {
+    let artifacts = [
+        "30_context/PATTERN_SCAN.json",
+        "30_context/DEPS_DELTA.json",
+        "30_context/cargo-sbom.txt",
+        "30_context/npm-sbom.txt",
+        "30_context/INLINE_FINDINGS.sarif",
+    ];
+    for present in artifacts {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(tmp.path().join("30_context")).unwrap();
+        fs::write(tmp.path().join(present), "fixture").unwrap();
+        generate_review_summary(tmp.path()).unwrap();
+        let summary = fs::read_to_string(tmp.path().join("REVIEW_SUMMARY.md")).unwrap();
+        assert!(!summary.contains("## Artifact Map"));
+        assert_eq!(summary.matches("## Available Artifacts").count(), 1);
+        for artifact in artifacts {
+            assert_eq!(summary.contains(artifact), artifact == present);
+        }
+    }
 }
 
 #[test]
@@ -6879,8 +6903,17 @@ fn write_provenance_fixture_with_skips(
     skipped_checks: &[crate::checks::SkippedCheck],
     diffs: &[Diff],
 ) -> serde_json::Value {
-    let repo = Repository::open(repo_root).expect("open repo");
     let worktree = capture_worktree_provenance(repo_root);
+    write_provenance_fixture_with_capture(out, checks, skipped_checks, diffs, &worktree)
+}
+
+fn write_provenance_fixture_with_capture(
+    out: &Path,
+    checks: &[CheckResult],
+    skipped_checks: &[crate::checks::SkippedCheck],
+    diffs: &[Diff],
+    worktree: &WorktreeProvenance,
+) -> serde_json::Value {
     let resolved_target = ResolvedRef {
         name: "feature/provenance".to_string(),
         commit_id: "abc1234abc1234abc1234abc1234abc1234ab".to_string(),
@@ -6892,9 +6925,18 @@ fn write_provenance_fixture_with_skips(
         is_remote: true,
     }];
 
+    // The fixture runs the real detector, so a contradiction planted in a
+    // check row reaches PROVENANCE.json exactly as it would in a live run.
+    let contradictions = detect_provenance_contradictions(
+        RunProvenance {
+            target_sha: &resolved_target.commit_id,
+            operator_worktree_clean: worktree.clean,
+        },
+        checks,
+    );
+
     generate_provenance_json(ProvenanceJsonInput {
         dir: out,
-        repo: &repo,
         checks,
         skipped_checks,
         diffs,
@@ -6902,6 +6944,8 @@ fn write_provenance_fixture_with_skips(
         resolved_bases: &resolved_bases,
         worktree_clean: worktree.clean,
         worktree_status_digest: worktree.status_digest.as_deref(),
+        worktree_head_sha: worktree.head_sha.as_deref(),
+        contradictions: &contradictions,
     })
     .expect("generate_provenance_json");
 
@@ -6928,13 +6972,15 @@ fn provenance_json_records_pack_level_substrate() {
 
     let json = write_provenance_fixture(repo_tmp.path(), out.path(), &checks);
 
-    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["schema_version"], "2.0");
     assert_eq!(json["target_sha"], "abc1234abc1234abc1234abc1234abc1234ab");
     assert_eq!(json["base_sha"], "def5678def5678def5678def5678def5678de");
-    assert_eq!(json["head_sha"], head);
-    assert_eq!(json["worktree"]["clean"], true);
+    assert_eq!(json["worktree_head_sha"], head);
+    assert!(json.get("head_sha").is_none());
+    assert!(json.get("worktree").is_none());
+    assert_eq!(json["operator_worktree"]["clean"], true);
     assert!(
-        json["worktree"]["status_digest"]
+        json["operator_worktree"]["status_digest"]
             .as_str()
             .expect("digest")
             .starts_with("sha256:"),
@@ -6962,6 +7008,85 @@ fn provenance_json_records_pack_level_substrate() {
     let heuristics = &rows[2];
     assert!(heuristics["cwd"].is_null());
     assert!(heuristics["tree_state"].is_null());
+
+    // Rows that agree still record that they were compared: "checked and
+    // consistent" must not read like "nothing was checked".
+    assert_eq!(
+        json["consistency"]["contradictions"]
+            .as_array()
+            .expect("contradictions array")
+            .len(),
+        0
+    );
+    assert_eq!(json["consistency"]["comparisons"], 1);
+}
+
+/// PROVENANCE.json states the substrate twice — once for the run, once per
+/// check. When the two disagree the file must SAY so; before this the reader
+/// was left to notice that `operator_worktree.clean` and a `local-dirty` row
+/// described the same tree.
+#[test]
+fn provenance_json_names_a_substrate_contradiction() {
+    let (repo_tmp, _head) = provenance_fixture_repo();
+    let out = tempfile::tempdir().expect("out tempdir");
+
+    let mut dirty_local = snapshot_provenance("abc1234");
+    dirty_local.cwd = repo_tmp.path().display().to_string();
+    dirty_local.tree_state = Some(crate::checks::TreeState::LocalDirty);
+    let checks = [provenance_check("Cargo check", false, Some(dirty_local))];
+
+    let json = write_provenance_fixture(repo_tmp.path(), out.path(), &checks);
+
+    assert_eq!(json["operator_worktree"]["clean"], true);
+    let contradictions = json["consistency"]["contradictions"]
+        .as_array()
+        .expect("contradictions array");
+    assert_eq!(contradictions.len(), 1);
+    let row = &contradictions[0];
+    assert_eq!(row["code"], "PROVENANCE_CONTRADICTION");
+    assert_eq!(row["kind"], "operator-worktree-state");
+    assert_eq!(row["check_id"], check_id_from_name("Cargo check"));
+    assert_eq!(row["field"], "operator_worktree.clean");
+    assert_eq!(row["run_value"], "clean");
+    assert_eq!(row["check_value"], "local-dirty");
+    assert!(
+        row["explanation"]
+            .as_str()
+            .expect("explanation")
+            .contains("two different states"),
+        "the row must explain the disagreement in words: {row}"
+    );
+}
+
+#[test]
+fn provenance_json_keeps_captured_operator_head_after_checkout_moves() {
+    let (repo_tmp, before) = provenance_fixture_repo();
+    let captured = capture_worktree_provenance(repo_tmp.path());
+    let after = write_commit_fixture(repo_tmp.path(), "later.rs", "pub fn later() {}\n");
+    assert_ne!(before, after);
+
+    let out = tempfile::tempdir().expect("out tempdir");
+    let json = write_provenance_fixture_with_capture(out.path(), &[], &[], &[], &captured);
+    assert_eq!(json["worktree_head_sha"], before);
+    assert_ne!(json["worktree_head_sha"], after);
+    assert_eq!(json["operator_worktree"]["clean"], true);
+    assert_eq!(json["schema_version"], "2.0");
+}
+
+#[test]
+fn provenance_json_keeps_unknown_operator_state_null() {
+    let out = tempfile::tempdir().expect("out tempdir");
+    let json = write_provenance_fixture_with_capture(
+        out.path(),
+        &[],
+        &[],
+        &[],
+        &WorktreeProvenance::default(),
+    );
+    assert!(json["worktree_head_sha"].is_null());
+    assert!(json["operator_worktree"]["clean"].is_null());
+    assert!(json["operator_worktree"]["status_digest"].is_null());
+    assert!(json["target_sha"].is_string());
 }
 
 #[test]
@@ -7102,17 +7227,17 @@ fn provenance_json_worktree_reflects_dirty_tree() {
     let out = tempfile::tempdir().expect("out tempdir");
 
     let clean = write_provenance_fixture(repo_tmp.path(), out.path(), &[]);
-    assert_eq!(clean["worktree"]["clean"], true);
+    assert_eq!(clean["operator_worktree"]["clean"], true);
 
     fs::write(repo_tmp.path().join("uncommitted.rs"), "pub fn oops() {}\n").expect("dirty file");
 
     let dirty = write_provenance_fixture(repo_tmp.path(), out.path(), &[]);
     assert_eq!(
-        dirty["worktree"]["clean"], false,
+        dirty["operator_worktree"]["clean"], false,
         "an untracked file makes the tree dirty"
     );
     assert_ne!(
-        dirty["worktree"]["status_digest"], clean["worktree"]["status_digest"],
+        dirty["operator_worktree"]["status_digest"], clean["operator_worktree"]["status_digest"],
         "the digest must fingerprint WHAT is dirty, not just that something is"
     );
 }
@@ -7205,4 +7330,19 @@ fn worktree_digest_separates_nested_repositories_by_their_own_state() {
         dirty.status_digest,
         "the same nested tree must fingerprint identically",
     );
+}
+
+#[test]
+fn breaking_markdown_write_failure_is_not_reported_as_success() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("BREAKING_CHANGES.md")).unwrap();
+    let finding = signal::BreakingFinding {
+        file: "api.ts".to_string(),
+        kind: signal::BreakingKind::RemovedSymbol {
+            symbol_type: "function".to_string(),
+        },
+        line: "export function removed() {}".to_string(),
+        risk_level: signal::BreakingRisk::High,
+    };
+    assert!(signal::write_breaking_changes_with_api(dir.path(), None, &[finding]).is_err());
 }

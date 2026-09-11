@@ -1,4 +1,4 @@
-# MERGE_GATE Contract (schema 2.3)
+# MERGE_GATE Contract (schema 3.0)
 
 `MERGE_GATE.json` is the policy-aware merge decision emitted at
 `00_summary/MERGE_GATE.json`. It is the single machine-readable verdict surface
@@ -11,16 +11,17 @@ document disagree, the code is the contract and this document is the bug.
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | `"2.3"` |
+| `schema_version` | string | `"3.0"` |
 | `generated_at` | string | RFC 3339 local datetime |
 | `bridge_stage` | integer | `0..4` |
 | `target` | string | Resolved target branch name (not raw CLI input) |
 | `bases` | string[] | Resolved base branch names |
 | `profile` | string | Resolved profile kind |
-| `policy` | object | `{ version, mode, default_severity, source }` |
+| `policy` | object | `{ version, mode, default_severity, source, origin }` |
 | `checks` | object[] | Per-check evaluation records (see below) |
 | `inline_findings` | object | Inline SARIF summary (see below) |
 | `stale_cache_caveats` | object[] | Advisory, additive: gate rows replayed from an old or age-unverifiable cache (see below) |
+| `provenance_contradictions` | object[] | Advisory, additive: substrate statements the run and a check make that cannot both be true (see below) |
 | `decision` | object | The merge decision (see below) |
 | `files` | object | Artifact-root-relative paths (see below) |
 | `rust_api_delta` | object \| null | Additive lossless Rust API delta; `null` on non-Rust runs (see below) |
@@ -29,10 +30,21 @@ document disagree, the code is the contract and this document is the bug.
 
 | Field | Type | Notes |
 |---|---|---|
-| `version` | string | Policy document version |
+| `version` | integer | Policy document version |
 | `mode` | string | Policy mode (e.g. `shadow` / `warn` / `block`) |
 | `default_severity` | string | `block` \| `warn` \| `ignore` |
-| `source` | string | Path to the resolved policy file |
+| `source` | string \| null | Path actually read at policy load, or `null` for built-in defaults |
+| `origin` | string | `file` \| `builtin-default`; consistent with `source` |
+
+Policy provenance is captured when configuration is loaded, before checks.
+Creating or removing a policy file later does not change this record.
+`--policy-mode` overrides the effective mode without changing the policy's
+origin. An absent requested policy retains the existing built-in fallback.
+
+Migration from 2.x: readers must accept nullable `source` and use `origin` to
+distinguish built-in defaults from a file. Older records carried the resolved
+candidate path even when no file was read; that path is not proof of a loaded
+policy. The validator retains the older string contract for 1.x/2.x records.
 
 ### `files`
 
@@ -256,6 +268,80 @@ field are byte-identical to the same run with a fresh cache. Readers that ignore
 the field lose nothing but the date on the evidence, and `tools/validate_merge_gate.py`
 neither requires nor rejects it.
 
+## `provenance_contradictions`
+
+An additive, advisory list naming every disagreement between the substrate the
+run recorded and the substrate a check recorded for itself. Present from schema
+3.0 and empty on a run whose statements agree. The identical list is published
+as `consistency.contradictions` in `00_summary/PROVENANCE.json` and as
+`quality.consistency.provenance_contradictions` in `report.json`; all three are
+derived from one function over one set of inputs, so the files cannot name
+different contradictions.
+
+| Field | Type | Notes |
+|---|---|---|
+| `code` | string | Always `PROVENANCE_CONTRADICTION` — one token to grep across the pack |
+| `kind` | string | `operator-worktree-state` \| `check-target-sha` \| `foreign-substrate` |
+| `check_id` | string | Policy check id, the same value as `checks[].id` |
+| `field` | string | The run-level field the check row contradicts |
+| `run_value` | string | What the run says about the substrate |
+| `check_value` | string | What the check says about the tree it read |
+| `explanation` | string | One sentence naming the disagreement |
+
+The three kinds are the disagreements provable from the rows alone:
+
+- `operator-worktree-state` — the operator working tree was frozen clean (or
+  dirty) before the checks ran, and a check that read THAT live tree recorded the
+  opposite state;
+- `check-target-sha` — a check scanned a commit that is not the reviewed target,
+  so its result does not describe the tree the pack judges;
+- `foreign-substrate` — a check ran in a checkout that is not this repository, so
+  its evidence belongs to a substrate the pack never declared.
+
+Rows replayed from cache are excluded from all three: their provenance describes
+the ORIGINAL execution's tree, and holding it against this run's substrate would
+claim a contradiction where there is only a cache hit (those replays are dated by
+`stale_cache_caveats` instead). A check with no provenance at all is not compared
+either — an evidence gap, already visible as nulls in `PROVENANCE.json`, is not a
+contradiction.
+
+A contradiction is a **provenance/confidence** problem, never a verified failure:
+it says the evidence may not describe the reviewed commit, not that the reviewed
+product is defective. Nothing in `decision` is derived from it — no quality
+failure, no blocking issue, no axis movement — and it sits outside that object
+for the same reason `stale_cache_caveats` does. It is never silent either: every
+row is also rendered as a `decision.review_caveats` entry spelled
+`PROVENANCE_CONTRADICTION: <explanation>`, `MERGE_GATE.md` explains the class in
+words, and `tools/validate_merge_gate.py` rejects a 3.0 gate whose typed rows and
+review signals do not correspond one-to-one. That entry is rendered once, by
+`ProvenanceConsistency::review_caveats`, and every surface that publishes review
+caveats reads that one list: this file's `decision.review_caveats`,
+`report.json`'s `gate.review_caveats`, and — through the dashboard context both
+sit on — the dashboard and its "Copy PR comment" output. A contradiction visible
+to a machine reading `MERGE_GATE.json` but absent from the summary a reviewer
+pastes into the PR is the same silence this field exists to prevent. A pack
+carrying a contradiction is also
+reported as `consistent: false` in `00_summary/CONSISTENCY_CHECK.json` **and** in
+`report.json`'s `quality.consistency`: the two sections check different counters,
+but neither may call a run consistent while a substrate contradiction stands.
+
+`tools/validate_merge_gate.py` enforces the whole of the above on a 3.0 gate, not
+just the row shapes:
+
+- the root `provenance_contradictions` field is **required**, empty array
+  included — omitting it is rejected rather than read as "no contradictions",
+  because "cross-checked and agreed" and "never cross-checked" are different
+  facts and only the field distinguishes them;
+- each row's `check_id` must appear as some `checks[].id` in the same file — a
+  row attributed to a check the gate never emitted is evidence no reader can
+  follow back to anything;
+- the `PROVENANCE_CONTRADICTION` entries of `decision.review_caveats` must
+  correspond **one-to-one** to the rows as a multiset, each spelled exactly
+  `<code>: <explanation>`. Equal counts are not enough: a missing signal, a
+  duplicated one covering a second row, or a signal no row supports is rejected.
+  When rows exist, an absent or non-array `decision.review_caveats` is rejected
+  for the same reason.
+
 ## `decision`
 
 The decision object is the merge verdict. Its scalar fields are derived from two
@@ -282,6 +368,12 @@ authoritative axes — `analysis_status` (confidence) and `merge_recommendation`
 | `decision_reason` | string | Human-readable reason for the verdict |
 | `review_caveats` | string[] | Non-blocking caveats requiring reviewer attention |
 | `blocking_issues` | string[] | Issues that block the merge |
+
+`MERGE_GATE.md` and `AI_INDEX.md` expose this full canonical list in a
+`Review signals (N)` section. Its count is the list length; entries retain
+canonical order and text, with multiline continuation indented inside the
+same Markdown item. Empty lists omit the section. Rendering does not change
+which caveats require review, their origin, or any decision field.
 
 ## Verdict semantics
 
@@ -387,9 +479,17 @@ disposition.
   `evidence` + `log`); a non-executed check carries non-null placeholders, never
   `null` evidence.
 
-`HOLD` and `ALLOW` are retired pre-2.1 verdict synonyms. Current runs never emit
-them; the schema validator and the `prview mcp` adapter still tolerate them on
-read-back of older packs.
+`HOLD` and `ALLOW` are retired pre-2.1 **verdict** synonyms. Current runs never
+emit them as `decision.verdict`; the schema validator and the `prview mcp`
+adapter still tolerate them on read-back of older packs. `recommended_label`
+is a separate human label and can still say HOLD. A failed check can be
+non-blocking under policy while failing quality and requiring that HOLD;
+MERGE_GATE.md exposes quality, policy, and merge permission to explain it.
+
+Report schema 3.0 mirrors `decision.verdict` in both `gate.verdict` and
+`gate.status`. The older report status ALLOW/BLOCK was a permission projection,
+so consumers of old packs must use `gate.verdict` to distinguish CONDITIONAL
+from BLOCK. No report field changes the canonical decision or exit adapter.
 
 ## Reader contract
 
@@ -406,7 +506,7 @@ Readers accept a pack by MAJOR version and say what they had to normalize:
 |---|---|
 | absent | Accepted silently — pre-2.1 packs predate the field, and their root object is read as the `decision` |
 | known schema through `2.2` | Canonical verdict stays readable, but any injected `enforcement_disposition` is ignored; a legacy `CONDITIONAL` is conservatively `review_required` for strict enforcement |
-| `2.3` | `enforcement_disposition`, `checks`, `inline_findings`, policy mode, and typed quality-failure provenance are required and cross-checked as enforcement proof |
+| `2.3` / `3.0` | `enforcement_disposition`, `checks`, `inline_findings`, policy mode, and typed quality-failure provenance are required and cross-checked as enforcement proof |
 | known MAJOR, newer MINOR | Accepted with a `schema_forward_compat:` caveat; the 2.3 typed-enforcement requirements still apply |
 | unknown MAJOR, unparsable version, a non-canonical spelling (`02.2`, `+2.2`), or a non-string value | Fail loud |
 
