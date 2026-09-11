@@ -11,6 +11,20 @@ use super::*;
 // PRV-205: Lint findings projection
 // ---------------------------------------------------------------------------
 
+/// Did this lint check actually run?
+///
+/// `Skipped` and `Error` both mean no lint result was produced: an errored
+/// check failed to launch or crashed, so whatever it wrote is a runner
+/// diagnostic, not a verdict about the code. The renderer and this projection
+/// share the predicate so a card cannot say "not executed" while the section
+/// header counts a row from the same check.
+pub(crate) fn lint_check_executed(status: CheckStatus) -> bool {
+    matches!(
+        status,
+        CheckStatus::Passed | CheckStatus::Failed | CheckStatus::Warnings
+    )
+}
+
 /// Check if a check result is lint-related based on its name.
 pub(crate) fn is_lint_check(name: &str) -> bool {
     let lower = name.to_lowercase();
@@ -57,7 +71,18 @@ pub(crate) fn project_lint_metrics(
         let mut total_findings = 0usize;
         let mut changed_files: BTreeSet<String> = BTreeSet::new();
 
-        for finding in findings.iter().filter(|f| f.check_id == check_id) {
+        // A check that did not execute contributes nothing to count. The
+        // canonical model still emits a generic row for an errored check —
+        // its runner or setup diagnostic — and counting that row produced an
+        // "origin unknown / 1 total" header above a card stating that no
+        // result was produced.
+        let countable: &[DashboardFinding] = if lint_check_executed(check.status) {
+            findings
+        } else {
+            &[]
+        };
+
+        for finding in countable.iter().filter(|f| f.check_id == check_id) {
             total_findings += 1;
             match finding.in_diff {
                 Some(true) => {

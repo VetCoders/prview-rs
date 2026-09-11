@@ -5666,6 +5666,43 @@ fn lint_projection_keeps_the_canonical_status_of_checks_that_did_not_run() {
 }
 
 #[test]
+fn lint_projection_excludes_rows_from_checks_that_did_not_execute() {
+    // An errored lint check still produces a canonical row — the runner or
+    // setup diagnostic the generic fallback captured. Counting it contradicted
+    // the card the renderer draws for the same check, which says no result was
+    // produced.
+    let checks = vec![
+        lint_check("eslint", CheckStatus::Error),
+        lint_check("cargo clippy", CheckStatus::Skipped),
+    ];
+    let findings = vec![
+        lint_finding("eslint", "src/app.ts", None),
+        lint_finding("cargo_clippy", "src/main.rs", Some(true)),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &findings);
+
+    assert_eq!(metrics.len(), 2);
+    assert!(
+        metrics.iter().all(|m| m.total_findings == 0
+            && m.findings_in_changed_files == 0
+            && m.findings_outside_changed_files == 0
+            && m.findings_origin_unknown == 0
+            && m.changed_files_with_findings.is_empty()),
+        "a check reported as not executed must contribute no counted findings"
+    );
+    assert!(!lint_check_executed(CheckStatus::Error));
+    assert!(!lint_check_executed(CheckStatus::Skipped));
+    for status in [
+        CheckStatus::Passed,
+        CheckStatus::Failed,
+        CheckStatus::Warnings,
+    ] {
+        assert!(lint_check_executed(status));
+    }
+}
+
+#[test]
 fn lint_projection_ignores_findings_from_other_checks() {
     let checks = vec![lint_check("cargo clippy", CheckStatus::Warnings)];
     let findings = vec![

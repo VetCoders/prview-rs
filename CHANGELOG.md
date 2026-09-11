@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The dashboard lint section counts no findings for a check it reports as not
+  executed. A lint check in `Error` status still produces a canonical row for
+  its runner diagnostic, and counting it showed `origin unknown / 1 total` above
+  a card stating that no result was produced.
+
 - The dashboard evidence inventory excludes the `prview mcp` launcher control
   files (`RUNNING.json`, `run.log`, `run.stderr.log`) that the manifest and the
   archive already exclude. They are mutable launcher state, not pack payload,

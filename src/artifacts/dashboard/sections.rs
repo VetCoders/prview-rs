@@ -3772,12 +3772,9 @@ pub(super) fn build_lint_metrics_section(ctx: &DashboardContext, diffs: &[Diff])
             .to_string();
     }
 
-    let executed = |status: CheckStatus| {
-        matches!(
-            status,
-            CheckStatus::Passed | CheckStatus::Failed | CheckStatus::Warnings
-        )
-    };
+    // Shared with the projection that produced these counters, so a card can
+    // never say "not executed" while the header counts one of its rows.
+    let executed = crate::artifacts::lint::lint_check_executed;
 
     let total_in_changed: usize = metrics.iter().map(|m| m.findings_in_changed_files).sum();
     let total_outside: usize = metrics
