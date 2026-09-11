@@ -879,7 +879,11 @@ quality, policy, and permission axes beside that explanation.
   were computed from — the merge base of each diff, not the tip of the base branch — and `base_sha` is its first
   entry, kept for older consumers. A `cached: true` row replays the provenance of the earlier run
   that filled the cache entry, and a row with a non-null `skipped` is a gate that was ruled out
-  before it ran, with the reason.
+  before it ran, with the reason. `consistency` holds the file's own cross-check: how many run/check
+  substrate statements were compared, and every `PROVENANCE_CONTRADICTION` between them — a tree frozen
+  clean but read dirty, a check that scanned another commit, or a check that ran in another checkout.
+  The same rows appear in `MERGE_GATE.json.provenance_contradictions` and as review signals; they mark
+  evidence you cannot yet trust to describe the reviewed commit, not a failure of the code under review.
 - `PR_REVIEW.md` is a concise review narrative, not a raw log dump.
 - `00_summary/FAILURES_SUMMARY.md` summarizes blocking failures and advisories without copying whole JSON files.
 - When `30_context/INLINE_FINDINGS.sarif` exists, it emits findings per location/advisory and is suitable for annotation integrations.
