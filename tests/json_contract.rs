@@ -2039,6 +2039,33 @@ fn no_dashboard_flag_skips_dashboard_file_and_surfaces_in_run_json() {
     let run_raw = fs::read_to_string(&run_path).expect("read run json");
     let run: serde_json::Value = serde_json::from_str(&run_raw).expect("parse run json");
     assert_eq!(run["flags"]["dashboard"].as_bool(), Some(false));
+
+    // The canonical decision must not hand a reader a path the pack does not
+    // contain. `files.dashboard` follows the selected HTML entry point, and
+    // every other non-null `files.*` entry names a real pack file.
+    let gate_path = output_dir.join("00_summary/MERGE_GATE.json");
+    let gate_raw = fs::read_to_string(&gate_path).expect("read merge gate");
+    let gate: serde_json::Value = serde_json::from_str(&gate_raw).expect("parse merge gate");
+    assert_eq!(
+        gate["files"]["dashboard"].as_str(),
+        Some("review.html"),
+        "files.dashboard must name the HTML this run generated"
+    );
+    let files = gate["files"]
+        .as_object()
+        .expect("files should be an object");
+    for (field, value) in files {
+        if value.is_null() {
+            continue;
+        }
+        let relative = value
+            .as_str()
+            .unwrap_or_else(|| panic!("files.{field} should be a string or null"));
+        assert!(
+            output_dir.join(relative).exists(),
+            "files.{field} points at {relative}, which is absent from the pack"
+        );
+    }
 }
 
 #[test]

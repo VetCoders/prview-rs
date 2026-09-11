@@ -448,7 +448,16 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
             "inline_findings": inline_findings_path,
             "full_patch": "10_diff/full.patch",
             "checks_log": "20_quality/full-checks.log",
-            "dashboard": "dashboard.html"
+            // The pack has exactly one browser entry point: `dashboard.html` by
+            // default, `review.html` under `--no-dashboard`. Naming the file
+            // that was not generated handed every static-report consumer a dead
+            // link out of the canonical decision, so this follows the HTML the
+            // run actually wrote.
+            "dashboard": if config.create_dashboard {
+                "dashboard.html"
+            } else {
+                "review.html"
+            }
         }
     });
 

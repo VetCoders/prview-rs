@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `MERGE_GATE.json` `files.dashboard` names the HTML entry point the run
+  actually generated: `review.html` under `--no-dashboard`, `dashboard.html`
+  otherwise. It previously always named `dashboard.html`, so every
+  static-report run pointed the canonical merge decision at a file the pack
+  did not contain.
+
 - MCP contract tests bound response waits and pagination, and clean the owned
   server tree before reaping it on timeout or drop, including detached reviews.
 

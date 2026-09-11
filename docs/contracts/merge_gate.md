@@ -44,7 +44,14 @@ Paths are relative to the artifact root, using the subdirectory pack layout:
 | `inline_findings` | `"30_context/INLINE_FINDINGS.sarif"` when emitted, otherwise `null` |
 | `full_patch` | `"10_diff/full.patch"` |
 | `checks_log` | `"20_quality/full-checks.log"` |
-| `dashboard` | `"dashboard.html"` |
+| `dashboard` | `"dashboard.html"`, or `"review.html"` when the run was started with `--no-dashboard` |
+
+`files.dashboard` names the pack's single browser entry point, not a fixed
+filename: a `--no-dashboard` run writes `review.html` instead of
+`dashboard.html`, and the field follows it. Every value in `files` points at a
+file that exists in the pack (`inline_findings` is `null` rather than naming an
+absent SARIF). A consumer that hard-codes `"dashboard.html"` was already
+following a dead link on static-report runs.
 
 `MERGE_GATE.md` is also written beside the JSON, but it is a human-readable
 companion and is not listed in `files`.

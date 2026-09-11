@@ -669,7 +669,9 @@ $HOME/.prview/runs/my-repo/feature-x/20260225-185357/
 
 With `--no-dashboard`, the root contains `review.html` instead of
 `dashboard.html`. The static export is an explicit fallback, not a second
-default dashboard.
+default dashboard. `MERGE_GATE.json` follows the selection: its
+`files.dashboard` names `review.html` for such a run, so the canonical decision
+never points at an HTML file the pack does not contain.
 
 ### Read a pack in the browser
 
