@@ -74,6 +74,7 @@ impl Drop for WorktreeRegistrationRollback {
 pub struct WorktreeSnapshot {
     pub repo_root: PathBuf,
     pub worktree_path: PathBuf,
+    pub(crate) original_target_sha: String,
     registered: bool,
     // Owns the enclosing temp dir; dropped after the worktree is deregistered so
     // the directory removal is the backstop for the `git worktree remove` call.
@@ -158,6 +159,13 @@ impl WorktreeSnapshot {
 
 /// Create an ephemeral detached worktree of `commit` under a fresh temp dir.
 pub fn create_worktree_snapshot(repo_root: &Path, commit: &str) -> Result<WorktreeSnapshot> {
+    // Resolve symbolic inputs once, before creating the checkout. All later
+    // integrity comparisons use this immutable source identity.
+    let original_target_sha = git2::Repository::discover(repo_root)?
+        .revparse_single(commit)?
+        .peel_to_commit()?
+        .id()
+        .to_string();
     let tmp = tempfile::tempdir()?;
     // `git worktree add` wants a path it can create, so point it at a fresh
     // subdirectory of the temp dir rather than the (already-created) temp root.
@@ -171,7 +179,7 @@ pub fn create_worktree_snapshot(repo_root: &Path, commit: &str) -> Result<Worktr
     command
         .args(["worktree", "add", "--detach", "--force"])
         .arg(&worktree_path)
-        .arg(commit)
+        .arg(&original_target_sha)
         .current_dir(repo_root);
     let output = crate::proc::output_governed_with_timeout(
         command,
@@ -201,6 +209,7 @@ pub fn create_worktree_snapshot(repo_root: &Path, commit: &str) -> Result<Worktr
     Ok(WorktreeSnapshot {
         repo_root: repo_root.to_path_buf(),
         worktree_path,
+        original_target_sha,
         registered: true,
         _tmp: tmp,
     })

@@ -23,7 +23,11 @@ impl Check for SemgrepCheck {
         crate::governor::Weight::Heavy
     }
 
-    fn check_eligibility(&self, _config: &Config) -> CheckEligibility {
+    fn check_eligibility(&self, config: &Config) -> CheckEligibility {
+        if config.skip_security {
+            // Use the shared declared-mode reason recognized by the policy engine.
+            return CheckEligibility::Skip("security disabled".to_string());
+        }
         if which::which("semgrep").is_ok() {
             CheckEligibility::Run
         } else {
@@ -77,7 +81,17 @@ impl Check for SemgrepCheck {
         );
         let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        let output = run_command("semgrep", &args_ref, cwd).await?;
+        // Windows Command only adds .exe during PATH lookup. Use the same
+        // discovery policy as eligibility, including .cmd fixtures.
+        #[cfg(windows)]
+        let executable_path = which::which("semgrep")?;
+        #[cfg(windows)]
+        let executable = executable_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Semgrep executable path is not UTF-8"))?;
+        #[cfg(not(windows))]
+        let executable = "semgrep";
+        let output = run_command(executable, &args_ref, cwd).await?;
         let finished_at = Local::now().to_rfc3339();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -106,7 +120,7 @@ impl Check for SemgrepCheck {
             provenance: Some(
                 ProvenanceBuilder {
                     check: self.name(),
-                    cmd: "semgrep",
+                    cmd: executable,
                     args: &args_ref,
                     cwd,
                     repo_root: &config.repo_root,
@@ -399,29 +413,50 @@ struct SemgrepScanPlan {
 fn plan_semgrep_scan(config: &Config) -> std::result::Result<SemgrepScanPlan, String> {
     let repo_root = config.repo_root.clone();
 
-    let Ok(repo) = Repository::open(&repo_root) else {
-        // Not a git repository (or unreadable) — scan in place with no baseline.
-        return Ok(SemgrepScanPlan {
-            scan_dir: repo_root,
-            baseline_commit: None,
-            _snapshot: None,
-        });
+    let repo = match Repository::open(&repo_root) {
+        Ok(repo) => repo,
+        Err(error) => {
+            if config.pinned_target.is_some() {
+                // Name the class, not only the cause: the policy engine reads
+                // this reason, and an unavailable substrate must never be
+                // scored as a declared mode skip.
+                return Err(format!(
+                    "semgrep: the pinned review target is unavailable, its repository cannot be opened: {error:#}"
+                ));
+            }
+            // Unpinned, non-repository scans retain their in-place behavior.
+            return Ok(SemgrepScanPlan {
+                scan_dir: repo_root,
+                baseline_commit: None,
+                _snapshot: None,
+            });
+        }
     };
 
-    let (Ok(target), Ok(head)) = (repo.resolve_target(config), repo.head_commit_id()) else {
-        // Refs did not resolve — fall back to an in-place scan; the in-place
-        // baseline helper degrades to a full scan on the same failure.
-        return Ok(SemgrepScanPlan {
-            baseline_commit: semgrep_baseline_commit(config, &repo_root),
-            scan_dir: repo_root,
-            _snapshot: None,
-        });
+    let resolution = repo
+        .resolve_target(config)
+        .and_then(|target| repo.head_commit_id().map(|head| (target, head)));
+    let (target, head) = match resolution {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            if config.pinned_target.is_some() {
+                return Err(format!(
+                    "semgrep: the pinned review target is unavailable for scan planning: {error:#}"
+                ));
+            }
+            // An unresolved, unpinned input retains its in-place fallback.
+            return Ok(SemgrepScanPlan {
+                baseline_commit: semgrep_baseline_commit(config, &repo_root)?,
+                scan_dir: repo_root,
+                _snapshot: None,
+            });
+        }
     };
 
     if head == target.commit_id {
         // Working tree IS the target: in-place scan with the existing baseline.
         return Ok(SemgrepScanPlan {
-            baseline_commit: semgrep_baseline_commit(config, &repo_root),
+            baseline_commit: semgrep_baseline_commit(config, &repo_root)?,
             scan_dir: repo_root,
             _snapshot: None,
         });
@@ -436,7 +471,7 @@ fn plan_semgrep_scan(config: &Config) -> std::result::Result<SemgrepScanPlan, St
         )
     })?;
 
-    let baseline = snapshot_baseline_commit(&repo, config, &target);
+    let baseline = snapshot_baseline_commit(&repo, config, &target)?;
 
     Ok(SemgrepScanPlan {
         scan_dir: snapshot.worktree_path.clone(),
@@ -446,12 +481,22 @@ fn plan_semgrep_scan(config: &Config) -> std::result::Result<SemgrepScanPlan, St
 }
 
 /// Baseline commit for a scan whose working tree IS the target (in place). The
-/// merge-base enables a diff-scoped `--baseline-commit` scan; `None` forces a
-/// full scan (dirty worktree, `--security-full`, or no distinct base).
-fn semgrep_baseline_commit(config: &Config, cwd: &Path) -> Option<String> {
-    let repo = Repository::open(cwd).ok()?;
-    let target = repo.resolve_target(config).ok()?;
-    let head = repo.head_commit_id().ok()?;
+/// merge-base enables a diff-scoped `--baseline-commit` scan; `Ok(None)` forces
+/// a full scan (dirty worktree, `--security-full`, or no distinct base).
+/// `Err(reason)` is a refusal to guess the range — see `merge_base_for_baseline`.
+fn semgrep_baseline_commit(
+    config: &Config,
+    cwd: &Path,
+) -> std::result::Result<Option<String>, String> {
+    let Ok(repo) = Repository::open(cwd) else {
+        return Ok(None);
+    };
+    let Ok(target) = repo.resolve_target(config) else {
+        return Ok(None);
+    };
+    let Ok(head) = repo.head_commit_id() else {
+        return Ok(None);
+    };
     let target_is_checkout = head == target.commit_id;
     let dirty = worktree_has_uncommitted_changes(cwd);
 
@@ -461,7 +506,7 @@ fn semgrep_baseline_commit(config: &Config, cwd: &Path) -> Option<String> {
         target_is_checkout,
         config.current_only,
     ) {
-        return None;
+        return Ok(None);
     }
 
     merge_base_for_baseline(&repo, config, &target)
@@ -469,46 +514,78 @@ fn semgrep_baseline_commit(config: &Config, cwd: &Path) -> Option<String> {
 
 /// Baseline commit for an ephemeral worktree snapshot of a remote target. The
 /// snapshot has HEAD == target and a clean tree, so a diff-scoped baseline is
-/// sound unless the run opts out (`--security-full`). A `None` result runs a
-/// full scan of the target's state.
+/// sound unless the run opts out (`--security-full`). An `Ok(None)` result runs
+/// a full scan of the target's state.
 fn snapshot_baseline_commit(
     repo: &Repository,
     config: &Config,
     target: &ResolvedRef,
-) -> Option<String> {
+) -> std::result::Result<Option<String>, String> {
     // In the snapshot the target IS the checkout and the tree is clean.
     if !baseline_scan_allowed(config.security_full, false, true, config.current_only) {
-        return None;
+        return Ok(None);
     }
     merge_base_for_baseline(repo, config, target)
 }
 
-/// Shared merge-base resolution: the merge-base of the single resolved base and
-/// the target, or `None` when a diff-scoped scan would be unsound.
+/// Shared base resolution: the single base commit the review range was captured
+/// from, or `None` when a diff-scoped scan would be unsound.
+///
+/// The run pins its review range ONCE, at diff-capture time
+/// (`Config::pinned_diff_bases`, already merge-base resolved). Use that SHA
+/// verbatim. Re-deriving the merge-base here would re-read a symbolic base ref,
+/// and a base branch that advanced past the target after capture (this branch
+/// merged into `main` mid-run) collapses the re-derived merge-base onto the
+/// target: the scanner would see an empty delta while the pack diff is
+/// non-empty, so the report and the scanner would describe different ranges.
 ///
 /// `semgrep --baseline-commit` diffs against exactly ONE commit. With more than
-/// one resolved base (the default probe resolves develop/main/master, and
+/// one captured base (the default probe resolves develop/main/master, and
 /// `generate_diffs` builds a diff for each) baselining only the first base would
 /// silently suppress a finding that is pre-existing versus that base but NEW
 /// versus another — even though the artifact pack contains the other base's diff
 /// (R3-15). Rather than baseline the wrong single base, fall back to a full scan
-/// whenever the run resolved anything other than exactly one base. Reconciling a
+/// whenever the run captured anything other than exactly one base. Reconciling a
 /// true multi-baseline scan is deliberately out of scope here.
+///
+/// Fail closed: a run that pinned its target but carries no captured base has
+/// lost its range, and refusing is the same class of refusal the planner already
+/// raises for an unavailable pinned target — never a silent symbolic fallback.
 fn merge_base_for_baseline(
     repo: &Repository,
     config: &Config,
     target: &ResolvedRef,
-) -> Option<String> {
-    let bases = repo.resolve_bases(config).ok()?;
-    // Exactly one resolved base is the only sound shape for a single
-    // `--baseline-commit`; 0 or 2+ fall back to a full scan.
+) -> std::result::Result<Option<String>, String> {
+    if let Some(captured) = &config.pinned_diff_bases {
+        let [base] = captured.as_slice() else {
+            return Ok(None);
+        };
+        if base.commit_id == target.commit_id {
+            return Ok(None);
+        }
+        return Ok(Some(base.commit_id.clone()));
+    }
+
+    if config.pinned_target.is_some() {
+        return Err(
+            "semgrep: the review target is pinned but no base was captured with it; \
+             refusing to re-resolve the base range from a symbolic ref"
+                .to_string(),
+        );
+    }
+
+    // Unpinned entry points (direct CLI probes, non-review callers) still
+    // resolve their own range; they have no captured range to honour.
+    let Ok(bases) = repo.resolve_bases(config) else {
+        return Ok(None);
+    };
     let [base] = bases.as_slice() else {
-        return None;
+        return Ok(None);
     };
     if base.commit_id == target.commit_id {
-        return None;
+        return Ok(None);
     }
-    repo.merge_base(&base.commit_id, &target.commit_id).ok()
+    Ok(repo.merge_base(&base.commit_id, &target.commit_id).ok())
 }
 
 /// Whether semgrep may run a diff-scoped `--baseline-commit` scan.
@@ -783,10 +860,67 @@ mod tests {
     }
 
     #[test]
-    fn test_semgrep_check_can_run() {
-        let config = test_config();
-        let check = SemgrepCheck;
-        let _ = check.check_eligibility(&config);
+    fn explicit_security_opt_out_disables_semgrep_before_tool_discovery() {
+        let mut config = test_config();
+        config.skip_security = true;
+        for heavy_opt_in in [false, true] {
+            config.run_security = heavy_opt_in;
+            assert!(matches!(
+                SemgrepCheck.check_eligibility(&config),
+                CheckEligibility::Skip(reason) if reason == "security disabled"
+            ));
+        }
+    }
+
+    #[test]
+    fn explicit_security_opt_out_is_a_declared_skip_for_block_policy() {
+        use crate::policy::engine::{
+            AnalysisStatus, CheckExecutionState, MergeRecommendation, PolicyConclusion,
+            PolicyEngine, ToolOutcome,
+        };
+
+        let mut config = test_config();
+        config.skip_security = true;
+        config.policy.checks.insert(
+            "semgrep_scan".to_string(),
+            crate::policy::PolicySeverity::Block,
+        );
+        let CheckEligibility::Skip(reason) = SemgrepCheck.check_eligibility(&config) else {
+            panic!("the explicit opt-out must skip the scanner");
+        };
+        let skipped = super::super::SkippedCheck {
+            id: "semgrep_scan".to_string(),
+            name: SemgrepCheck.name().to_string(),
+            reason,
+        };
+        let engine = PolicyEngine::new(&config);
+        let evaluation = engine.evaluate_skip(&skipped);
+        assert_eq!(evaluation.execution_state, CheckExecutionState::Skipped);
+        assert_eq!(evaluation.outcome, ToolOutcome::Skipped);
+        assert_eq!(evaluation.conclusion, PolicyConclusion::Advisory);
+        assert_eq!(evaluation.confidence_impact, AnalysisStatus::Incomplete);
+        assert_eq!(evaluation.merge_impact, MergeRecommendation::ReviewRequired);
+
+        let unavailable = engine.evaluate_skip(&super::super::SkippedCheck {
+            reason: "semgrep not available".to_string(),
+            ..skipped
+        });
+        assert_eq!(unavailable.conclusion, PolicyConclusion::Blocked);
+        assert_eq!(unavailable.merge_impact, MergeRecommendation::Block);
+    }
+
+    #[test]
+    fn semgrep_default_eligibility_does_not_require_heavy_security_opt_in() {
+        let mut config = test_config();
+        config.run_security = false;
+        assert!(!config.skip_security);
+        assert_eq!(
+            matches!(
+                SemgrepCheck.check_eligibility(&config),
+                CheckEligibility::Run
+            ),
+            which::which("semgrep").is_ok()
+        );
     }
 
     #[test]
@@ -867,6 +1001,70 @@ mod tests {
     }
 
     #[test]
+    fn pinned_semgrep_target_unavailable_never_scans_operator_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q", "-b", "main"]);
+        write_commit(tmp.path(), "a.txt", "operator checkout\n");
+        let mut config = test_config();
+        config.repo_root = tmp.path().to_path_buf();
+        config.pinned_target = Some(ResolvedRef {
+            name: "missing reviewed target".to_owned(),
+            commit_id: "f".repeat(40),
+            is_remote: true,
+        });
+        let Err(reason) = plan_semgrep_scan(&config) else {
+            panic!("an unavailable pin cannot be planned");
+        };
+        assert_eq!(worktree_count(tmp.path()), 1);
+
+        // The refusal must reach the gate as missing evidence, never as one of
+        // the declared mode skips that merely make the run advisory.
+        use crate::policy::engine::{
+            CheckExecutionState, MergeRecommendation, PolicyConclusion, PolicyEngine, ToolOutcome,
+        };
+        config.policy.checks.insert(
+            "semgrep_scan".to_string(),
+            crate::policy::PolicySeverity::Block,
+        );
+        let evaluation = PolicyEngine::new(&config).evaluate_run(&CheckResult {
+            name: SemgrepCheck.name().to_string(),
+            status: CheckStatus::Skipped,
+            duration: std::time::Duration::ZERO,
+            output: reason.clone(),
+            cached: false,
+            provenance: None,
+        });
+        assert_eq!(
+            evaluation.execution_state,
+            CheckExecutionState::Unavailable,
+            "{reason}"
+        );
+        assert_eq!(evaluation.outcome, ToolOutcome::Unavailable, "{reason}");
+        assert_eq!(evaluation.conclusion, PolicyConclusion::Blocked, "{reason}");
+        assert_eq!(
+            evaluation.merge_impact,
+            MergeRecommendation::Block,
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn pinned_semgrep_target_requires_its_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.repo_root = tmp.path().to_path_buf();
+        config.pinned_target = Some(ResolvedRef {
+            name: "missing reviewed repository".to_owned(),
+            commit_id: "f".repeat(40),
+            is_remote: true,
+        });
+        assert!(plan_semgrep_scan(&config).is_err());
+        config.pinned_target = None;
+        let unpinned = plan_semgrep_scan(&config).unwrap();
+        assert_eq!(unpinned.scan_dir, config.repo_root);
+    }
+
+    #[test]
     fn worktree_snapshot_materialises_target_and_cleans_up_on_drop() {
         let tmp = tempfile::tempdir().expect("tempdir");
         run_git(tmp.path(), &["init", "-q", "-b", "main"]);
@@ -938,7 +1136,7 @@ mod tests {
         let repo = Repository::open(tmp.path()).expect("open repo");
         let resolved_target = repo.resolve_target(&config).expect("resolve target");
 
-        let baseline = merge_base_for_baseline(&repo, &config, &resolved_target);
+        let baseline = merge_base_for_baseline(&repo, &config, &resolved_target).expect("baseline");
         assert_eq!(
             baseline.as_deref(),
             Some(base_commit.as_str()),
@@ -981,13 +1179,158 @@ mod tests {
         let diff_bases = repo.resolve_diff_bases(&resolved_target, &resolved_bases, true);
 
         assert_eq!(
-            merge_base_for_baseline(&repo, &config, &resolved_target).as_deref(),
+            merge_base_for_baseline(&repo, &config, &resolved_target)
+                .expect("baseline")
+                .as_deref(),
             diff_bases.first().map(|base| base.commit_id.as_str())
         );
         assert_eq!(
             diff_bases.first().map(|base| base.commit_id.as_str()),
             Some(merge_base.as_str())
         );
+    }
+
+    /// P1-01: the base ref can advance PAST the target while the run is still in
+    /// flight — the reviewed branch merged into `main` mid-run. The review range
+    /// is captured once, at diff time; re-resolving the base here would collapse
+    /// the baseline onto the target and hand semgrep an empty delta while the
+    /// pack diff is non-empty, so the report and the scanner would describe
+    /// different ranges.
+    #[test]
+    fn baseline_keeps_the_captured_base_after_the_base_ref_advances_past_the_target() {
+        use crate::config::{test_config_builder, test_generic_profile};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        run_git(tmp.path(), &["init", "-q", "-b", "main"]);
+        let captured_base = write_commit(tmp.path(), "sample.py", "safe = 1\n");
+        run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+        let target = write_commit(tmp.path(), "sample.py", "safe = 1\nvulnerable = 1\n");
+
+        let config = test_config_builder()
+            .repo_root(tmp.path())
+            .target(Some("feature"))
+            .bases(&["main"])
+            .profile(test_generic_profile())
+            .build();
+
+        // ── capture: the run resolves its review range exactly once ──
+        let repo = Repository::open(tmp.path()).expect("open repo");
+        let resolved_target = repo.resolve_target(&config).expect("resolve target");
+        assert_eq!(resolved_target.commit_id, target);
+        let resolved_bases = repo.resolve_bases(&config).expect("resolve bases");
+        let diff_bases = repo.resolve_diff_bases(&resolved_target, &resolved_bases, true);
+        assert_eq!(
+            diff_bases.first().map(|base| base.commit_id.as_str()),
+            Some(captured_base.as_str()),
+            "fixture: the pack diff is computed from the merge-base"
+        );
+        let pack_files: Vec<String> = repo
+            .diff_refs(&diff_bases[0], &resolved_target)
+            .expect("pack diff")
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        assert_eq!(
+            pack_files,
+            vec!["sample.py".to_string()],
+            "fixture: the pack diff is non-empty"
+        );
+
+        // ── mid-run: the base branch advances past the target ──
+        run_git(tmp.path(), &["checkout", "-q", "main"]);
+        run_git(
+            tmp.path(),
+            &[
+                "-c",
+                "user.name=prview test",
+                "-c",
+                "user.email=prview@example.test",
+                "merge",
+                "--no-ff",
+                "-q",
+                "-m",
+                "merge feature",
+                "feature",
+            ],
+        );
+        run_git(tmp.path(), &["checkout", "-q", "feature"]);
+        let moved_base = repo.resolve_bases(&config).expect("resolve bases")[0]
+            .commit_id
+            .clone();
+        assert_eq!(
+            repo.merge_base(&moved_base, &resolved_target.commit_id)
+                .expect("merge base"),
+            resolved_target.commit_id,
+            "fixture: re-resolving the base now yields the target itself"
+        );
+
+        // ── the pinned range survives the move ──
+        let mut pinned = config.clone();
+        pinned.pinned_target = Some(resolved_target.clone());
+        pinned.pinned_diff_bases = Some(diff_bases.clone());
+
+        let plan = plan_semgrep_scan(&pinned).expect("plan");
+        let baseline = plan
+            .baseline_commit
+            .clone()
+            .expect("a diff-scoped baseline");
+        assert_eq!(
+            baseline, captured_base,
+            "the scan range must stay anchored to the captured base"
+        );
+
+        let scanned_files: Vec<String> = repo
+            .diff_refs(
+                &ResolvedRef {
+                    name: diff_bases[0].name.clone(),
+                    commit_id: baseline,
+                    is_remote: diff_bases[0].is_remote,
+                },
+                &resolved_target,
+            )
+            .expect("scanned delta")
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        assert_eq!(
+            scanned_files, pack_files,
+            "the scanned delta must equal the pack diff"
+        );
+    }
+
+    /// Fail closed: a run that pinned its target but carries no captured base has
+    /// lost its range. Refuse to plan — the same class of refusal an unavailable
+    /// pinned target already raises — instead of re-resolving a symbolic base.
+    #[test]
+    fn a_pinned_target_without_a_captured_base_refuses_to_plan() {
+        use crate::config::{test_config_builder, test_generic_profile};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        run_git(tmp.path(), &["init", "-q", "-b", "main"]);
+        let _base = write_commit(tmp.path(), "a.txt", "one\n");
+        run_git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+        let _target = write_commit(tmp.path(), "b.txt", "two\n");
+
+        let config = test_config_builder()
+            .repo_root(tmp.path())
+            .target(Some("feature"))
+            .bases(&["main"])
+            .profile(test_generic_profile())
+            .build();
+
+        let repo = Repository::open(tmp.path()).expect("open repo");
+        let resolved_target = repo.resolve_target(&config).expect("resolve target");
+
+        let mut pinned = config.clone();
+        pinned.pinned_target = Some(resolved_target);
+        pinned.pinned_diff_bases = None;
+
+        let Err(reason) = plan_semgrep_scan(&pinned) else {
+            panic!("a pinned target with no captured base must not be planned");
+        };
+        assert!(reason.contains("no base was captured"), "{reason}");
     }
 
     #[test]
@@ -1019,7 +1362,7 @@ mod tests {
         );
 
         assert_eq!(
-            merge_base_for_baseline(&repo, &config, &resolved_target),
+            merge_base_for_baseline(&repo, &config, &resolved_target).expect("baseline"),
             None,
             "more than one resolved base must fall back to a full scan (R3-15)"
         );

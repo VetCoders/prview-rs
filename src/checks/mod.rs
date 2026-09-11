@@ -25,8 +25,10 @@ pub const CHECK_TIMEOUT_SECS: u64 = 300;
 pub const TEST_TIMEOUT_SECS: u64 = 900;
 
 mod cargo;
+mod pytest_home;
 mod python;
 mod semgrep;
+pub(crate) mod snapshot_integrity;
 mod typescript;
 
 pub(crate) use cargo::planned_cargo_cwd;
@@ -776,7 +778,7 @@ async fn run_all_checks(
                     let result = crate::governor::with_child_scope(
                         governor,
                         &queued_name,
-                        execute_live_check(check, config.as_ref(), cache.as_ref()),
+                        execute_live_check(check, config.as_ref(), cache.as_ref(), Some(ledger)),
                     )
                     .await;
                     record_completed_check(&result, ledger, queued_at, started_at);
@@ -1235,7 +1237,7 @@ where
                     let result = crate::governor::with_child_scope(
                         governor,
                         &queued_name,
-                        execute_live_check(check, config.as_ref(), cache.as_ref()),
+                        execute_live_check(check, config.as_ref(), cache.as_ref(), Some(ledger)),
                     )
                     .await;
                     record_completed_check(&result, ledger, queued_at, started_at);
@@ -1454,13 +1456,34 @@ fn record_completed_check(
     });
 }
 
-async fn execute_live_check(check: Box<dyn Check>, config: &Config, cache: &Cache) -> CheckResult {
+async fn execute_live_check(
+    check: Box<dyn Check>,
+    config: &Config,
+    cache: &Cache,
+    ledger: Option<&TaskLedger>,
+) -> CheckResult {
     let start = std::time::Instant::now();
     let started_at = chrono::Local::now().to_rfc3339();
     let name = check.name().to_string();
     let cache_key = check.cache_key(config);
 
-    match check.run(config).await {
+    let initial_epoch = ledger.map(TaskLedger::snapshot_integrity_epoch);
+    if let Some(ledger) = ledger {
+        ledger
+            .observe_snapshot_async("before-check", Some(&name))
+            .await;
+    }
+    let outcome = check.run(config).await;
+    if let Some(ledger) = ledger {
+        ledger
+            .observe_snapshot_async("after-check", Some(&name))
+            .await;
+    }
+    // Any non-clean observation while this check was running makes its source
+    // unsuitable for a cache entry under the original target key. Another
+    // concurrent check can supply that observation; no writer is inferred.
+    let source_stable = initial_epoch == ledger.map(TaskLedger::snapshot_integrity_epoch);
+    match outcome {
         Ok(mut result) => {
             if matches!(result.status, CheckStatus::Passed | CheckStatus::Warnings)
                 && has_tool_crash(&result.output)
@@ -1475,7 +1498,8 @@ async fn execute_live_check(check: Box<dyn Check>, config: &Config, cache: &Cach
             // the source-hash key (e.g. `mypy-<python_hash>`) would pin the
             // transient miss for the whole hash lifetime, so a later run with
             // the tool present still reports Skipped (PR #12 review #14).
-            if result.status != CheckStatus::Skipped
+            if source_stable
+                && result.status != CheckStatus::Skipped
                 && let Some(key) = cache_key.clone()
             {
                 // Store the provenance next to the result so a later cache hit
@@ -1724,7 +1748,10 @@ fn share_target_snapshot_with(
     let wanted_by_a_gate = runnable_checks
         .iter()
         .any(|c| uses_shared_scan_dir(c.name()));
-    if !wanted_by_a_gate && off_head_target_commit(config).is_none() {
+    if !wanted_by_a_gate
+        && config.pinned_target.is_none()
+        && off_head_target_commit(config).is_none()
+    {
         return Ok(());
     }
     let plan = planner(config).context("failed to materialize shared review snapshot")?;
@@ -2057,7 +2084,10 @@ pub fn plan_check_run(config: &Config) -> Result<CheckPlan> {
     let repo_root = config.repo_root.clone();
     let repo = match crate::git::Repository::open(&repo_root) {
         Ok(repo) => repo,
-        Err(_) => {
+        Err(error) => {
+            if config.pinned_target.is_some() {
+                return Err(error.context("cannot open repository for pinned review target"));
+            }
             return Ok(CheckPlan {
                 scan_dir: repo_root,
                 _snapshot: None,
@@ -2065,11 +2095,20 @@ pub fn plan_check_run(config: &Config) -> Result<CheckPlan> {
         }
     };
 
-    let (Ok(target), Ok(head)) = (repo.resolve_target(config), repo.head_commit_id()) else {
-        return Ok(CheckPlan {
-            scan_dir: repo_root,
-            _snapshot: None,
-        });
+    let resolution = repo
+        .resolve_target(config)
+        .and_then(|target| repo.head_commit_id().map(|head| (target, head)));
+    let (target, head) = match resolution {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            if config.pinned_target.is_some() {
+                return Err(error.context("cannot plan checks for pinned review target"));
+            }
+            return Ok(CheckPlan {
+                scan_dir: repo_root,
+                _snapshot: None,
+            });
+        }
     };
 
     if head == target.commit_id {
@@ -2241,6 +2280,141 @@ mod tests {
         run_git(&["checkout", "-q", "main"]);
 
         (tmp, target)
+    }
+
+    #[test]
+    fn pinned_target_survives_a_ref_moved_to_operator_head() {
+        assert_pinned_target_survives_ref_change(false);
+    }
+
+    #[test]
+    fn pinned_target_survives_a_deleted_ref() {
+        assert_pinned_target_survives_ref_change(true);
+    }
+
+    fn assert_pinned_target_survives_ref_change(delete: bool) {
+        for mode in ["local", "remote", "pr"] {
+            let (repo, target) = repo_with_off_head_target();
+            let mut config = test_config();
+            config.repo_root = repo.path().to_path_buf();
+            config.target = Some("feature".to_owned());
+            config.remote_mode = mode == "remote";
+            config.pr_number = (mode == "pr").then_some(42);
+            let owner = git2::Repository::open(repo.path()).unwrap();
+            let reference = match mode {
+                "remote" => "refs/remotes/origin/feature",
+                "pr" => "refs/remotes/origin/pr/42",
+                _ => "refs/heads/feature",
+            };
+            owner
+                .reference(
+                    reference,
+                    git2::Oid::from_str(&target).unwrap(),
+                    true,
+                    "fixture",
+                )
+                .unwrap();
+            config.pinned_target = Some(
+                crate::git::Repository::open(repo.path())
+                    .unwrap()
+                    .resolve_target(&config)
+                    .unwrap(),
+            );
+            let mut branch = owner.find_reference(reference).unwrap();
+            if delete {
+                branch.delete().unwrap();
+                // PR fallback must not rescue the deleted PR ref via feature.
+                if mode == "pr" {
+                    owner
+                        .find_reference("refs/heads/feature")
+                        .unwrap()
+                        .delete()
+                        .unwrap();
+                }
+            } else {
+                branch
+                    .set_target(owner.head().unwrap().target().unwrap(), "fixture move")
+                    .unwrap();
+            }
+            let ledger = TaskLedger::new();
+            share_target_snapshot(&mut config, &[], &ledger).unwrap();
+            let scan = ledger
+                .scan_dir()
+                .expect("captured off-HEAD target still needs a snapshot");
+            assert_ne!(scan, config.repo_root, "{mode}, delete={delete}");
+            assert_eq!(
+                std::fs::read_to_string(scan.join("tracked.txt")).unwrap(),
+                "two\n"
+            );
+            assert_eq!(
+                ledger
+                    .current_snapshot_observation()
+                    .unwrap()
+                    .expected_target_sha,
+                target
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_target_unavailable_never_falls_back_to_operator_checkout() {
+        let (repo, _) = repo_with_off_head_target();
+        let mut config = test_config();
+        config.repo_root = repo.path().to_path_buf();
+        config.pinned_target = Some(crate::git::ResolvedRef {
+            name: "missing".to_owned(),
+            commit_id: "f".repeat(40),
+            is_remote: true,
+        });
+        assert!(plan_check_run(&config).is_err());
+        let ledger = TaskLedger::new();
+        assert!(share_target_snapshot(&mut config, &[], &ledger).is_err());
+        assert!(config.scan_dir_override.is_none());
+        assert!(ledger.scan_dir().is_none());
+    }
+
+    #[test]
+    fn pinned_local_target_keeps_operator_checkout() {
+        let (repo, _) = repo_with_off_head_target();
+        let mut config = test_config();
+        config.repo_root = repo.path().to_path_buf();
+        config.target = Some("main".to_owned());
+        config.pinned_target = Some(
+            crate::git::Repository::open(repo.path())
+                .unwrap()
+                .resolve_target(&config)
+                .unwrap(),
+        );
+        let ledger = TaskLedger::new();
+        share_target_snapshot(&mut config, &[], &ledger).unwrap();
+        assert!(ledger.scan_dir().is_none());
+        assert_eq!(config.scan_dir_override.as_ref(), Some(&config.repo_root));
+    }
+
+    #[test]
+    fn pinned_target_is_an_object_even_when_a_branch_has_its_hex_name() {
+        let (repo, target) = repo_with_off_head_target();
+        let mut config = test_config();
+        config.repo_root = repo.path().to_path_buf();
+        config.target = Some("feature".to_owned());
+        let owner = crate::git::Repository::open(repo.path()).unwrap();
+        config.pinned_target = Some(owner.resolve_target(&config).unwrap());
+        let git = git2::Repository::open(repo.path()).unwrap();
+        git.reference(
+            &format!("refs/heads/{target}"),
+            git.head().unwrap().target().unwrap(),
+            false,
+            "fixture branch shadows an object id",
+        )
+        .unwrap();
+
+        assert_eq!(owner.resolve_target(&config).unwrap().commit_id, target);
+        let plan = plan_check_run(&config).unwrap();
+        assert_ne!(plan.scan_dir, config.repo_root);
+        assert_eq!(
+            std::fs::read_to_string(plan.scan_dir.join("tracked.txt")).unwrap(),
+            "two\n"
+        );
     }
 
     /// PRV-CONTEXT-SNAPSHOT-PROVENANCE, half one: the shared snapshot used to be
@@ -4483,6 +4657,66 @@ test result: ok. 2 passed; 0 failed
     }
 
     #[tokio::test]
+    async fn cargo_admission_preserves_budget_and_releases_lock_on_cancel() {
+        struct CargoWaiter(&'static str);
+
+        #[async_trait]
+        impl Check for CargoWaiter {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn check_eligibility(&self, _config: &Config) -> CheckEligibility {
+                CheckEligibility::Run
+            }
+            fn resource_weight(&self) -> Weight {
+                Weight::Heavy
+            }
+            async fn run(&self, _config: &Config) -> Result<CheckResult> {
+                unreachable!("only admission is under test")
+            }
+        }
+
+        for name in [
+            "Cargo check",
+            "Clippy",
+            "Rustfmt",
+            "Cargo test",
+            "Cargo audit",
+            "Cargo geiger",
+        ] {
+            let governor = ResourceGovernor::with_budget(2, 2);
+            let cargo_lock = Arc::new(Semaphore::new(1));
+            let held = Arc::clone(&cargo_lock).acquire_owned().await.unwrap();
+            let board = std::sync::Mutex::new(RunBoard::new([name].into_iter()));
+            let check = CargoWaiter(name);
+            let waiting = admit_check(&check, &cargo_lock, &governor, &board);
+            tokio::pin!(waiting);
+
+            assert!(futures::poll!(&mut waiting).is_pending());
+            let other_work =
+                tokio::time::timeout(Duration::from_secs(1), governor.acquire(Weight::Exclusive))
+                    .await
+                    .expect("a cargo-lock waiter must leave the entire budget available")
+                    .expect("the run is not cancelled");
+            assert_eq!(lock_board(&board).names_where(false), vec![name]);
+
+            drop(held);
+            assert!(futures::poll!(&mut waiting).is_pending());
+            assert_eq!(cargo_lock.available_permits(), 0);
+            assert_eq!(lock_board(&board).names_where(false), vec![name]);
+
+            governor.cancel();
+            let result = tokio::time::timeout(Duration::from_secs(1), &mut waiting)
+                .await
+                .expect("cancellation must wake the budget waiter");
+            assert!(matches!(result, Err(Cancelled)));
+            assert_eq!(cargo_lock.available_permits(), 1);
+            assert_eq!(lock_board(&board).names_where(false), vec![name]);
+            drop(other_work);
+        }
+    }
+
+    #[tokio::test]
     async fn a_cargo_lock_waiter_races_cancellation() {
         use async_trait::async_trait;
 
@@ -4606,6 +4840,109 @@ test result: ok. 2 passed; 0 failed
     }
 
     #[tokio::test]
+    async fn snapshot_integrity_retains_changes_restored_by_a_later_check_and_guards_cache() {
+        struct Writer {
+            name: &'static str,
+            contents: &'static str,
+            status: CheckStatus,
+            error: bool,
+        }
+        #[async_trait]
+        impl Check for Writer {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn check_eligibility(&self, _: &Config) -> CheckEligibility {
+                CheckEligibility::Run
+            }
+            fn cache_key(&self, _: &Config) -> Option<String> {
+                Some("original-target".into())
+            }
+            async fn run(&self, config: &Config) -> Result<CheckResult> {
+                std::fs::write(
+                    config
+                        .scan_dir_override
+                        .as_ref()
+                        .unwrap()
+                        .join("tracked.txt"),
+                    self.contents,
+                )?;
+                if self.error {
+                    anyhow::bail!("fixture execution error");
+                }
+                Ok(CheckResult {
+                    name: self.name.into(),
+                    status: self.status,
+                    duration: Duration::ZERO,
+                    output: "actual check output".into(),
+                    cached: false,
+                    provenance: None,
+                })
+            }
+        }
+        let (repo, target) = repo_with_one_commit();
+        let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+        let path = snapshot.worktree_path.clone();
+        let ledger = TaskLedger::new();
+        ledger.set_shared_snapshot(Some(snapshot));
+        let mut config = rust_config(true, true, true);
+        config.repo_root = repo.path().to_path_buf();
+        config.scan_dir_override = Some(path.clone());
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = Cache::with_dir(cache_dir.path().to_path_buf(), true);
+        for (name, contents, status, error) in [
+            ("stable", "one\n", CheckStatus::Passed, false),
+            ("mutate", "changed\n", CheckStatus::Passed, false),
+            ("restore", "one\n", CheckStatus::Failed, false),
+            ("error", "error changed\n", CheckStatus::Error, true),
+        ] {
+            let result = execute_live_check(
+                Box::new(Writer {
+                    name,
+                    contents,
+                    status,
+                    error,
+                }),
+                &config,
+                &cache,
+                Some(&ledger),
+            )
+            .await;
+            assert_eq!(result.status, status, "raw check status for {name}");
+            assert_eq!(
+                cache.get(name, "original-target").is_some(),
+                name == "stable",
+                "cache for {name}"
+            );
+            if name == "restore" {
+                assert!(
+                    !snapshot_integrity::SnapshotObservation::observe(&path, repo.path(), &target)
+                        .requires_review()
+                );
+                let observations = ledger.snapshot_observations();
+                assert_eq!(observations.len(), 2);
+                assert_eq!(observations[0].check_name.as_deref(), Some("mutate"));
+                assert_eq!(observations[0].phase, "after-check");
+                assert_eq!(observations[1].check_name.as_deref(), Some("restore"));
+                assert_eq!(observations[1].phase, "before-check");
+                assert_eq!(
+                    observations[0].changed_paths.as_ref().unwrap(),
+                    &["tracked.txt"]
+                );
+            }
+        }
+        assert_eq!(
+            ledger
+                .snapshot_observations()
+                .last()
+                .unwrap()
+                .check_name
+                .as_deref(),
+            Some("error")
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_skipped_result_is_not_cached() {
         // PR #12 review #14: a check that RAN but returned Skipped (mypy when uv
         // "failed to spawn" a missing binary) must NOT be persisted, or the
@@ -4651,6 +4988,7 @@ test result: ok. 2 passed; 0 failed
             }),
             &config,
             &cache,
+            None,
         )
         .await;
         assert!(
@@ -4666,6 +5004,7 @@ test result: ok. 2 passed; 0 failed
             }),
             &config,
             &cache2,
+            None,
         )
         .await;
         assert!(
@@ -4707,7 +5046,7 @@ test result: ok. 2 passed; 0 failed
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
 
-        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache).await;
+        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache, None).await;
         assert_eq!(result.status, CheckStatus::Error);
 
         let prov = result
@@ -4774,7 +5113,7 @@ test result: ok. 2 passed; 0 failed
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
-        let result = execute_live_check(Box::new(TimingOutCargo), &config, &cache).await;
+        let result = execute_live_check(Box::new(TimingOutCargo), &config, &cache, None).await;
 
         let prov = result
             .provenance
@@ -4831,7 +5170,7 @@ test result: ok. 2 passed; 0 failed
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
 
-        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache).await;
+        let result = execute_live_check(Box::new(TimingOutCheck), &config, &cache, None).await;
         assert!(
             result.provenance.is_none(),
             "a vanished per-check worktree must not be reported as the local tree",
@@ -4887,7 +5226,7 @@ test result: ok. 2 passed; 0 failed
         let cache = Cache::with_dir(tmp.path().to_path_buf(), true);
 
         // Pass 1 — live execution, fills the cache.
-        let live = execute_live_check(Box::new(MockCheck), &config, &cache).await;
+        let live = execute_live_check(Box::new(MockCheck), &config, &cache, None).await;
         assert!(!live.cached);
         let live_prov = live.provenance.expect("live run must carry provenance");
 

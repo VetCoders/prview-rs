@@ -234,6 +234,20 @@ impl Repository {
 
     /// Resolve target branch/ref
     pub fn resolve_target(&self, config: &Config) -> Result<ResolvedRef> {
+        if let Some(target) = &config.pinned_target {
+            // A captured commit is an object identity, never a symbolic ref.
+            // A legal branch name can itself be a forty-character hex string.
+            let oid = git2::Oid::from_str(&target.commit_id)
+                .context("the pinned review target is not a full object id")?;
+            let commit_id = self
+                .inner
+                .find_commit(oid)
+                .context("the pinned review target is unavailable")?;
+            return Ok(ResolvedRef {
+                commit_id: commit_id.id().to_string(),
+                ..target.clone()
+            });
+        }
         let name = config.target.clone().unwrap_or_else(|| {
             self.inner
                 .head()

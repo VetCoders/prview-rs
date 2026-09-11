@@ -11,9 +11,45 @@ use prview::{App, Cli, CliCommand, Config, OpenArgs, RunsArgs, ScopeArgs, StateA
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[tokio::main]
-async fn main() {
-    if let Err(err) = run().await {
+/// Stack reserved for the thread that polls the review pipeline.
+///
+/// The root future is ONE composed async state machine: the check dispatcher's
+/// `FuturesUnordered`, the artifact stage and every nested generator all live in
+/// the frame that `block_on` polls. A debug build of that frame does not fit
+/// Windows' 1 MiB default main-thread stack — the first real review CI ever ran
+/// on Windows died with `STATUS_STACK_OVERFLOW` before printing a byte — and
+/// Tokio's `thread_stack_size` does not apply to the thread running `block_on`,
+/// so nothing but prview can size it. The reservation is address space, not
+/// committed memory, which is why the entrypoint stays platform-neutral instead
+/// of branching on `cfg(windows)`: Unix's 8 MiB default never overflowed, and a
+/// larger reservation there costs nothing.
+const ROOT_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+fn main() {
+    let root = std::thread::Builder::new()
+        .name("prview-main".into())
+        .stack_size(ROOT_STACK_BYTES)
+        .spawn(run_on_root_thread)
+        .expect("spawn the prview root thread");
+
+    // The default hook already reported a panic on the root thread. Resuming it
+    // here reproduces what a panic on `main` did before: one message, exit 101.
+    if let Err(panic) = root.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn run_on_root_thread() {
+    // The same runtime the attribute macro built before it was removed:
+    // multi-thread flavour with every driver enabled.
+    // `governor::blocking_stage` asks for that flavour by name, and
+    // `block_in_place` is only legal underneath it.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed building the Runtime");
+
+    if let Err(err) = runtime.block_on(run()) {
         // A cancelled run produced no verdict. Reporting one of prview's own
         // codes would claim it did, so it exits on the shell's interrupt
         // convention instead.

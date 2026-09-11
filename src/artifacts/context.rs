@@ -124,6 +124,8 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
         diffs,
         ownership_map,
         clean_comparison,
+        snapshot_integrity,
+        provenance,
     } = input;
     use crate::policy::engine::{AnalysisStatus, MergeRecommendation, PolicyEngine};
 
@@ -239,6 +241,13 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
             names
         ));
     }
+    // Substrate contradictions, in the same trailing position and from the same
+    // renderer the merge gate uses. This context is what report.json's
+    // `gate.review_caveats`, the dashboard and the "Copy PR comment" projection
+    // read, so without this line those three omit a signal MERGE_GATE.json
+    // carries — the pack would name a contradiction in one artifact and hide it
+    // in the three an operator actually reads.
+    review_caveats.extend(provenance.review_caveats());
 
     // The single application of the operator predicate. Everything downstream
     // — report.json, the run-history row below, and the previous-run delta —
@@ -374,6 +383,10 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
         &mut worst_merge,
     );
     review_caveats.extend(rust_api_delta_review_caveats(rust_api_delta.as_ref()));
+
+    if let Some(integrity) = snapshot_integrity {
+        review_caveats.extend(integrity.apply_review(&mut worst_confidence, &mut worst_merge));
+    }
 
     // B2: Compute i18n parity delta
     let i18n_delta = signal::compute_i18n_delta(diffs, &config.repo_root);

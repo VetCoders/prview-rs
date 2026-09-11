@@ -13,6 +13,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `report.json` schema 3.0 makes `quality.breaking_changes.md_path` nullable.
+  Missing Markdown reports no longer advertise a dead link; existing Rust API
+  reports remain linked even when they contain no breaking findings.
+  The same schema uses the canonical PASS/CONDITIONAL/BLOCK vocabulary for
+  `gate.status`, matching `gate.verdict` instead of projecting merge permission
+  as ALLOW/BLOCK. MERGE_GATE.md explains non-blocking quality failures beside
+  the policy and merge-permission axes.
+- `MERGE_GATE.json` schema 3.0 records actual policy provenance captured at
+  load: `origin: file` with a source path, or `origin: builtin-default` with
+  `source: null`. CLI/MCP readers and the validator accept 3.0 while retaining
+  older schema contracts and the typed enforcement requirements from 2.3.
+- `PROVENANCE.json` schema 2.0 also cross-checks its own two statements about
+  the substrate. A new `consistency` object reports how many run/check
+  comparisons were made and every `PROVENANCE_CONTRADICTION` found between them:
+  an operator tree frozen clean but read `local-dirty` by a check (or the
+  reverse), a check that scanned a commit other than the reviewed target, and a
+  check that ran in a checkout that is not this repository. Cache replays and
+  rows without provenance are not compared, so a replayed or missing observation
+  is never reported as a contradiction. `MERGE_GATE.json` schema 3.0 publishes
+  the identical rows as an additive `provenance_contradictions` array and one
+  `PROVENANCE_CONTRADICTION` review signal each, MERGE_GATE.md explains the
+  class, and `CONSISTENCY_CHECK.json` reports `consistent: false` while one
+  stands. `report.json` publishes the same fact rather than a narrower one: its
+  `quality.consistency` gains `provenance_contradictions` (the identical rows)
+  and `provenance_comparisons` (the identical count), and folds them into its own
+  `consistent` flag through the same `merge_provenance` reduction the summary
+  checker uses — so `report.json` can no longer read `consistent: true` for a run
+  `CONSISTENCY_CHECK.json` calls inconsistent. A contradiction is a
+  provenance/confidence problem, not a verified failure: no quality failure,
+  blocking issue or verdict axis is derived from it, and a run without
+  contradictions keeps a byte-identical decision.
+- `PROVENANCE.json` schema 2.0 separates review identity (`target_sha`) from
+  operator state (`worktree_head_sha`, `operator_worktree`). The ambiguous 1.0
+  field names are removed from new records. Operator HEAD is now captured
+  before checks, so a later commit cannot change the recorded starting state.
+  A HEAD change detected during status fingerprinting invalidates all operator
+  fields instead of combining different checkouts; this is not a worktree lock.
+  The architecture documentation includes the 1.0-to-2.0 reader migration.
 - The default human handoff is a single `dashboard.html` with an offline reader
   for Markdown, JSON, logs, patches, and target-commit source. `--no-dashboard`
   selects the static `review.html` instead. Large text has bounded embedding
@@ -52,6 +90,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `main`.
 
 ### Fixed
+
+- A real review on Windows no longer dies with `STATUS_STACK_OVERFLOW`: the
+  composed root future of the review pipeline did not fit the 1 MiB default
+  Windows main-thread stack, and Tokio cannot size the thread that runs
+  `block_on`. The entrypoint now builds its own runtime on a dedicated
+  64 MiB-stack thread on every platform.
+
+- Reviews of a commit other than the operator checkout fail publication when no
+  shared snapshot was materialised, instead of silently skipping the snapshot
+  integrity validation and describing the target with local files. An operator
+  checkout that could not be captured at all — an unborn `HEAD`, or one that moved
+  while provenance was being read, which the capture deliberately discards — now
+  fails the same way instead of skipping the guard: `--quick` and `--watch`
+  publish with an empty ledger, so an unknown checkout identity was the one way a
+  snapshot-free pack could still claim a target it never read.
+
+- Pinned targets use exact commit lookup even when a branch has the SHA as its
+  name; Semgrep cannot fall back to the operator checkout for an unavailable pin.
+  Snapshot boundary comparisons run off the async dispatcher and retain worker
+  failures as unknown evidence. Windows Semgrep invocation honors discovered
+  batch executables, with native CI coverage of the owned contract fixture.
+
+- Snapshot caveats retain observed HEAD changes after restoration, including
+  empty commits with no tracked-path changes. Security option help names the
+  Semgrep opt-out and no longer promises unconditional cargo-audit execution.
+
+- Check configurations pin the target resolved for the diff in headless, update
+  and TUI runs. Moved or deleted branch/PR refs cannot redirect shared checks to
+  the operator checkout; unavailable pinned commits fail planning explicitly.
+
+- Check configurations pin the review BASE alongside the target, so the whole
+  range is resolved once at diff capture. Semgrep's diff-scoped
+  `--baseline-commit` now reads that captured merge-base SHA instead of
+  re-resolving the symbolic base ref: a base branch that advanced past the target
+  mid-run (the reviewed branch merged into `main` while the run was in flight)
+  used to collapse the re-derived merge-base onto the target, so the scanner saw
+  an empty delta while the pack diff was non-empty and the report and the scanner
+  described different ranges. A pinned run carrying no captured base refuses to
+  plan, exactly like an unavailable pinned commit, rather than falling back to
+  symbolic resolution.
+
+- Final snapshot observations use the same immutable creation SHA as check
+  boundaries. A snapshot/diff target mismatch aborts publication before output
+  allocation, preventing a pack from combining two reviewed commits.
+
+- An explicit Semgrep security opt-out is a declared mode skip, requiring review
+  when policy requires the scanner instead of being classified as unknown.
+
+- Shared review snapshots now preserve tracked/index changes against the original
+  target as SNAPSHOT_INTEGRITY evidence and require review without rewriting
+  passing or failed Cargo results. Committed changes and unknown observations
+  cannot certify clean; newly untracked lockfiles do not trigger this rule.
+  Non-clean check boundaries remain visible after later restoration and prevent
+  overlapping results from entering the target cache.
+
+- `tools/validate_merge_gate.py` no longer certifies a schema-3.0 gate that
+  omits `provenance_contradictions`, that carries contradiction rows with no
+  `decision.review_caveats` array, that attributes a row to a `check_id` absent
+  from its own `checks[]`, or whose `PROVENANCE_CONTRADICTION` signals merely
+  COUNT the rows. Signals are now matched to rows one-to-one as a multiset on
+  the exact `<code>: <explanation>` spelling, so a duplicated, missing or
+  unsupported signal is an error. `tools/tests/test_validate_merge_gate.py`
+  pins all five cases against real gates in `tools/fixtures/merge-gate/`, and
+  CI runs every `tools/tests/test_*.py` rather than one named file.
+
+- Provenance contradictions are published as review signals by every artifact,
+  not only `MERGE_GATE.json`. The signal strings now come from one renderer
+  (`ProvenanceConsistency::review_caveats`) that the merge gate and the
+  dashboard context share, and the dashboard context is built with the run's
+  substrate cross-check — so `report.json`'s `gate.review_caveats`, the
+  dashboard, and the dashboard's "Copy PR comment" carry the identical
+  `PROVENANCE_CONTRADICTION` entry instead of staying silent about a
+  disagreement the gate names. `quality.consistency` already folded the
+  contradictions in and is unchanged.
+
+- Pre-existing failure classification uses the operator HEAD captured before
+  checks. A later checkout can invalidate stability but cannot grant a new
+  downgrade; unknown captured HEAD no longer takes a permissive local fallback.
 
 - `locales/en.json` and `locales/pl.json` declare `summary.lintTotals` once.
   The obsolete `{new}/{legacy}` template was a duplicate key that JSON parsers

@@ -118,6 +118,14 @@ with_cancellation(app.run(), run governor)
     └─► artifacts::generate()  ─── numbered layout + signal generators
 ```
 
+`main.rs` is a synchronous entrypoint: it spawns a `prview-main` thread with a
+64 MiB stack, builds the multi-threaded Tokio runtime there and `block_on`s the
+pipeline, then resumes any panic from that thread so the exit code is unchanged.
+Everything above is one composed future polled by that `block_on`, and Tokio
+cannot size the thread that runs it, so the whole pipeline would otherwise be
+held by the platform's main-thread stack — 1 MiB on Windows, which a debug build
+overflows.
+
 ## Modules
 
 ### cli/mod.rs
@@ -222,7 +230,10 @@ Implementations:
 - `CargoAuditCheck` - `cargo audit`
 - `SemgrepCheck` - Semgrep JSON scan; default is diff-scoped with
   `--baseline-commit <merge-base>` when the git baseline is clean and available,
-  while `--security-full` keeps a full-tree scan
+  while `--security-full` keeps a full-tree scan. Explicit `--skip-security`
+  is carried separately from the heavy-security opt-in and disables this check
+  before tool discovery. The shared `security disabled` mode-skip reason keeps
+  policy evaluation `skipped` and review-required when the scanner is required.
 - `CargoGeigerCheck` - `cargo geiger`
 - `RuffCheck` - `ruff check`
 - `MypyCheck` - `mypy`
@@ -345,6 +356,28 @@ dependency set is still installed and judged, in a prview-owned environment kept
 warm across runs. A local review sets no override and uses the checkout's own
 environment exactly as before.
 
+Pytest adds `SnapshotPytestHome` for a snapshot run. A per-run temporary module
+loaded via `-p` in a neutral outer invocation redirects HOME, USERPROFILE, XDG
+and Windows application-data selectors. The outer invocation uses a null config,
+`--noconftest`, no plugin autoload and empty pytest plugin/addopts environment.
+Its command hook restores the original pytest environment and invokes the public
+`pytest.main` API with the bounded arguments carried after `--`. This keeps
+pytest in charge of configuration precedence while ensuring even plugins in ini
+or environment addopts load after the home redirect. Redirection happens
+inside pytest: the uv launcher and Python startup still find their existing
+interpreter, dependencies and user-installed pytest. The plugin pins Python's
+original user package base for child/xdist bootstraps, preserving an explicit
+`PYTHONUSERBASE` when present. Its directory is prepended to the existing
+`PYTHONPATH`; each run uses a unique module name and private home. The owner
+retains the module, JSON environment description and directories through the
+check, then removes them together. The pytest header and command provenance
+identify the isolation. It is a default home/config view, not OS-level access
+control or a claim that all explicit host paths have been removed. Local
+checkout tests retain their environment. The version probe uses the same
+plugin in snapshot mode and always passes `--noconftest` to prevent conftest
+execution during version discovery.
+
+
 The cold `uv sync` pre-step is resolved only after the run-wide target snapshot
 exists, through that same `plan_python_run()`. Its cwd and
 `UV_PROJECT_ENVIRONMENT` are therefore identical to the later gates; it never
@@ -383,7 +416,10 @@ Pytest 7.2-8.x recognizes `.pytest.ini` as a candidate but does not select an
 empty hidden file unconditionally; that behavior begins with pytest 9. The
 versioned discovery model preserves this distinction instead of treating every
 recognized basename as an automatic winner.
-Existing but unreadable, non-UTF-8, malformed, or conflicting recognized config
+Pytest and uv share a 1 MiB read cap checked against the opened regular file,
+with at most one extra byte read to detect growth. Pytest retains its existing
+regular-file symlink discovery; non-file candidates remain ignored. Existing
+but oversized, unreadable, non-UTF-8, malformed, or conflicting recognized config
 is an execution error, not absence. Pytest-xdist gets the same upper bound
 through its auto-worker environment and a final CLI override only when the
 effective shell-tokenized config/environment request exceeds that bound or is
@@ -726,7 +762,97 @@ legacy triples are still read (so a warm cache survives the upgrade) and are
 removed the first time the key is rewritten. An entry whose blob no longer
 parses replays with no provenance instead of failing the run.
 
+#### Shared snapshot integrity at check boundaries
+
+Headless and TUI pipelines copy the resolved diff target into the run's
+`Config.pinned_target` and the resolved diff bases into `Config.pinned_diff_bases`
+before dispatching checks; update-mode clones preserve both. The whole review
+range — base and target — is therefore resolved exactly once, at diff capture.
+Both are runtime-only state, not CLI/manifest settings. `Repository::resolve_target`
+then parses the captured SHA as an object ID and requires that exact commit,
+preserving its original display name and remote classification. A branch whose
+name is the forty-character SHA cannot shadow it. A deleted ref
+does not invalidate an available commit. An unavailable pinned commit or
+repository is a planning error, including runs with no snapshot-backed gates;
+it cannot fall back to the operator checkout. The independent Semgrep planner
+enforces the same rule; only unpinned scans retain in-place fallback behavior.
+Its `--baseline-commit` range comes from `pinned_diff_bases` verbatim — the same
+merge-base commit the pack diff was computed from — and is never re-derived from
+a symbolic base ref, which a base branch advancing past the target mid-run would
+collapse onto the target and reduce the scanned delta to nothing while the pack
+diff stays non-empty. A pinned target carrying no captured base is the same class
+of planning refusal as an unavailable pinned commit, never a symbolic fallback.
+Multi-base and `--current-only` runs still fall back to a full scan (R3-15).
+Local targets that still match HEAD
+keep the operator checkout. Each new watch iteration resolves its target anew.
+
+`checks::snapshot_integrity::SnapshotObservation` compares the ledger-owned
+worktree with the immutable commit resolved before worktree creation. The shared
+`execute_live_check` path (headless and TUI) observes before and after every live
+check, including errors. The ledger retains non-clean observations even when a
+later check restores the checkout. Artifact generation adds a final observation
+before context commands run, using the same ledger-owned creation SHA. If that SHA
+differs from the resolved diff target, publication fails before output allocation
+instead of combining two review identities. The absence of an observation is
+checked independently of the ledger: an off-`HEAD` target — or a target whose
+operator checkout could not be captured at all, an unborn `HEAD` or a checkout
+that moved during capture — that reaches artifact generation with no shared
+snapshot fails at the same seam, so a dispatcher that
+failed to materialise the reviewed tree cannot publish the operator checkout as
+the target. Only a review of the captured `HEAD`, or a run whose operator `HEAD`
+is unreadable, keeps the snapshot-free path. Comparisons union target-tree→index and
+index→worktree paths: staged changes and test-created commits remain visible.
+Newly untracked files are excluded; tracked lockfile changes, deletions and type
+changes remain. A changed HEAD or unreadable/foreign/raced observation cannot
+certify clean. Check-boundary Git reads run in a blocking worker, outside ledger
+data locks. Async admission limits a run to one observation at a time without
+blocking the dispatcher, even on a current-thread runtime. Both boundaries are
+awaited before the result can be cached; worker failure retains `unknown`
+evidence. Native libgit2 walks already running are not preemptible, and retain
+their observation permit until completion if the async waiter is cancelled.
+
+Modified or unknown observations emit `20_quality/SNAPSHOT_INTEGRITY.json/.md`;
+clean runs and runs without a shared snapshot emit no extra file. JSON schema 1.0
+carries `observation: shared-snapshot-check-boundaries`, `expected_target_sha`,
+final `observed_head_sha`, aggregate `status` (`modified` or `unknown`), the union
+of `changed_paths` (null if any comparison is unknown), nullable `error`, and
+`observations`. The latter retains non-clean boundaries plus the final observation,
+each with its own SHA, paths, status, error, `phase` and nullable `check_name`.
+Known paths remain in individual observations even when the aggregate is unknown.
+The human HEAD-change caveat inspects all retained observations, so restoring
+HEAD after an empty commit does not leave an unexplained zero-path review signal.
+Non-UTF8 Git path bytes are hex-escaped. A failed evidence write aborts publication.
+AI_INDEX and the dashboard artifact explorer link only published evidence.
+The same typed report raises both merge-gate and dashboard analysis to at least
+degraded and merge recommendation to at least review_required without lowering
+BLOCK. Report and HTML consume that decision; check results and exit codes are
+preserved, and no check is added. Existing gate/provenance schemas keep their shape.
+
+A live result is not written to cache when a non-clean observation occurs before,
+after, or during its execution (including observations from concurrent checks).
+Existing cache entries are not retroactively revalidated by this guard.
+Check names identify observation boundaries, not the writer: checks can overlap.
+Observation is not atomic; mutations restored between observations, including
+within one check, are not guaranteed to be detected. Writes by later context tools
+are outside this observation window. Per-check `snapshot-dirty` remains a separate
+record and can still reflect a harmless untracked lockfile.
+
 #### Pack-level provenance — `00_summary/PROVENANCE.json`
+
+The current schema is **2.0**, independently versioned from `RUN.json`,
+`report.json`, and `MERGE_GATE.json`. It separates the reviewed revision from
+operator checkout observations:
+
+| Schema 1.0 | Schema 2.0 | Meaning |
+|---|---|---|
+| `target_sha` | `target_sha` | The reviewed commit, unchanged |
+| `head_sha` | `worktree_head_sha` | Operator checkout HEAD; 1.0 read it during artifact generation, 2.0 captures it before checks |
+| `worktree` | `operator_worktree` | Operator cleanliness and status digest, captured before checks |
+
+Readers supporting both versions must select the documented shape using
+`schema_version`. Neither version's operator HEAD is a substitute for
+`target_sha`. Old 1.0 records retain their original meaning and observation
+phase; new records omit the ambiguous `head_sha` and `worktree` aliases.
 
 The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
 "what did *this pack* judge", once, for a reviewer holding only the artifacts:
@@ -743,9 +869,12 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   baselines there are and fill the array instead;
 - `base_sha` — the first entry's `sha`, kept for consumers that predate
   `bases[]`. It is derived from that array, so the two cannot disagree;
-- `head_sha` — commit checked out locally (equal to `target_sha` for an ordinary
-  local review, different under `--pr`/`--remote`);
-- `worktree.clean` — whether the local tree had uncommitted changes, frozen
+- `worktree_head_sha` — operator checkout commit captured before checks,
+  during the same capture phase as `operator_worktree`. It can differ from
+  `target_sha` under `--pr`/`--remote`. A later checkout or commit cannot replace
+  this observation when artifacts are written. An unborn or unreadable HEAD
+  remains `null`, even when the reviewed target is known;
+- `operator_worktree.clean` — whether the local tree had uncommitted changes, frozen
   **before** any check ran or artifact was written (R4-19). `null` when the
   status could not be read at all (an unreadable or malformed index): the two
   failure modes are not the same, and only one of them is safe to answer
@@ -755,7 +884,20 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   both publish a fact nobody checked and let the pre-existing downgrade silence
   findings on a tree that was never inspected. The downgrade requires a proven
   `true`, so unknown suppresses it;
-- `worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
+  HEAD is read again after status fingerprinting. If the two commit observations
+  differ, `worktree_head_sha`, `operator_worktree.clean`, and
+  `operator_worktree.status_digest` are all `null`, preventing a mixed observation
+  from authorizing the clean-tree downgrade. There is no retry or worktree lock:
+  this detects a changed endpoint, not edits under an unchanged HEAD or a change
+  followed by a return to the original commit (ABA);
+  The gate's pre-existing downgrade also uses the captured HEAD, never a later
+  checkout to infer where checks ran. With no captured HEAD no downgrade is
+  authorized. HEAD must still match at artifact generation for any downgrade;
+  this extra stability check does not re-read cleanliness or rewrite recorded
+  starting provenance. With a stable captured non-target checkout, only checks
+  known to read a target snapshot remain eligible. A detected checkout change
+  disables the downgrade for the run, including these checks;
+- `operator_worktree.status_digest` — `sha256:<hex>` over a canonical rendering of the
   working-tree status, from the *same* read as `clean`. Each line is
   `XY <path>\0<content>`, where `<content>` fingerprints the file the entry
   points at: `blob:<len>:<sha256>` for a regular file (streamed, so a large file
@@ -811,6 +953,39 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   archive` extraction of the target commit in snapshot mode,
   or `repo_root` when no snapshot could be made — and a gating signal whose
   substrate is unstated is unauditable.
+- `consistency` — the file's own cross-check: `{comparisons, contradictions[]}`.
+  Stating the substrate twice (once for the run, once per check) is only worth
+  anything if the two are held against each other, so every comparable row is,
+  and a disagreement is named rather than left for a reader to spot. Each
+  contradiction carries `{code: "PROVENANCE_CONTRADICTION", kind, check_id,
+  field, run_value, check_value, explanation}` with `kind` one of
+  `operator-worktree-state` (the tree frozen clean before the run, read
+  `local-dirty` by a check, or the reverse), `check-target-sha` (a check scanned
+  a commit other than the reviewed target) or `foreign-substrate` (a check ran in
+  a checkout that is not this repository). Commit ids are compared allowing a
+  git-style abbreviation on either side; an abbreviation is not a disagreement.
+  Cache replays are excluded — their provenance describes the ORIGINAL
+  execution's tree, and they are dated by the gate's `stale_cache_caveats`
+  instead — as are rows with no provenance at all, which are an evidence gap, not
+  a contradiction. `comparisons` counts what was actually compared, so "checked
+  and consistent" stays distinguishable from "nothing could be checked". The
+  identical list is published as `MERGE_GATE.json.provenance_contradictions`, as
+  `report.json`'s `quality.consistency.provenance_contradictions`, once per row as
+  a `PROVENANCE_CONTRADICTION` review signal, and as a warning in
+  `00_summary/CONSISTENCY_CHECK.json`. Both consistency sections — the summary
+  checker's and `report.json`'s narrower counter view — fold the same rows in
+  through `ConsistencyReport::merge_provenance`, so `consistent` is `false` on
+  both while any contradiction stands, and `provenance_comparisons` carries the
+  same count `PROVENANCE.json` reports as `comparisons`. It is a confidence
+  problem about the evidence, not a
+  verified failure: no quality failure, blocking issue or verdict axis is derived
+  from it.
+
+The human Markdown gate and AI index render the complete canonical
+`decision.review_caveats` list with a matching count. Both use the shared
+`append_review_signals` formatter, retaining order and multiline item text;
+they omit the section for an empty list. The index reads the finalized gate
+JSON, so presentation never recomputes policy or invents review-signal origins.
 
 The three check inventories are projections of the same policy evaluations,
 but intentionally answer different questions. `00_summary/RUN.json.checks[]`
@@ -1202,6 +1377,11 @@ Job Object contract cannot disappear with an unrelated dependency change.
   makes two locks deadlock-free, and this direction also avoids parking half the
   budget on a cargo check that is still queueing for `target/`. Nothing acquires
   the cargo lock once it holds budget, so there is no cycle the other way.
+  Regression coverage exercises all six cargo-family names: a waiter leaves
+  the whole budget available while the target lock is held, remains queued
+  while waiting for budget after taking that lock, and releases the target
+  lock when cancellation interrupts the budget wait. A separate regression
+  checks cancellation while the target lock itself is still held.
 
 #### Queued vs running
 
@@ -2762,7 +2942,7 @@ tested, or whether tests passed. In `report.json`,
 `quality.coverage.heuristic_ratio` is `null` in the unmeasured case and is
 paired with `measured: false` + `not_measured_reason`. That nullability — with
 the loctree counters becoming omittable for the same reason — is why
-`report.json` carries `schema_version: "2.0"`: a decoder written against `1.0`,
+`report.json` moved to schema 2.0: a decoder written against `1.0`,
 where the ratio was always a number, does not parse every pack.
 
 `report.json`'s `gate.quality_failure_details[]` mirrors `MERGE_GATE.json`'s
@@ -2773,8 +2953,25 @@ together: the arrays admit warning-level baseline signals so the pre-existing
 downgrade can be computed for them, and only a `"failure"` origin can fail the
 quality gate. Emitting it in the gate artifact but not in `report.json` left the
 two artifacts of one run disagreeing about what "failure" meant. The field is
-additive and `report.json` stays `schema_version: "2.0"` — that major is
-unreleased, so no consumer has ever seen a 2.0 without it.
+additive within schema 2.0 and remains present in 3.0.
+
+**Current report schema: 3.0.** `quality.breaking_changes.md_path` is a
+pack-relative string only when `20_quality/BREAKING_CHANGES.md` exists as a
+file at report generation, otherwise it is explicitly `null`. Readers migrating
+from 2.0 must handle null and omit the link. The old hard-coded 2.0 path did not
+prove the file existed. `has_breaking` is independent: a Rust API report can
+exist with no breaking findings, and its link remains available. Artifact write
+errors still abort generation; null does not replace a failed write. The
+coverage nullability retains its prior meaning.
+
+Schema 3.0 also makes `gate.status` a projection of the same canonical verdict
+as `gate.verdict` (`PASS` / `CONDITIONAL` / `BLOCK`). Report schemas 1.x/2.x
+instead projected `allow_merge` as ALLOW/BLOCK, which mislabeled CONDITIONAL as
+BLOCK. Older packs must be read through their explicit `gate.verdict`; their
+status cannot recover the lost distinction. The writer consumes the derived
+dashboard context and does not add another policy evaluator. The human
+`recommended_label` and policy/quality/permission axes keep their meanings;
+MERGE_GATE.md displays those axes and explains a non-blocking quality HOLD.
 
 Source-to-test matching uses language-compatible evidence: JavaScript/TypeScript,
 C/C++ (including headers), and Java/Kotlin each form a compatible family.

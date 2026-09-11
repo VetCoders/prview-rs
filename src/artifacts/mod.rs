@@ -58,7 +58,8 @@ use crate::regression;
 use crate::regression::tests::is_test_file;
 use anyhow::{Context, Result};
 use signal::{
-    BreakingFinding, BreakingKind, CoverageDelta, ReviewFileCategory, classify_review_file,
+    BreakingFinding, BreakingKind, CoverageDelta, ProvenanceConsistency, ReviewFileCategory,
+    RunProvenance, classify_review_file, detect_provenance_contradictions,
 };
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
@@ -159,6 +160,9 @@ pub struct GenerateInput<'a> {
     /// `worktree_clean`. Recorded in `00_summary/PROVENANCE.json`; `None` when
     /// the repository could not be inspected.
     pub worktree_status_digest: Option<String>,
+    /// Operator checkout HEAD captured before checks, independently of the
+    /// reviewed target. Never read again while publishing provenance.
+    pub worktree_head_sha: Option<String>,
     /// The run's machine-wide budget, shared with the checks stage.
     ///
     /// The context stage shells out to the same class of tools the gates do — a
@@ -209,6 +213,7 @@ struct MergeGateInput<'a> {
     /// (R2-9/R3-16). Computed once per run for verdict parity with the dashboard
     /// context.
     clean_comparison: CleanComparison,
+    snapshot_integrity: Option<&'a signal::SnapshotIntegrity>,
 }
 
 pub(crate) struct DashboardContextInput<'a> {
@@ -227,6 +232,14 @@ pub(crate) struct DashboardContextInput<'a> {
     /// Mirrors `MergeGateInput::clean_comparison` — the same value feeds both so
     /// the two verdict surfaces cannot disagree on the pre-existing downgrade.
     clean_comparison: CleanComparison,
+    snapshot_integrity: Option<&'a signal::SnapshotIntegrity>,
+    /// The run's substrate cross-check, resolved ONCE for the whole pack.
+    ///
+    /// The dashboard context is what `report.json` (`gate.review_caveats`), the
+    /// dashboard HTML and its "Copy PR comment" projection all read, so the
+    /// contradictions have to reach it or those three surfaces stay silent about
+    /// a disagreement `MERGE_GATE.json` names.
+    provenance: &'a ProvenanceConsistency,
 }
 
 /// Provenance for the synthetic `heuristics_loctree` result.
@@ -522,6 +535,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         skipped_checks,
         worktree_clean,
         worktree_status_digest,
+        worktree_head_sha,
         governor,
     } = input;
     let t_total = Instant::now();
@@ -542,11 +556,56 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     // materialises one whenever the target is off-`HEAD`, whether or not a gate
     // needed it, so the fallback below is reached only for a local review (target
     // == `HEAD`, where the repo root IS the reviewed tree) or for a run whose
-    // snapshot could not be created at all — the same degraded path the checks
-    // themselves take.
+    // operator `HEAD` could not be read at all. The guard right below refuses to
+    // publish anything else.
     let context_scan_root = ledger
         .scan_dir()
         .unwrap_or_else(|| config.repo_root.clone());
+    // Freeze this run-wide observation before context commands can write more files.
+    let snapshot_integrity = match ledger.current_snapshot_observation() {
+        Some(observation) => {
+            // Re-resolving a moving ref before snapshot creation must not combine
+            // checks of one commit with a diff and metadata for another commit.
+            anyhow::ensure!(
+                observation.expected_target_sha == resolved_target.commit_id,
+                "shared snapshot target mismatch: reviewed target {}, snapshot created from {}; rerun the review against a stable target",
+                resolved_target.commit_id,
+                observation.expected_target_sha,
+            );
+            Some(signal::SnapshotIntegrity::from_observations(
+                observation,
+                ledger.snapshot_observations(),
+            ))
+        }
+        None => {
+            // The integrity question cannot be answered by asking the ledger
+            // whether it has anything to say: a run that reaches this point
+            // reviewing a commit other than the operator's own checkout never
+            // materialised the reviewed tree, so the stages below would read the
+            // operator's files while the pack claims the target. That is the
+            // `PRV-CONTEXT-SNAPSHOT-PROVENANCE` failure itself, and no missing
+            // observation may license it.
+            // An unknown checkout is not a known-good one. `--quick`/`--watch`
+            // publish with an empty ledger, and a HEAD that moved during capture
+            // (or an unborn one) leaves the operator identity `None` by design —
+            // the capture discards a raced reading rather than certify it. With
+            // no snapshot and no identity, nothing proves the local tree is the
+            // target, so the same refusal applies.
+            let Some(head) = worktree_head_sha.as_deref() else {
+                anyhow::bail!(
+                    "shared snapshot missing for a review with an unknown operator checkout: reviewed target {}; the checkout identity could not be captured and the reviewed tree was never materialised, so nothing proves this pack describes the target",
+                    resolved_target.commit_id,
+                );
+            };
+            anyhow::ensure!(
+                head == resolved_target.commit_id,
+                "shared snapshot missing for an off-HEAD review: reviewed target {}, operator checkout {}; the reviewed tree was never materialised, so no pack describes the target",
+                resolved_target.commit_id,
+                head,
+            );
+            None
+        }
+    };
     let mut context_artifacts =
         plan_context_artifacts(config, &context_scan_root, diffs, &all_checks, ledger);
 
@@ -578,6 +637,9 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     fs::create_dir_all(&quality_dir)?;
     fs::create_dir_all(&context_dir)?;
     fs::create_dir_all(&per_commit_dir)?;
+    if let Some(integrity) = &snapshot_integrity {
+        integrity.write(&quality_dir)?;
+    }
     ensure_generation_active(
         governor,
         &out_dir,
@@ -794,7 +856,22 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         resolved_target,
         resolved_bases,
         worktree_clean,
+        worktree_head_sha.as_deref(),
         diffs,
+    );
+
+    // Does the pack tell ONE story about the tree it read? PROVENANCE.json
+    // states the substrate twice — once for the run, once per check — and until
+    // this cross-check the two could disagree inside the same file with nothing
+    // noticing. Derived once here from the run's own inputs and published by
+    // PROVENANCE.json, CONSISTENCY_CHECK.json and the merge gate, which derives
+    // the identical list from the identical inputs through the same function.
+    let provenance_consistency = detect_provenance_contradictions(
+        RunProvenance {
+            target_sha: &resolved_target.commit_id,
+            operator_worktree_clean: worktree_clean,
+        },
+        &all_checks,
     );
 
     generate_merge_gate(MergeGateInput {
@@ -812,6 +889,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         resolved_target,
         resolved_bases,
         clean_comparison: clean_comparison.clone(),
+        snapshot_integrity: snapshot_integrity.as_ref(),
     })?;
     generate_failures_summary(&summary_dir, &all_checks)?;
     stage_timings.push(finish_timing(
@@ -953,6 +1031,8 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         diffs,
         ownership_map,
         clean_comparison,
+        snapshot_integrity: snapshot_integrity.as_ref(),
+        provenance: &provenance_consistency,
     });
 
     // Root-level report.json (generated first so dashboard can embed it)
@@ -968,8 +1048,9 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         run_started_at: &run_started_at,
         heuristics,
         regression: Some(&regression_report),
+        provenance: &provenance_consistency,
     })?;
-    generate_consistency_check(&summary_dir, &out_dir, diffs)?;
+    generate_consistency_check(&summary_dir, &out_dir, diffs, &provenance_consistency)?;
     stage_timings.push(finish_timing(emit_human_stdout, "report.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::ReportJson)?;
 
@@ -993,7 +1074,6 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     let t = Instant::now();
     generate_provenance_json(ProvenanceJsonInput {
         dir: &summary_dir,
-        repo: &repo,
         checks: &all_checks,
         skipped_checks: &skipped_checks,
         diffs,
@@ -1001,6 +1081,8 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         resolved_bases,
         worktree_clean,
         worktree_status_digest: worktree_status_digest.as_deref(),
+        worktree_head_sha: worktree_head_sha.as_deref(),
+        contradictions: &provenance_consistency,
     })?;
     stage_timings.push(finish_timing(emit_human_stdout, "PROVENANCE.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::Provenance)?;
@@ -1399,7 +1481,12 @@ fn claim_explicit_output_dir_with_reservation(
     Ok(())
 }
 
-fn generate_consistency_check(summary_dir: &Path, out_dir: &Path, diffs: &[Diff]) -> Result<()> {
+fn generate_consistency_check(
+    summary_dir: &Path,
+    out_dir: &Path,
+    diffs: &[Diff],
+    provenance: &ProvenanceConsistency,
+) -> Result<()> {
     let commit_count: usize = diffs.iter().map(|diff| diff.commits.len()).sum();
 
     // Cross-check the IN-MEMORY truth (diffs, ctx) against the ALREADY-SERIALIZED
@@ -1428,7 +1515,11 @@ fn generate_consistency_check(summary_dir: &Path, out_dir: &Path, diffs: &[Diff]
         verdict_gate: disk.verdict_gate,
         verdict_report: disk.verdict_report,
     };
-    let report = counters.check_consistency();
+    let mut report = counters.check_consistency();
+    // Semantics, not just counters: a pack whose run-level substrate and
+    // per-check substrate disagree cannot be published as consistent, however
+    // well its numbers line up.
+    report.merge_provenance(provenance);
 
     fs::write(
         summary_dir.join("CONSISTENCY_CHECK.json"),
@@ -1743,7 +1834,6 @@ fn generate_heuristics_gate_result(
 
 struct ProvenanceJsonInput<'a> {
     dir: &'a Path,
-    repo: &'a Repository,
     checks: &'a [CheckResult],
     /// Checks that were configured but never executed. They are gates too: a
     /// consumer must be able to tell "deliberately not run, for this reason"
@@ -1756,6 +1846,10 @@ struct ProvenanceJsonInput<'a> {
     resolved_bases: &'a [ResolvedRef],
     worktree_clean: Option<bool>,
     worktree_status_digest: Option<&'a str>,
+    worktree_head_sha: Option<&'a str>,
+    /// Disagreements between the run's substrate and the per-check rows below,
+    /// resolved once for the whole pack (see [`detect_provenance_contradictions`]).
+    contradictions: &'a ProvenanceConsistency,
 }
 
 /// Every baseline the pack's diffs were actually produced from, named.
@@ -1798,12 +1892,11 @@ fn provenance_bases<'a>(
 /// involved, the state of the local working tree at the moment the run started,
 /// and one row per check naming the tree that check actually read.
 ///
-/// Purely additive: no existing pack file changes shape because of it.
+/// Schema 2.0 names operator state explicitly and uses the pre-check capture.
 fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
     use serde_json::json;
     let ProvenanceJsonInput {
         dir,
-        repo,
         checks,
         skipped_checks,
         diffs,
@@ -1811,6 +1904,8 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
         resolved_bases,
         worktree_clean,
         worktree_status_digest,
+        worktree_head_sha,
+        contradictions,
     } = input;
 
     let executed = checks.iter().map(|c| {
@@ -1853,7 +1948,7 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
         .collect();
 
     let provenance = json!({
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "generated_at": chrono::Local::now().to_rfc3339(),
         // Commit whose tree the pack judges.
         "target_sha": resolved_target.commit_id,
@@ -1865,16 +1960,24 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
         // Every baseline, named: a multi-base run produces one patch per base,
         // and a reviewer holding the pack must be able to place each of them.
         "bases": base_rows,
-        // Commit checked out locally. Equal to target_sha for an ordinary local
-        // review; different when a fetched ref is analysed (`--pr`/`--remote`).
-        "head_sha": repo.head_commit_id().ok(),
-        "worktree": {
+        // Operator checkout captured before checks; not the review identity.
+        "worktree_head_sha": worktree_head_sha,
+        "operator_worktree": {
             // Frozen before checks ran and before any artifact was written
             // (R4-19), so tool output cannot flip a clean scan to "dirty".
             "clean": worktree_clean,
             "status_digest": worktree_status_digest,
         },
         "checks": check_rows,
+        // The file's own cross-check: every row above is held against the run
+        // state above it, and a disagreement is named here rather than left for
+        // a reader to spot. Empty means checked and agreed — `comparisons`
+        // says how much was actually comparable, so "nothing to compare" stays
+        // distinguishable from "compared and clean".
+        "consistency": {
+            "comparisons": contradictions.comparisons,
+            "contradictions": contradictions.contradictions,
+        },
     });
 
     fs::write(

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Validate MERGE_GATE.json contract (schema 1.0/2.0/2.1/2.2/2.3)."""
+"""Validate MERGE_GATE.json contract (schema 1.0/2.0/2.1/2.2/2.3/3.0)."""
 
 from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -70,6 +71,24 @@ VALID_MERGE_IMPACTS = {"approve", "review_required", "block"}
 # written these.
 VALID_ANALYSIS_STATUSES = {"complete", "degraded", "incomplete"}
 VALID_MERGE_RECOMMENDATIONS = {"approve", "review_required", "block"}
+# Schema 3.0 names disagreements between the run's substrate and a check's own
+# provenance row. Mirrors `ProvenanceContradiction` in
+# src/artifacts/signal/consistency.rs (`#[serde(rename_all = "kebab-case")]`).
+PROVENANCE_CONTRADICTION_CODE = "PROVENANCE_CONTRADICTION"
+VALID_PROVENANCE_CONTRADICTION_KINDS = {
+    "operator-worktree-state",
+    "check-target-sha",
+    "foreign-substrate",
+}
+PROVENANCE_CONTRADICTION_KEYS = (
+    "code",
+    "kind",
+    "check_id",
+    "field",
+    "run_value",
+    "check_value",
+    "explanation",
+)
 # Schema 2.3 separates strict enforcement from the stable verdict vocabulary.
 # Mirrors `EnforcementDisposition` in src/policy/engine.rs.
 VALID_ENFORCEMENT_DISPOSITIONS = {
@@ -420,9 +439,9 @@ def validate(path: Path) -> list[str]:
 
     if not isinstance(data["schema_version"], str):
         issues.append("schema_version must be a string")
-    elif data["schema_version"] not in ("1.0", "2.0", "2.1", "2.2", "2.3"):
+    elif data["schema_version"] not in ("1.0", "2.0", "2.1", "2.2", "2.3", "3.0"):
         issues.append(
-            "schema_version must be '1.0', '2.0', '2.1', '2.2', or '2.3'"
+            "schema_version must be '1.0', '2.0', '2.1', '2.2', '2.3', or '3.0'"
         )
     require_iso_datetime(data["generated_at"], "generated_at", issues)
     if (
@@ -463,7 +482,116 @@ def validate(path: Path) -> list[str]:
             issues.append("policy.mode must be one of shadow|warn|block")
         if severity not in VALID_SEVERITIES:
             issues.append("policy.default_severity must be one of block|warn|ignore")
-        require_non_empty_string(policy.get("source"), "policy.source", issues)
+        if schema_at_least(data.get("schema_version"), (3, 0)):
+            origin = policy.get("origin")
+            if origin == "builtin-default":
+                if policy.get("source") is not None:
+                    issues.append("policy.source must be null for builtin-default origin")
+            elif origin == "file":
+                require_non_empty_string(policy.get("source"), "policy.source", issues)
+            else:
+                issues.append("policy.origin must be one of builtin-default|file")
+        else:
+            require_non_empty_string(policy.get("source"), "policy.source", issues)
+
+    # Provenance contradictions (3.0+): additive, typed, and deliberately OUTSIDE
+    # `decision` -- a substrate disagreement ranks no verdict axis. It must never
+    # be silent either, so every row is required to appear as a review signal:
+    # one artifact naming a contradiction the other hides is the exact failure
+    # this field exists to prevent.
+    if schema_at_least(data.get("schema_version"), (3, 0)):
+        # The array is REQUIRED from 3.0, empty included: "cross-checked and
+        # agreed" and "never cross-checked" are different results, and a reader
+        # holding only this file must be able to tell them apart. Defaulting a
+        # missing field to [] certified a gate that simply omitted it -- and
+        # omitting it is precisely how a contradiction disappears.
+        if "provenance_contradictions" not in data:
+            issues.append("root: missing key 'provenance_contradictions'")
+            contradictions: Any = []
+        else:
+            contradictions = data["provenance_contradictions"]
+        if not isinstance(contradictions, list):
+            issues.append("provenance_contradictions must be an array")
+            contradictions = []
+        # Attribution: a row names the check whose provenance disagrees, spelled
+        # the way `checks[].id` spells it (both sides call
+        # `check_id_from_name`). A row pointing at a check this gate never
+        # emitted is evidence no reader can follow back to anything.
+        emitted_check_ids = {
+            check["id"]
+            for check in (data["checks"] if isinstance(data.get("checks"), list) else [])
+            if isinstance(check, dict) and isinstance(check.get("id"), str)
+        }
+        # The review signal each valid row obliges, built exactly as
+        # `ProvenanceConsistency::review_caveats` builds it in
+        # src/artifacts/signal/consistency.rs.
+        expected_signals: list[str] = []
+        for index, row in enumerate(contradictions):
+            ctx = f"provenance_contradictions[{index}]"
+            if not isinstance(row, dict):
+                issues.append(f"{ctx} must be an object")
+                continue
+            missing = ensure_keys(row, PROVENANCE_CONTRADICTION_KEYS, ctx)
+            issues.extend(missing)
+            if missing:
+                continue
+            if row["code"] != PROVENANCE_CONTRADICTION_CODE:
+                issues.append(f"{ctx}.code must be {PROVENANCE_CONTRADICTION_CODE}")
+            if row["kind"] not in VALID_PROVENANCE_CONTRADICTION_KINDS:
+                issues.append(
+                    f"{ctx}.kind must be one of "
+                    + "|".join(sorted(VALID_PROVENANCE_CONTRADICTION_KINDS))
+                )
+            for field in PROVENANCE_CONTRADICTION_KEYS[2:]:
+                require_non_empty_string(row[field], f"{ctx}.{field}", issues)
+            if isinstance(row["check_id"], str) and row["check_id"] not in emitted_check_ids:
+                issues.append(
+                    f"{ctx}.check_id must name a check emitted by this gate "
+                    f"(no checks[] entry with id {row['check_id']!r})"
+                )
+            if isinstance(row["code"], str) and isinstance(row["explanation"], str):
+                expected_signals.append(f"{row['code']}: {row['explanation']}")
+        raw_caveats = (
+            data["decision"].get("review_caveats")
+            if isinstance(data.get("decision"), dict)
+            else None
+        )
+        if not isinstance(raw_caveats, list):
+            # Absent or mistyped is only silence about nothing when there is
+            # nothing to be silent about. Counting it as "zero signals" was how
+            # a gate carrying rows and no caveats at all validated clean.
+            if contradictions:
+                issues.append(
+                    "decision.review_caveats must be an array carrying one "
+                    f"{PROVENANCE_CONTRADICTION_CODE} signal per "
+                    f"provenance_contradictions row ({len(contradictions)} rows, "
+                    "no review_caveats array)"
+                )
+        else:
+            observed_signals = [
+                caveat
+                for caveat in raw_caveats
+                if isinstance(caveat, str)
+                and caveat.startswith(PROVENANCE_CONTRADICTION_CODE)
+            ]
+            # Correspondence, not arithmetic: equal counts proved nothing about
+            # WHICH contradictions were signalled, so N rows could be announced
+            # by N copies of one signal, or by N signals naming something else
+            # entirely. Compared as multisets, every row must be spoken for and
+            # nothing may be announced that no row supports.
+            missing_signals = Counter(expected_signals) - Counter(observed_signals)
+            unsupported_signals = Counter(observed_signals) - Counter(expected_signals)
+            for signal, count in sorted(missing_signals.items()):
+                issues.append(
+                    f"decision.review_caveats is missing {count} signal(s) for "
+                    f"provenance_contradictions rows: {signal!r}"
+                )
+            for signal, count in sorted(unsupported_signals.items()):
+                issues.append(
+                    f"decision.review_caveats carries {count} "
+                    f"{PROVENANCE_CONTRADICTION_CODE} signal(s) no "
+                    f"provenance_contradictions row supports: {signal!r}"
+                )
 
     policy_mode = policy.get("mode") if isinstance(policy, dict) else None
     raw_decision = data.get("decision")

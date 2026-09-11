@@ -203,10 +203,19 @@ impl App {
         // resolved. It also OWNS the run's shared target snapshot, so it must
         // outlive artifact generation (step 7), which reads that snapshot.
         let ledger = ledger::TaskLedger::new();
+        let mut check_config = self.config.clone();
+        check_config.pinned_target = Some(target.clone());
+        // Pin the BASE alongside the target. Step 4 already resolved the review
+        // range once; handing checks only the target would let a check that needs
+        // a base range re-read a symbolic base ref that has since advanced (a
+        // merge of this branch into `main` mid-run makes the re-derived
+        // merge-base equal the target), so the scanner would see an empty delta
+        // while the pack diff is non-empty. One captured range, one truth.
+        check_config.pinned_diff_bases = Some(diff_bases.clone());
         let (check_results, skipped_checks) = if self.config.update_mode {
             // In update mode, skip heavy checks UNLESS user explicitly forced them
             // via --with-tests or --with-security (respect user intent over preset)
-            let mut update_config = self.config.clone();
+            let mut update_config = check_config.clone();
             let any_skipped = !self.config.run_tests || !self.config.run_security;
             if !self.config.run_tests {
                 // Only disable if not already force-enabled by --with-tests
@@ -221,7 +230,7 @@ impl App {
             }
             checks::run_all(&update_config, &ledger, &self.governor).await?
         } else {
-            checks::run_all(&self.config, &ledger, &self.governor).await?
+            checks::run_all(&check_config, &ledger, &self.governor).await?
         };
         // A cancel that arrived while nothing was running — a run whose gates all
         // replayed from the cache never builds the dispatcher's `select!` loop at
@@ -265,6 +274,7 @@ impl App {
                 skipped_checks,
                 worktree_clean: worktree.clean,
                 worktree_status_digest: worktree.status_digest.clone(),
+                worktree_head_sha: worktree.head_sha.clone(),
                 governor: &self.governor,
             })
         })?;
@@ -592,6 +602,7 @@ impl App {
                 skipped_checks: vec![],
                 worktree_clean: worktree.clean,
                 worktree_status_digest: worktree.status_digest.clone(),
+                worktree_head_sha: worktree.head_sha.clone(),
                 governor: &self.governor,
             })
         })?;
@@ -1123,6 +1134,7 @@ mod tests {
         config.bases = vec!["main".to_string()];
         config.output_dir = Some(out.path().join("pack"));
         config.run_heuristics = false;
+        config.skip_security = true;
         config.quiet = true;
         config.create_zip = false;
 
@@ -1146,12 +1158,12 @@ mod tests {
         .expect("parse PROVENANCE.json");
 
         assert_eq!(
-            provenance["worktree"]["clean"], false,
+            provenance["operator_worktree"]["clean"], false,
             "the pack must describe the tree this iteration ran on, not the one \
              the watcher started with",
         );
         assert_ne!(
-            provenance["worktree"]["status_digest"].as_str(),
+            provenance["operator_worktree"]["status_digest"].as_str(),
             watcher_start.status_digest.as_deref(),
             "a re-frozen digest must differ from the watcher's start-of-process one",
         );
@@ -1178,6 +1190,7 @@ mod tests {
         config.bases = vec!["main".to_string()];
         config.output_dir = Some(out.join("pack"));
         config.run_heuristics = false;
+        config.skip_security = true;
         config.do_fetch = false;
         config.quiet = true;
         config.create_zip = false;
@@ -1363,11 +1376,10 @@ mod tests {
     /// asked the run to stop was handed an ACCEPT or a BLOCK computed from a
     /// pack the run had kept on building.
     ///
-    /// Which stage catches it here depends on the machine (semgrep is runnable
-    /// wherever the binary is on `PATH`, whatever the flags say), so this pins
-    /// the outcome rather than the seam. The seam the checks stage cannot cover
-    /// is pinned by `a_cancelled_watch_iteration_produces_no_pack` below, which
-    /// runs no checks at all.
+    /// The fixture explicitly opts out of external security scans. This pins
+    /// the cancellation outcome without depending on host-installed scanners;
+    /// `a_cancelled_watch_iteration_produces_no_pack` also checks that a cancelled
+    /// watcher cannot enter another iteration.
     #[tokio::test]
     async fn a_cancelled_run_never_reports_a_verdict() {
         let tmp = tempfile::tempdir().unwrap();

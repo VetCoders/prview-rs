@@ -1,4 +1,4 @@
-//! report.json v2 generator
+//! report.json v3 generator
 //!
 //! Single source of truth for the dashboard and external tooling.
 //! All data the dashboard needs is serialized here; the HTML renderer
@@ -20,8 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::signal::{
-    ArtifactCounters, HOTSPOT_THRESHOLD, compute_risk_heatmap, detect_orphaned_resource_delete,
-    find_per_file_patch, read_disk_artifact_counters,
+    ArtifactCounters, HOTSPOT_THRESHOLD, ProvenanceConsistency, ProvenanceContradiction,
+    compute_risk_heatmap, detect_orphaned_resource_delete, find_per_file_patch,
+    read_disk_artifact_counters,
 };
 
 const GENERATED_PATH_PREFIXES: &[&str] = &[
@@ -55,6 +56,17 @@ pub struct ReportInput<'a> {
     pub run_started_at: &'a str,
     pub heuristics: Option<&'a crate::heuristics::HeuristicsResult>,
     pub regression: Option<&'a crate::regression::RegressionReport>,
+    /// The run's substrate cross-check, resolved ONCE for the whole pack and
+    /// handed to every surface that publishes it (see
+    /// [`super::signal::detect_provenance_contradictions`]).
+    ///
+    /// Passed rather than re-derived here because `report.json` has no access to
+    /// the operator cleanliness frozen before the checks ran; taking the value
+    /// itself is the strongest form of the same guarantee the merge gate gets by
+    /// re-deriving it from identical inputs — `report.json`, `PROVENANCE.json`,
+    /// `MERGE_GATE.json` and `CONSISTENCY_CHECK.json` cannot name different
+    /// contradictions.
+    pub provenance: &'a ProvenanceConsistency,
 }
 
 /// Generate `report.json` in the artifact root directory.
@@ -531,7 +543,7 @@ struct BreakingSection {
     has_breaking: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
-    md_path: &'static str,
+    md_path: Option<&'static str>,
     removed_public_symbols_count: usize,
     signature_changes_count: usize,
     new_env_vars_count: usize,
@@ -613,6 +625,16 @@ struct ConsistencySection {
     checked_fields: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<ConsistencyWarningEntry>,
+    /// How many run/check substrate statements were comparable. Emitted even
+    /// when nothing disagreed, so "checked and agreed" stays distinguishable
+    /// from "nothing could be checked".
+    provenance_comparisons: usize,
+    /// The IDENTICAL rows `00_summary/PROVENANCE.json` publishes as
+    /// `consistency.contradictions` and `00_summary/MERGE_GATE.json` as
+    /// `provenance_contradictions`. Always emitted, empty included: a reader who
+    /// only has `report.json` must be able to see that the substrate was
+    /// cross-checked at all.
+    provenance_contradictions: Vec<ProvenanceContradiction>,
 }
 
 #[derive(Serialize)]
@@ -707,7 +729,9 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         &ctx.blocking_issues,
         review_caveats.clone(),
     );
-    let status = if ctx.allow_merge { "ALLOW" } else { "BLOCK" };
+    // Permission is false for both CONDITIONAL and BLOCK; projecting it back
+    // into a verdict loses the distinction already derived by the gate.
+    let status = ctx.verdict;
     let summary = decision.reason.clone();
 
     let mut reasons: Vec<GateReason> = Vec::new();
@@ -1007,7 +1031,13 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                             .then(|| format!("{} breaking findings", ctx.breaking.len()))
                     })
             }),
-            md_path: "20_quality/BREAKING_CHANGES.md",
+            // A Rust API report can exist without a breaking finding. Link the
+            // emitted artifact, rather than inferring its presence from severity.
+            md_path: input
+                .dir
+                .join("20_quality/BREAKING_CHANGES.md")
+                .is_file()
+                .then_some("20_quality/BREAKING_CHANGES.md"),
             removed_public_symbols_count: removed_symbols
                 + rust_counts.map_or(0, |counts| counts.removed),
             signature_changes_count: signature_changes
@@ -1092,7 +1122,7 @@ fn build_report(input: &ReportInput<'_>) -> Report {
             // from the report (the b1697d4 class). Pairing a value with itself,
             // as before, could never catch a mismatch.
             let disk = read_disk_artifact_counters(input.dir);
-            let consistency = ArtifactCounters {
+            let mut consistency = ArtifactCounters {
                 files_changed_diff: Some(all_files.len()),
                 files_changed_report: None,
                 findings_count_sarif: disk.findings_count_sarif,
@@ -1110,10 +1140,19 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                 verdict_report: Some(ctx.verdict.to_string()),
             }
             .check_consistency();
+            // Semantics, not just counters — and the SAME fold
+            // `CONSISTENCY_CHECK.json` applies. Counter parity cannot see a pack
+            // whose run-level substrate and per-check substrate describe
+            // different trees, so before this, `report.json` could publish
+            // `consistent: true` for the very run `CONSISTENCY_CHECK.json`
+            // called inconsistent: one fact, two values.
+            consistency.merge_provenance(input.provenance);
 
             ConsistencySection {
                 consistent: consistency.consistent,
                 checked_fields: consistency.checked_fields,
+                provenance_comparisons: input.provenance.comparisons,
+                provenance_contradictions: input.provenance.contradictions.clone(),
                 warnings: consistency
                     .warnings
                     .into_iter()
@@ -1171,11 +1210,10 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         .collect();
 
     Report {
-        // 2.0, not 1.1: `quality.coverage.heuristic_ratio` became nullable and
-        // the loctree counters became omittable, so a decoder written against
-        // 1.0 no longer parses every pack. Calling that additive would repeat,
-        // at the schema level, the "0/0 is 100%" lie the change removed.
-        schema_version: "2.0",
+        // 3.0: `quality.breaking_changes.md_path` is nullable and
+        // `gate.status` carries the canonical
+        // PASS/CONDITIONAL/BLOCK verdict. Readers must migrate from 2.0.
+        schema_version: "3.0",
         meta,
         gate,
         checks: check_entries,
@@ -1445,6 +1483,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-09T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1599,6 +1638,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-09T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1716,6 +1756,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-09T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1839,6 +1880,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1978,6 +2020,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics: Some(&heuristics),
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -2039,6 +2082,16 @@ test result: FAILED. 0 passed; 1 failed
         heuristics: Option<&crate::heuristics::HeuristicsResult>,
         run_heuristics: bool,
     ) -> serde_json::Value {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        report_with_artifact_dir(ctx, heuristics, run_heuristics, tmp.path())
+    }
+
+    fn report_with_artifact_dir(
+        ctx: &crate::artifacts::DashboardContext,
+        heuristics: Option<&crate::heuristics::HeuristicsResult>,
+        run_heuristics: bool,
+        dir: &Path,
+    ) -> serde_json::Value {
         use crate::cli::ExecutionMode;
         use crate::config::test_config;
         use crate::git::ResolvedRef;
@@ -2056,9 +2109,8 @@ test result: FAILED. 0 passed; 1 failed
             commit_id: "cafebabe".to_string(),
             is_remote: false,
         }];
-        let tmp = tempfile::tempdir().expect("tempdir");
         let input = ReportInput {
-            dir: tmp.path(),
+            dir,
             config: &config,
             diffs: &[],
             checks: &[],
@@ -2068,6 +2120,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
         serde_json::to_value(build_report(&input)).expect("serialize report")
     }
@@ -2151,6 +2204,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-09-09T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         });
         let report = serde_json::to_value(report).expect("serialize report");
 
@@ -2223,9 +2277,23 @@ test result: FAILED. 0 passed; 1 failed
     }
 
     #[test]
+    fn report_gate_status_preserves_the_canonical_three_state_verdict() {
+        for verdict in ["PASS", "CONDITIONAL", "BLOCK"] {
+            let mut ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+            ctx.verdict = verdict;
+            ctx.allow_merge = verdict == "PASS";
+            let report = skip_as_zero_report(&ctx, None, false);
+            assert_eq!(report["gate"]["status"], verdict);
+            assert_eq!(report["gate"]["status"], report["gate"]["verdict"]);
+            assert_eq!(report["gate"]["allow_merge"], verdict == "PASS");
+        }
+    }
+
+    #[test]
     fn report_schema_version_states_the_nullable_shape() {
         // The unmeasured cut changed `heuristic_ratio` from a plain number to a
-        // nullable one, and made the loctree counters omittable. Both are shape
+        // nullable one, and made the loctree counters omittable. Schema 3.0 also
+        // makes the breaking-report path nullable. These are shape
         // changes a strict 1.0 decoder cannot survive, so leaving the stamp at
         // "1.0" makes report.json misdescribe itself — the same class of lie the
         // cut was fixing one level down. MINOR would promise old decoders keep
@@ -2239,9 +2307,34 @@ test result: FAILED. 0 passed; 1 failed
         );
         assert_eq!(
             json["schema_version"].as_str(),
-            Some("2.0"),
+            Some("3.0"),
             "a nullable field and omittable counters are not an additive change"
         );
+        assert!(json["quality"]["breaking_changes"]["md_path"].is_null());
+    }
+
+    #[test]
+    fn report_links_an_existing_breaking_artifact_without_breaking_findings() {
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("20_quality/BREAKING_CHANGES.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# Breaking Changes\n\nNo breaking changes.\n").unwrap();
+        let json = report_with_artifact_dir(&ctx, None, false, tmp.path());
+        assert_eq!(json["quality"]["breaking_changes"]["has_breaking"], false);
+        assert_eq!(
+            json["quality"]["breaking_changes"]["md_path"],
+            "20_quality/BREAKING_CHANGES.md"
+        );
+    }
+
+    #[test]
+    fn report_does_not_link_a_directory_named_like_the_breaking_artifact() {
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("20_quality/BREAKING_CHANGES.md")).unwrap();
+        let json = report_with_artifact_dir(&ctx, None, false, tmp.path());
+        assert!(json["quality"]["breaking_changes"]["md_path"].is_null());
     }
 
     #[test]
@@ -2422,6 +2515,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -2440,5 +2534,127 @@ test result: FAILED. 0 passed; 1 failed
                 .as_str()
                 .is_some_and(|text| text.contains("paste (unmaintained)"))
         }));
+    }
+    /// report.json must not call a run consistent that CONSISTENCY_CHECK.json
+    /// calls inconsistent. Its counter comparison is narrower than the summary
+    /// checker's, so the substrate contradictions have to be folded in here too
+    /// — from the SAME value PROVENANCE.json and the gate publish.
+    #[test]
+    fn report_consistency_publishes_the_pack_provenance_contradictions() {
+        use crate::artifacts::signal::detect_provenance_contradictions;
+        use crate::checks::{CheckProvenance, TreeState};
+        use crate::config::test_config;
+        use crate::git::ResolvedRef;
+        use std::time::Duration;
+
+        let target_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let checks = vec![CheckResult {
+            name: "Cargo clippy".to_string(),
+            status: CheckStatus::Passed,
+            duration: Duration::from_secs(1),
+            output: String::new(),
+            cached: false,
+            provenance: Some(CheckProvenance {
+                command: "cargo clippy".to_string(),
+                tool_version: None,
+                cwd: "/repo".to_string(),
+                target_sha: Some(target_sha.to_string()),
+                // The run froze the operator tree clean below; this row says the
+                // opposite about that same tree.
+                tree_state: Some(TreeState::LocalDirty),
+                exit_code: Some(0),
+                started_at: "2026-09-11T10:00:00+02:00".to_string(),
+                finished_at: "2026-09-11T10:00:01+02:00".to_string(),
+                hard_fail_signatures: Vec::new(),
+                cache_key: None,
+            }),
+        }];
+        let provenance = detect_provenance_contradictions(
+            crate::artifacts::signal::RunProvenance {
+                target_sha,
+                operator_worktree_clean: Some(true),
+            },
+            &checks,
+        );
+        assert_eq!(
+            provenance.contradictions.len(),
+            1,
+            "fixture must produce exactly one contradiction"
+        );
+
+        let config = test_config();
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let target = ResolvedRef {
+            name: "feature/provenance".to_string(),
+            commit_id: target_sha.to_string(),
+            is_remote: false,
+        };
+        let bases = vec![ResolvedRef {
+            name: "main".to_string(),
+            commit_id: "cafebabe".to_string(),
+            is_remote: false,
+        }];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let input = ReportInput {
+            dir: tmp.path(),
+            config: &config,
+            diffs: &[],
+            checks: &checks,
+            resolved_target: &target,
+            resolved_bases: &bases,
+            ctx: &ctx,
+            run_started_at: "2026-09-11T00:00:00Z",
+            heuristics: None,
+            regression: None,
+            provenance: &provenance,
+        };
+
+        let json = serde_json::to_value(build_report(&input)).expect("serialize report");
+        let consistency = &json["quality"]["consistency"];
+
+        assert_eq!(
+            consistency["consistent"].as_bool(),
+            Some(false),
+            "a contradicted substrate cannot be published as consistent: {consistency}"
+        );
+        assert_eq!(
+            consistency["provenance_contradictions"],
+            serde_json::to_value(&provenance.contradictions).expect("serialize contradictions"),
+            "report.json must carry the pack's rows verbatim, not a summary of them"
+        );
+        assert_eq!(
+            consistency["provenance_comparisons"].as_u64(),
+            Some(provenance.comparisons as u64)
+        );
+        assert!(
+            consistency["warnings"]
+                .as_array()
+                .expect("warnings array")
+                .iter()
+                .any(|warning| warning["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("PROVENANCE_CONTRADICTION"))),
+            "the contradiction is also a consistency warning: {consistency}"
+        );
+    }
+
+    /// The other half of the invariant: a run with nothing to contradict still
+    /// SAYS so, rather than omitting the field and leaving "checked and agreed"
+    /// indistinguishable from "never checked".
+    #[test]
+    fn report_consistency_states_an_empty_provenance_cross_check() {
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let json = skip_as_zero_report(&ctx, None, false);
+        let consistency = &json["quality"]["consistency"];
+
+        assert_eq!(consistency["consistent"].as_bool(), Some(true));
+        assert_eq!(
+            consistency["provenance_contradictions"]
+                .as_array()
+                .expect("contradictions must always be an array")
+                .len(),
+            0
+        );
+        assert_eq!(consistency["provenance_comparisons"].as_u64(), Some(0));
     }
 }

@@ -28,8 +28,28 @@ fn generate_fixture_pack_with_ledger(
         base_sha,
         governor,
         ledger,
-        &[],
+        FixturePackOptions::default(),
     )
+}
+
+/// Rarely-varied, review-shaped inputs to [`generate_fixture_pack_with_ledger_and_diffs`],
+/// grouped so the function stays under clippy's `too_many_arguments` threshold.
+#[derive(Default)]
+struct FixturePackOptions<'a> {
+    diffs: &'a [Diff],
+    worktree_head: FixtureWorktreeHead<'a>,
+}
+
+/// What a fixture pack captured about the operator checkout. The default is the
+/// local-review shape — the operator checkout IS the reviewed target — because a
+/// pack that can neither name its checkout nor show a materialised reviewed tree
+/// is refused at publication.
+#[derive(Default, Clone, Copy)]
+enum FixtureWorktreeHead<'a> {
+    #[default]
+    IsTarget,
+    Sha(&'a str),
+    Unknown,
 }
 
 fn generate_fixture_pack_with_ledger_and_diffs(
@@ -39,7 +59,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
     base_sha: &str,
     governor: &crate::governor::ResourceGovernor,
     ledger: &crate::ledger::TaskLedger,
-    diffs: &[Diff],
+    options: FixturePackOptions<'_>,
 ) -> Result<PathBuf> {
     let mut config = test_config_builder()
         .repo_root(repo_root)
@@ -74,7 +94,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
     generate(GenerateInput {
         config: &config,
         ledger,
-        diffs,
+        diffs: options.diffs,
         checks: &[],
         heuristics: None,
         resolved_target: &resolved_target,
@@ -83,6 +103,11 @@ fn generate_fixture_pack_with_ledger_and_diffs(
         skipped_checks: Vec::new(),
         worktree_clean: Some(true),
         worktree_status_digest: None,
+        worktree_head_sha: match options.worktree_head {
+            FixtureWorktreeHead::IsTarget => Some(target_sha.to_owned()),
+            FixtureWorktreeHead::Sha(sha) => Some(sha.to_owned()),
+            FixtureWorktreeHead::Unknown => None,
+        },
         governor,
     })
 }
@@ -96,6 +121,180 @@ fn assert_no_success_surfaces(output_dir: &Path, seam: ArtifactGenerationSeam) {
             path.display(),
             seam.label()
         );
+    }
+}
+
+#[test]
+fn snapshot_final_observation_keeps_creation_target_after_branch_moves() {
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    let ledger = TaskLedger::new();
+    ledger.set_shared_snapshot(Some(snapshot));
+    run_git_fixture(repo.path(), &["update-ref", "refs/heads/feature", &base]);
+    ledger.observe_snapshot("after-check", Some("fixture"));
+    let final_observation = ledger.current_snapshot_observation().unwrap();
+    assert_eq!(final_observation.expected_target_sha, target);
+    assert_eq!(
+        final_observation.observed_head_sha.as_deref(),
+        Some(target.as_str())
+    );
+    assert!(!final_observation.requires_review());
+    assert!(ledger.snapshot_observations().is_empty());
+}
+
+#[test]
+fn snapshot_target_mismatch_aborts_before_pack_publication() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    let ledger = TaskLedger::new();
+    ledger.set_shared_snapshot(Some(snapshot));
+    let output = publication_home.path().join("mismatched-pack");
+    let governor = crate::governor::ResourceGovernor::new();
+    let error =
+        generate_fixture_pack_with_ledger(repo.path(), &output, &base, &base, &governor, &ledger)
+            .expect_err("a snapshot of another target must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot target mismatch"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&base) && message.contains(&target),
+        "{message}"
+    );
+    assert!(
+        !output.exists(),
+        "mismatched identities must fail before output allocation"
+    );
+}
+
+/// An empty ledger is not evidence of a clean review: if the reviewed target is
+/// not the operator's own checkout, the dispatcher owed this run a materialised
+/// tree. Publishing anyway would describe the target with the operator's files.
+#[test]
+fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let governor = crate::governor::ResourceGovernor::new();
+    let unverified = publication_home.path().join("unverified-pack");
+    let error = generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &unverified,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        FixturePackOptions {
+            worktree_head: FixtureWorktreeHead::Sha(&base),
+            ..Default::default()
+        },
+    )
+    .expect_err("an unmaterialised reviewed tree must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot missing for an off-HEAD review"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&target) && message.contains(&base),
+        "{message}"
+    );
+    assert!(
+        !unverified.exists(),
+        "an unobserved reviewed tree must fail before output allocation"
+    );
+
+    // An unknown operator checkout is not permission either. `--quick`/`--watch`
+    // publish with an empty ledger, and a HEAD that moved during capture leaves
+    // the identity unknown by design; unknown must fail the same way a mismatch
+    // does, never fall through to the local files.
+    let unknown = publication_home.path().join("unknown-head-pack");
+    let error = generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &unknown,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        FixturePackOptions {
+            worktree_head: FixtureWorktreeHead::Unknown,
+            ..Default::default()
+        },
+    )
+    .expect_err("an unknown operator checkout must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot missing for a review with an unknown operator checkout"),
+        "{message}"
+    );
+    assert!(message.contains(&target), "{message}");
+    assert!(
+        !unknown.exists(),
+        "an unknown operator checkout must fail before output allocation"
+    );
+
+    // The local review keeps its snapshot-free path: the repo root IS the target.
+    let local = publication_home.path().join("local-pack");
+    generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &local,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        FixturePackOptions {
+            worktree_head: FixtureWorktreeHead::Sha(&target),
+            ..Default::default()
+        },
+    )
+    .expect("a review of the operator checkout needs no snapshot");
+}
+
+#[test]
+fn snapshot_tracked_changes_are_preserved_as_review_evidence() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    fs::write(
+        snapshot.worktree_path.join("own.rs"),
+        "pub fn own() -> u8 { 9 }\n",
+    )
+    .unwrap();
+    let ledger = crate::ledger::TaskLedger::new();
+    ledger.set_shared_snapshot(Some(snapshot));
+    let output = tempfile::tempdir().unwrap();
+    let pack = output.path().join("pack");
+    let governor = crate::governor::ResourceGovernor::new();
+    generate_fixture_pack_with_ledger(repo.path(), &pack, &target, &base, &governor, &ledger)
+        .unwrap();
+
+    let evidence = pack.join("20_quality/SNAPSHOT_INTEGRITY.json");
+    assert!(
+        evidence.is_file(),
+        "tracked changes in the shared snapshot need durable evidence"
+    );
+    let evidence: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(evidence).unwrap()).unwrap();
+    assert_eq!(evidence["expected_target_sha"], target);
+    assert_eq!(evidence["status"], "modified");
+    assert_eq!(evidence["changed_paths"][0], "own.rs");
+    let gate: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(pack.join("00_summary/MERGE_GATE.json")).unwrap())
+            .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(pack.join("report.json")).unwrap()).unwrap();
+    for caveats in [
+        &gate["decision"]["review_caveats"],
+        &report["gate"]["review_caveats"],
+    ] {
+        assert!(caveats.as_array().unwrap().iter().any(|c| {
+            c.as_str()
+                .is_some_and(|s| s.contains("Snapshot integrity") && s.contains("own.rs"))
+        }));
     }
 }
 
@@ -1164,6 +1363,7 @@ macro_rules! generate_merge_gate_test {
             resolved_target: $resolved_target,
             resolved_bases: $resolved_bases,
             clean_comparison: CleanComparison::for_test(true, true),
+            snapshot_integrity: None,
         })
     };
 }
@@ -1299,6 +1499,7 @@ async fn artifact_pipeline_diffs_from_merge_base_when_base_advanced() {
         .build();
     config.run_bundle = false;
     config.run_security = false;
+    config.skip_security = true;
     config.run_heuristics = false;
     config.create_dashboard = false;
     config.quiet = true;
@@ -3525,8 +3726,8 @@ fn merge_gate_names_the_origin_of_every_quality_failure_entry() {
     );
     assert_eq!(
         crate::gate::MERGE_GATE_SCHEMA_VERSION,
-        "2.3",
-        "typed enforcement disposition and its proof bump the MINOR after origin"
+        "3.0",
+        "nullable policy source changes the MAJOR while retaining typed enforcement proof"
     );
 }
 
@@ -5204,7 +5405,10 @@ fn static_tauri_commands_follow_the_shared_reviewed_tree() {
         &base_sha,
         &crate::governor::ResourceGovernor::new(),
         &ledger,
-        &diffs,
+        FixturePackOptions {
+            diffs: &diffs,
+            ..Default::default()
+        },
     )
     .expect("reviewed-tree pack");
 
@@ -6270,7 +6474,7 @@ fn review_summary_includes_gate_and_checks() {
     assert!(summary.contains("## Review"));
     assert!(summary.contains("Looks good overall"));
     assert!(summary.contains("## Available Artifacts"));
-    assert!(summary.contains("## Available Artifacts"));
+    assert!(!summary.contains("## Artifact Map"));
     assert!(summary.contains("PATTERN_SCAN.json"));
     assert!(summary.contains("DEPS_DELTA.json"));
 }
@@ -6285,7 +6489,7 @@ fn review_summary_handles_missing_files() {
 
     let summary = fs::read_to_string(out.join("REVIEW_SUMMARY.md")).unwrap();
     assert!(summary.contains("# PR Review Summary"));
-    assert!(summary.contains("## Available Artifacts"));
+    assert!(!summary.contains("## Available Artifacts"));
     // Should NOT have Gate/Review/Artifact Map sections
     assert!(
         !summary.contains("## Gate Decision"),
@@ -6295,7 +6499,7 @@ fn review_summary_handles_missing_files() {
         !summary.contains("## Review"),
         "No review section when PR_REVIEW.md is missing"
     );
-    assert!(summary.contains("## Artifact Map"));
+    assert!(!summary.contains("## Artifact Map"));
 }
 
 #[test]
@@ -6320,7 +6524,30 @@ fn review_summary_partial_sources_gate_only() {
         !summary.contains("## Review"),
         "No review section when PR_REVIEW.md is missing"
     );
-    assert!(summary.contains("## Artifact Map"));
+    assert!(!summary.contains("## Artifact Map"));
+}
+
+#[test]
+fn review_summary_preserves_each_available_artifact() {
+    let artifacts = [
+        "30_context/PATTERN_SCAN.json",
+        "30_context/DEPS_DELTA.json",
+        "30_context/cargo-sbom.txt",
+        "30_context/npm-sbom.txt",
+        "30_context/INLINE_FINDINGS.sarif",
+    ];
+    for present in artifacts {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(tmp.path().join("30_context")).unwrap();
+        fs::write(tmp.path().join(present), "fixture").unwrap();
+        generate_review_summary(tmp.path()).unwrap();
+        let summary = fs::read_to_string(tmp.path().join("REVIEW_SUMMARY.md")).unwrap();
+        assert!(!summary.contains("## Artifact Map"));
+        assert_eq!(summary.matches("## Available Artifacts").count(), 1);
+        for artifact in artifacts {
+            assert_eq!(summary.contains(artifact), artifact == present);
+        }
+    }
 }
 
 #[test]
@@ -6780,8 +7007,17 @@ fn write_provenance_fixture_with_skips(
     skipped_checks: &[crate::checks::SkippedCheck],
     diffs: &[Diff],
 ) -> serde_json::Value {
-    let repo = Repository::open(repo_root).expect("open repo");
     let worktree = capture_worktree_provenance(repo_root);
+    write_provenance_fixture_with_capture(out, checks, skipped_checks, diffs, &worktree)
+}
+
+fn write_provenance_fixture_with_capture(
+    out: &Path,
+    checks: &[CheckResult],
+    skipped_checks: &[crate::checks::SkippedCheck],
+    diffs: &[Diff],
+    worktree: &WorktreeProvenance,
+) -> serde_json::Value {
     let resolved_target = ResolvedRef {
         name: "feature/provenance".to_string(),
         commit_id: "abc1234abc1234abc1234abc1234abc1234ab".to_string(),
@@ -6793,9 +7029,18 @@ fn write_provenance_fixture_with_skips(
         is_remote: true,
     }];
 
+    // The fixture runs the real detector, so a contradiction planted in a
+    // check row reaches PROVENANCE.json exactly as it would in a live run.
+    let contradictions = detect_provenance_contradictions(
+        RunProvenance {
+            target_sha: &resolved_target.commit_id,
+            operator_worktree_clean: worktree.clean,
+        },
+        checks,
+    );
+
     generate_provenance_json(ProvenanceJsonInput {
         dir: out,
-        repo: &repo,
         checks,
         skipped_checks,
         diffs,
@@ -6803,6 +7048,8 @@ fn write_provenance_fixture_with_skips(
         resolved_bases: &resolved_bases,
         worktree_clean: worktree.clean,
         worktree_status_digest: worktree.status_digest.as_deref(),
+        worktree_head_sha: worktree.head_sha.as_deref(),
+        contradictions: &contradictions,
     })
     .expect("generate_provenance_json");
 
@@ -6829,13 +7076,15 @@ fn provenance_json_records_pack_level_substrate() {
 
     let json = write_provenance_fixture(repo_tmp.path(), out.path(), &checks);
 
-    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["schema_version"], "2.0");
     assert_eq!(json["target_sha"], "abc1234abc1234abc1234abc1234abc1234ab");
     assert_eq!(json["base_sha"], "def5678def5678def5678def5678def5678de");
-    assert_eq!(json["head_sha"], head);
-    assert_eq!(json["worktree"]["clean"], true);
+    assert_eq!(json["worktree_head_sha"], head);
+    assert!(json.get("head_sha").is_none());
+    assert!(json.get("worktree").is_none());
+    assert_eq!(json["operator_worktree"]["clean"], true);
     assert!(
-        json["worktree"]["status_digest"]
+        json["operator_worktree"]["status_digest"]
             .as_str()
             .expect("digest")
             .starts_with("sha256:"),
@@ -6863,6 +7112,85 @@ fn provenance_json_records_pack_level_substrate() {
     let heuristics = &rows[2];
     assert!(heuristics["cwd"].is_null());
     assert!(heuristics["tree_state"].is_null());
+
+    // Rows that agree still record that they were compared: "checked and
+    // consistent" must not read like "nothing was checked".
+    assert_eq!(
+        json["consistency"]["contradictions"]
+            .as_array()
+            .expect("contradictions array")
+            .len(),
+        0
+    );
+    assert_eq!(json["consistency"]["comparisons"], 1);
+}
+
+/// PROVENANCE.json states the substrate twice — once for the run, once per
+/// check. When the two disagree the file must SAY so; before this the reader
+/// was left to notice that `operator_worktree.clean` and a `local-dirty` row
+/// described the same tree.
+#[test]
+fn provenance_json_names_a_substrate_contradiction() {
+    let (repo_tmp, _head) = provenance_fixture_repo();
+    let out = tempfile::tempdir().expect("out tempdir");
+
+    let mut dirty_local = snapshot_provenance("abc1234");
+    dirty_local.cwd = repo_tmp.path().display().to_string();
+    dirty_local.tree_state = Some(crate::checks::TreeState::LocalDirty);
+    let checks = [provenance_check("Cargo check", false, Some(dirty_local))];
+
+    let json = write_provenance_fixture(repo_tmp.path(), out.path(), &checks);
+
+    assert_eq!(json["operator_worktree"]["clean"], true);
+    let contradictions = json["consistency"]["contradictions"]
+        .as_array()
+        .expect("contradictions array");
+    assert_eq!(contradictions.len(), 1);
+    let row = &contradictions[0];
+    assert_eq!(row["code"], "PROVENANCE_CONTRADICTION");
+    assert_eq!(row["kind"], "operator-worktree-state");
+    assert_eq!(row["check_id"], check_id_from_name("Cargo check"));
+    assert_eq!(row["field"], "operator_worktree.clean");
+    assert_eq!(row["run_value"], "clean");
+    assert_eq!(row["check_value"], "local-dirty");
+    assert!(
+        row["explanation"]
+            .as_str()
+            .expect("explanation")
+            .contains("two different states"),
+        "the row must explain the disagreement in words: {row}"
+    );
+}
+
+#[test]
+fn provenance_json_keeps_captured_operator_head_after_checkout_moves() {
+    let (repo_tmp, before) = provenance_fixture_repo();
+    let captured = capture_worktree_provenance(repo_tmp.path());
+    let after = write_commit_fixture(repo_tmp.path(), "later.rs", "pub fn later() {}\n");
+    assert_ne!(before, after);
+
+    let out = tempfile::tempdir().expect("out tempdir");
+    let json = write_provenance_fixture_with_capture(out.path(), &[], &[], &[], &captured);
+    assert_eq!(json["worktree_head_sha"], before);
+    assert_ne!(json["worktree_head_sha"], after);
+    assert_eq!(json["operator_worktree"]["clean"], true);
+    assert_eq!(json["schema_version"], "2.0");
+}
+
+#[test]
+fn provenance_json_keeps_unknown_operator_state_null() {
+    let out = tempfile::tempdir().expect("out tempdir");
+    let json = write_provenance_fixture_with_capture(
+        out.path(),
+        &[],
+        &[],
+        &[],
+        &WorktreeProvenance::default(),
+    );
+    assert!(json["worktree_head_sha"].is_null());
+    assert!(json["operator_worktree"]["clean"].is_null());
+    assert!(json["operator_worktree"]["status_digest"].is_null());
+    assert!(json["target_sha"].is_string());
 }
 
 #[test]
@@ -7003,17 +7331,17 @@ fn provenance_json_worktree_reflects_dirty_tree() {
     let out = tempfile::tempdir().expect("out tempdir");
 
     let clean = write_provenance_fixture(repo_tmp.path(), out.path(), &[]);
-    assert_eq!(clean["worktree"]["clean"], true);
+    assert_eq!(clean["operator_worktree"]["clean"], true);
 
     fs::write(repo_tmp.path().join("uncommitted.rs"), "pub fn oops() {}\n").expect("dirty file");
 
     let dirty = write_provenance_fixture(repo_tmp.path(), out.path(), &[]);
     assert_eq!(
-        dirty["worktree"]["clean"], false,
+        dirty["operator_worktree"]["clean"], false,
         "an untracked file makes the tree dirty"
     );
     assert_ne!(
-        dirty["worktree"]["status_digest"], clean["worktree"]["status_digest"],
+        dirty["operator_worktree"]["status_digest"], clean["operator_worktree"]["status_digest"],
         "the digest must fingerprint WHAT is dirty, not just that something is"
     );
 }
@@ -7179,6 +7507,8 @@ fn informational_notes_keep_current_and_historical_counts_comparable() {
             diffs: &[],
             ownership_map: Vec::new(),
             clean_comparison: CleanComparison::for_test(true, true),
+            snapshot_integrity: None,
+            provenance: &ProvenanceConsistency::default(),
         })
     };
 
@@ -7199,6 +7529,7 @@ fn informational_notes_keep_current_and_historical_counts_comparable() {
         run_started_at: "2026-01-01T00:00:00Z",
         heuristics: None,
         regression: None,
+        provenance: &ProvenanceConsistency::default(),
     })
     .expect("previous report.json");
 
@@ -7245,5 +7576,145 @@ fn informational_notes_keep_current_and_historical_counts_comparable() {
             .expect("previous run delta resolved through the latest symlink");
         assert_eq!(previous.findings_before, 0);
         assert_eq!(current_ctx.findings.len(), previous.findings_before);
+    }
+}
+
+#[test]
+fn breaking_markdown_write_failure_is_not_reported_as_success() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("BREAKING_CHANGES.md")).unwrap();
+    let finding = signal::BreakingFinding {
+        file: "api.ts".to_string(),
+        kind: signal::BreakingKind::RemovedSymbol {
+            symbol_type: "function".to_string(),
+        },
+        line: "export function removed() {}".to_string(),
+        risk_level: signal::BreakingRisk::High,
+    };
+    assert!(signal::write_breaking_changes_with_api(dir.path(), None, &[finding]).is_err());
+}
+
+#[test]
+fn snapshot_integrity_gate_preserves_check_results_and_dashboard_parity() {
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    let clean = signal::SnapshotIntegrity::observe(&snapshot.worktree_path, repo.path(), &target);
+    fs::write(
+        snapshot.worktree_path.join("own.rs"),
+        "pub fn own() -> u8 { 7 }\n",
+    )
+    .unwrap();
+    let changed = signal::SnapshotIntegrity::observe(&snapshot.worktree_path, repo.path(), &target);
+    let policy = PolicyConfig {
+        mode: crate::policy::PolicyMode::Block,
+        default_severity: crate::policy::PolicySeverity::Ignore,
+        checks: std::collections::HashMap::from([(
+            "cargo_test".to_owned(),
+            crate::policy::PolicySeverity::Block,
+        )]),
+        ..PolicyConfig::default()
+    };
+    let config = test_config_builder()
+        .repo_root(repo.path())
+        .profile(test_generic_profile())
+        .policy(policy)
+        .build();
+    let target_ref = ResolvedRef {
+        name: "feature".to_owned(),
+        commit_id: target,
+        is_remote: false,
+    };
+    let bases = [ResolvedRef {
+        name: "main".to_owned(),
+        commit_id: base,
+        is_remote: false,
+    }];
+    let inline = InlineFindingsSummary {
+        status: "passed".to_owned(),
+        findings_count: 0,
+        dashboard_findings: Vec::new(),
+    };
+    for (integrity, raw_status, verdict) in [
+        (&clean, CheckStatus::Passed, "PASS"),
+        (&changed, CheckStatus::Passed, "CONDITIONAL"),
+        (&changed, CheckStatus::Failed, "BLOCK"),
+    ] {
+        let output = tempfile::tempdir().unwrap();
+        let checks = [CheckResult {
+            name: "Cargo test".to_owned(),
+            status: raw_status,
+            duration: Duration::ZERO,
+            output: "real result preserved".to_owned(),
+            cached: false,
+            provenance: None,
+        }];
+        let coverage = CoverageDelta {
+            total_source: 0,
+            covered_count: 0,
+            pct: None,
+            uncovered: Vec::new(),
+            covered: Vec::new(),
+            non_code_count: 0,
+            ghost_tests: Vec::new(),
+        };
+        let ledger = crate::ledger::TaskLedger::new();
+        generate_merge_gate(MergeGateInput {
+            dir: output.path(),
+            config: &config,
+            ledger: &ledger,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &coverage,
+            diffs: &[],
+            skipped_checks: &[],
+            resolved_target: &target_ref,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(false, true),
+            snapshot_integrity: Some(integrity),
+        })
+        .unwrap();
+        let dashboard = build_dashboard_context(DashboardContextInput {
+            config: &config,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: Vec::new(),
+            rust_api_delta: None,
+            coverage,
+            diff_dir: output.path(),
+            skipped_checks: Vec::new(),
+            out_dir: output.path(),
+            diffs: &[],
+            ownership_map: Vec::new(),
+            clean_comparison: CleanComparison::for_test(false, true),
+            snapshot_integrity: Some(integrity),
+            provenance: &ProvenanceConsistency::default(),
+        });
+        let gate: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output.path().join("MERGE_GATE.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gate["decision"]["verdict"], verdict);
+        assert_eq!(dashboard.verdict, verdict);
+        assert_eq!(gate["checks"][0]["status"], raw_status.as_str());
+        assert_eq!(checks[0].status, raw_status);
+        let gate_caveats = gate["decision"]["review_caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .filter(|c| c.starts_with("Snapshot integrity"))
+            .collect::<Vec<_>>();
+        let dashboard_caveats = dashboard
+            .review_caveats
+            .iter()
+            .filter(|c| c.starts_with("Snapshot integrity"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(gate_caveats, dashboard_caveats);
+        assert_eq!(gate_caveats.len(), usize::from(integrity.requires_review()));
     }
 }

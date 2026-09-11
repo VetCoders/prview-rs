@@ -11,26 +11,26 @@ use std::path::Path;
 pub const GATE_EXECUTION_ERROR_EXIT_CODE: i32 = 3;
 
 /// `schema_version` this build stamps into `MERGE_GATE.json`.
-pub const MERGE_GATE_SCHEMA_VERSION: &str = "2.3";
+pub const MERGE_GATE_SCHEMA_VERSION: &str = "3.0";
 
 /// `MERGE_GATE.json` schemas this build has actually seen, as `(MAJOR, MINOR)`.
 ///
 /// This is the SAME set `tools/validate_merge_gate.py` accepts verbatim
-/// (`1.0` / `2.0` / `2.1` / `2.2` / `2.3`), so "readable by the CLI/MCP" and "valid per the
+/// (`1.0` / `2.0` / `2.1` / `2.2` / `2.3` / `3.0`), so "readable by the CLI/MCP" and "valid per the
 /// contract validator" cannot drift apart for a version in the set. The reader
 /// is deliberately broader in exactly two documented directions — an absent
 /// field and a newer MINOR of a known MAJOR — and both are announced rather
 /// than silent.
-const MERGE_GATE_KNOWN_SCHEMAS: &[(u32, u32)] = &[(1, 0), (2, 0), (2, 1), (2, 2), (2, 3)];
+const MERGE_GATE_KNOWN_SCHEMAS: &[(u32, u32)] = &[(1, 0), (2, 0), (2, 1), (2, 2), (2, 3), (3, 0)];
 
 /// Schema 2.3 is the first version that can prove a `CONDITIONAL` is only a
-/// warning. Forward-compatible 2.x packs inherit that requirement; older packs
+/// warning. Schema 3.x and forward-compatible 2.x packs inherit that requirement; older packs
 /// stay readable but cannot claim the strict warnings-only exception.
 pub(crate) fn schema_requires_enforcement_disposition(field: Option<&serde_json::Value>) -> bool {
     field
         .and_then(serde_json::Value::as_str)
         .and_then(parse_major_minor)
-        .is_some_and(|(major, minor)| major == 2 && minor >= 3)
+        .is_some_and(|(major, minor)| (major == 2 && minor >= 3) || major == 3)
 }
 
 /// Read the additive 2.3 disposition without treating absence in an older pack
@@ -1611,10 +1611,26 @@ mod tests {
     #[test]
     fn schema_check_accepts_absent_and_known_versions_silently() {
         assert_eq!(check_merge_gate_schema(None).unwrap(), None);
+        assert_eq!(check_merge_gate_schema(Some("3.0")).unwrap(), None);
+        assert_eq!(check_merge_gate_schema(Some("2.3")).unwrap(), None);
         assert_eq!(check_merge_gate_schema(Some("2.2")).unwrap(), None);
         assert_eq!(check_merge_gate_schema(Some("2.1")).unwrap(), None);
         assert_eq!(check_merge_gate_schema(Some("2.0")).unwrap(), None);
         assert_eq!(check_merge_gate_schema(Some("1.0")).unwrap(), None);
+    }
+
+    #[test]
+    fn schema_three_retains_typed_enforcement_requirements() {
+        for version in ["2.3", "2.9", "3.0", "3.7"] {
+            assert!(schema_requires_enforcement_disposition(Some(
+                &serde_json::json!(version)
+            )));
+        }
+        for version in ["1.0", "2.2", "4.0"] {
+            assert!(!schema_requires_enforcement_disposition(Some(
+                &serde_json::json!(version)
+            )));
+        }
     }
 
     #[test]
@@ -1671,7 +1687,7 @@ mod tests {
 
     #[test]
     fn schema_check_fails_loud_on_unknown_major() {
-        let err = check_merge_gate_schema(Some("3.0")).expect_err("unknown major must fail loud");
+        let err = check_merge_gate_schema(Some("4.0")).expect_err("unknown major must fail loud");
         assert!(err.to_string().contains("unsupported"), "{err}");
         assert!(
             check_merge_gate_schema(Some("not-a-version")).is_err(),
