@@ -43,6 +43,12 @@ The `prview` tool can analyze repositories that use any base branch
 (`develop`, `main`, `master`, etc.); by default it resolves the first of
 `develop`, `main`, `master` that exists.
 
+When structural heuristics use target/base snapshots, Loctree reads the selected
+Git archives without attaching local `node_modules`. Installing a dependency
+in the operator's checkout therefore does not change import resolution in those
+snapshots. Dependency files committed to the reviewed revision remain visible;
+language checks have their own dependency handling and provenance.
+
 ### Quick mode
 
 ```bash

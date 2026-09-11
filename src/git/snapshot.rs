@@ -102,17 +102,6 @@ impl super::Repository {
             );
         }
 
-        // Optionally symlink node_modules from the working tree
-        #[cfg(unix)]
-        {
-            let nm = self.path.join("node_modules");
-            if nm.exists()
-                && let Err(e) = std::os::unix::fs::symlink(&nm, dest.join("node_modules"))
-            {
-                eprintln!("[prview] warning: failed to symlink node_modules into snapshot: {e}");
-            }
-        }
-
         Ok(AnalysisSnapshot {
             path: dest.to_path_buf(),
             sha: sha.to_string(),
@@ -209,6 +198,10 @@ mod tests {
             .to_string();
         assert_eq!(sha.len(), 40, "SHA should be 40 hex chars");
 
+        let local_dependency = repo_path.join("node_modules/local-only.js");
+        std::fs::create_dir_all(local_dependency.parent().unwrap()).unwrap();
+        std::fs::write(&local_dependency, "export const local = true;\n").unwrap();
+
         // Open with our Repository wrapper and create a snapshot
         let repo = super::super::Repository::open(&repo_path).expect("open repo");
         let snap = repo.create_snapshot(&sha).expect("create_snapshot");
@@ -222,6 +215,35 @@ mod tests {
         let content = std::fs::read_to_string(snap.path.join("hello.txt")).unwrap();
         assert_eq!(content, "hello world\n");
         assert_eq!(snap.sha, sha);
+        assert!(
+            !snap.path.join("node_modules").exists(),
+            "analysis snapshots must not borrow dependencies absent from the reviewed revision"
+        );
+
+        // A dependency actually committed to the reviewed tree is source,
+        // regardless of its directory name, and must still be extracted.
+        let add = git_cmd()
+            .args(["add", "-f", "node_modules/local-only.js"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "failed to track dependency fixture: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let commit = git_cmd()
+            .args(["commit", "-m", "track dependency fixture"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(commit.status.success());
+        let committed = repo.inner.head().unwrap().peel_to_commit().unwrap();
+        let tracked = repo.create_snapshot(&committed.id().to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tracked.path.join("node_modules/local-only.js")).unwrap(),
+            "export const local = true;\n"
+        );
 
         // Capture path before drop
         let snap_path = snap.path.clone();
