@@ -84,6 +84,12 @@ Every element of `checks` is one policy evaluation record:
 | `evidence` | string | `20_quality/<artifact_id>.result.json` for an executed check; otherwise the reason text or `"skipped — no artifact generated"` |
 | `log` | string \| null | `20_quality/<artifact_id>.log` for an executed check, else `null` |
 
+Semgrep disabled by `--skip-security` uses the shared `security disabled` mode
+reason, with `execution_state: skipped` and `outcome: skipped`. At `block`
+severity its policy conclusion is `advisory`, confidence is `incomplete`, and
+merge impact is `review_required`; `blocking` is false. An unavailable required
+scanner without an explicit opt-out retains its blocking policy outcome.
+
 Skipped or unavailable checks carry no executed `CheckResult`, so `duration_secs`
 is `0.0`, `cached` is `null`, `log` is `null`, and `evidence` degrades to a
 non-empty placeholder. These are contract-valid placeholders, never `null`
@@ -846,3 +852,51 @@ Whether a check's `FAIL` blocks the merge depends on its policy severity:
 - `shadow`: never blocks.
 - `warn`: blocks only `FAIL + block`.
 - `block`: blocks `FAIL + (block | warn)`.
+
+## Shared snapshot integrity signal
+
+When the ledger-owned review snapshot has tracked/index changes against the
+original target, a changed HEAD, or an unknown integrity observation, the decision
+requires review regardless of an otherwise passing Cargo result. The emitter
+raises analysis to at least `degraded`, merge recommendation to at least
+`review_required`, and enforcement disposition to at least `review_required`; it
+never lowers an existing BLOCK or rewrites a check status, exit code or quality
+failure. `decision.review_caveats` names `20_quality/SNAPSHOT_INTEGRITY.md`, whose
+JSON sibling records the complete tracked-path list and source identity. This
+uses the existing decision fields; no gate schema migration is introduced.
+
+Clean shared snapshots and local runs add no signal. Newly untracked files
+(including a generated Cargo.lock) are excluded; modifications to tracked files
+(including a tracked Cargo.lock) and changes committed inside the snapshot are
+included. The evidence retains non-clean observations before/after live checks plus
+the final observation before context tools, so a later restoration does not erase
+an observed change. The human caveat retains an observed HEAD change even when
+HEAD is restored and the changed-path list is empty. Boundary check names do not
+identify the writer. Changes
+restored between observations are not guaranteed to be detected. Results that
+overlap non-clean observations are not written to cache; raw results are preserved.
+Check-boundary comparisons are awaited blocking-worker jobs; worker failure is
+retained as `unknown`, not treated as a clean observation or cache permission.
+
+Checks pin the whole review range — the commit resolved for the diff and the
+merge-base commits the diff was computed from — before dispatch; moving or
+deleting the configured refs cannot redirect snapshot planning to the operator
+checkout, nor re-derive a base range that a moved base branch would collapse onto
+the target.
+Pinned SHAs are looked up as exact commit objects, including when a symbolic
+branch has the same hexadecimal name. Semgrep's planner also rejects unavailable
+pinned repositories or commits, and refuses to plan a pinned run that carries no
+captured base; that refusal is reported as unavailable evidence,
+never as one of the declared mode skips, so a `block` policy still blocks. An unavailable pinned commit is a planning error, not permission to publish a
+local-tree pack. Every observation uses the snapshot's immutable creation SHA. If that SHA differs
+from the resolved target used for the diff, artifact generation fails before
+allocating the output directory. No gate or successful pack is published for
+mixed review identities; rerun against a stable target. A later commit made
+inside the snapshot remains an integrity signal, not a creation-target mismatch.
+A run that reviews a commit other than the captured operator `HEAD` and holds no
+shared snapshot at all fails the same way, before allocating the output
+directory: a missing observation is never permission to publish. A run that holds
+no shared snapshot and could not capture the operator checkout at all — an unborn
+`HEAD`, or a checkout that moved while provenance was being read, which the
+capture discards rather than certify — fails there too: an unknown checkout
+identity is not a known-matching one.

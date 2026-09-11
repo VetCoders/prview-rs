@@ -207,6 +207,7 @@ step.
 | `dashboard.html` | Visual summary of the analysis |
 | `00_summary/MERGE_GATE.json` | Pass/fail gate for automation |
 | `00_summary/PROVENANCE.json` | Schema 2.0: reviewed commits, separate operator checkout state, the tree each check scanned, and any `PROVENANCE_CONTRADICTION` between them |
+| `20_quality/SNAPSHOT_INTEGRITY.json/.md` | Tracked changes or unverifiable state in the shared review snapshot; requires review (optional) |
 | `20_quality/PUBLIC_API_DIFF.json` | Additive API contract: compatibility rows plus lossless repo-backed Rust delta |
 | `20_quality/BREAKING_CHANGES.json` | Lossless repo-backed Rust breaking/API delta (optional) |
 | `20_quality/BREAKING_CHANGES.md` | Human Rust API truth plus bounded JS/TS and env signals (optional) |

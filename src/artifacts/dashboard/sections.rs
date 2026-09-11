@@ -3078,7 +3078,7 @@ pub(super) fn artifact_kind(path: &str) -> &'static str {
     }
 }
 
-pub(super) fn build_artifacts_section(ctx: &DashboardContext) -> String {
+pub(super) fn build_artifacts_section(ctx: &DashboardContext, dir: &std::path::Path) -> String {
     // Core artifacts (always present in the pack)
     let core: Vec<(&str, &str)> = vec![
         ("10_diff/full.patch", "Full Patch"),
@@ -3113,6 +3113,21 @@ pub(super) fn build_artifacts_section(ctx: &DashboardContext) -> String {
     for (path, label) in &core {
         let kind = artifact_kind(path);
         all_items.push((path.to_string(), label.to_string(), kind));
+    }
+    // Snapshot evidence is optional. Never advertise a clean run's absent file.
+    for (path, label) in [
+        (
+            "20_quality/SNAPSHOT_INTEGRITY.md",
+            "Snapshot Integrity (MD)",
+        ),
+        (
+            "20_quality/SNAPSHOT_INTEGRITY.json",
+            "Snapshot Integrity (JSON)",
+        ),
+    ] {
+        if dir.join(path).is_file() {
+            all_items.push((path.to_owned(), label.to_owned(), artifact_kind(path)));
+        }
     }
     for patch in &ctx.per_file_diff_files {
         let path = format!("10_diff/per-file-diffs/{}", patch);

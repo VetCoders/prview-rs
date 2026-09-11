@@ -28,8 +28,28 @@ fn generate_fixture_pack_with_ledger(
         base_sha,
         governor,
         ledger,
-        &[],
+        FixturePackOptions::default(),
     )
+}
+
+/// Rarely-varied, review-shaped inputs to [`generate_fixture_pack_with_ledger_and_diffs`],
+/// grouped so the function stays under clippy's `too_many_arguments` threshold.
+#[derive(Default)]
+struct FixturePackOptions<'a> {
+    diffs: &'a [Diff],
+    worktree_head: FixtureWorktreeHead<'a>,
+}
+
+/// What a fixture pack captured about the operator checkout. The default is the
+/// local-review shape — the operator checkout IS the reviewed target — because a
+/// pack that can neither name its checkout nor show a materialised reviewed tree
+/// is refused at publication.
+#[derive(Default, Clone, Copy)]
+enum FixtureWorktreeHead<'a> {
+    #[default]
+    IsTarget,
+    Sha(&'a str),
+    Unknown,
 }
 
 fn generate_fixture_pack_with_ledger_and_diffs(
@@ -39,7 +59,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
     base_sha: &str,
     governor: &crate::governor::ResourceGovernor,
     ledger: &crate::ledger::TaskLedger,
-    diffs: &[Diff],
+    options: FixturePackOptions<'_>,
 ) -> Result<PathBuf> {
     let mut config = test_config_builder()
         .repo_root(repo_root)
@@ -74,7 +94,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
     generate(GenerateInput {
         config: &config,
         ledger,
-        diffs,
+        diffs: options.diffs,
         checks: &[],
         heuristics: None,
         resolved_target: &resolved_target,
@@ -83,7 +103,11 @@ fn generate_fixture_pack_with_ledger_and_diffs(
         skipped_checks: Vec::new(),
         worktree_clean: Some(true),
         worktree_status_digest: None,
-        worktree_head_sha: None,
+        worktree_head_sha: match options.worktree_head {
+            FixtureWorktreeHead::IsTarget => Some(target_sha.to_owned()),
+            FixtureWorktreeHead::Sha(sha) => Some(sha.to_owned()),
+            FixtureWorktreeHead::Unknown => None,
+        },
         governor,
     })
 }
@@ -97,6 +121,180 @@ fn assert_no_success_surfaces(output_dir: &Path, seam: ArtifactGenerationSeam) {
             path.display(),
             seam.label()
         );
+    }
+}
+
+#[test]
+fn snapshot_final_observation_keeps_creation_target_after_branch_moves() {
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    let ledger = TaskLedger::new();
+    ledger.set_shared_snapshot(Some(snapshot));
+    run_git_fixture(repo.path(), &["update-ref", "refs/heads/feature", &base]);
+    ledger.observe_snapshot("after-check", Some("fixture"));
+    let final_observation = ledger.current_snapshot_observation().unwrap();
+    assert_eq!(final_observation.expected_target_sha, target);
+    assert_eq!(
+        final_observation.observed_head_sha.as_deref(),
+        Some(target.as_str())
+    );
+    assert!(!final_observation.requires_review());
+    assert!(ledger.snapshot_observations().is_empty());
+}
+
+#[test]
+fn snapshot_target_mismatch_aborts_before_pack_publication() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    let ledger = TaskLedger::new();
+    ledger.set_shared_snapshot(Some(snapshot));
+    let output = publication_home.path().join("mismatched-pack");
+    let governor = crate::governor::ResourceGovernor::new();
+    let error =
+        generate_fixture_pack_with_ledger(repo.path(), &output, &base, &base, &governor, &ledger)
+            .expect_err("a snapshot of another target must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot target mismatch"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&base) && message.contains(&target),
+        "{message}"
+    );
+    assert!(
+        !output.exists(),
+        "mismatched identities must fail before output allocation"
+    );
+}
+
+/// An empty ledger is not evidence of a clean review: if the reviewed target is
+/// not the operator's own checkout, the dispatcher owed this run a materialised
+/// tree. Publishing anyway would describe the target with the operator's files.
+#[test]
+fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let governor = crate::governor::ResourceGovernor::new();
+    let unverified = publication_home.path().join("unverified-pack");
+    let error = generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &unverified,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        FixturePackOptions {
+            worktree_head: FixtureWorktreeHead::Sha(&base),
+            ..Default::default()
+        },
+    )
+    .expect_err("an unmaterialised reviewed tree must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot missing for an off-HEAD review"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&target) && message.contains(&base),
+        "{message}"
+    );
+    assert!(
+        !unverified.exists(),
+        "an unobserved reviewed tree must fail before output allocation"
+    );
+
+    // An unknown operator checkout is not permission either. `--quick`/`--watch`
+    // publish with an empty ledger, and a HEAD that moved during capture leaves
+    // the identity unknown by design; unknown must fail the same way a mismatch
+    // does, never fall through to the local files.
+    let unknown = publication_home.path().join("unknown-head-pack");
+    let error = generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &unknown,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        FixturePackOptions {
+            worktree_head: FixtureWorktreeHead::Unknown,
+            ..Default::default()
+        },
+    )
+    .expect_err("an unknown operator checkout must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot missing for a review with an unknown operator checkout"),
+        "{message}"
+    );
+    assert!(message.contains(&target), "{message}");
+    assert!(
+        !unknown.exists(),
+        "an unknown operator checkout must fail before output allocation"
+    );
+
+    // The local review keeps its snapshot-free path: the repo root IS the target.
+    let local = publication_home.path().join("local-pack");
+    generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &local,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        FixturePackOptions {
+            worktree_head: FixtureWorktreeHead::Sha(&target),
+            ..Default::default()
+        },
+    )
+    .expect("a review of the operator checkout needs no snapshot");
+}
+
+#[test]
+fn snapshot_tracked_changes_are_preserved_as_review_evidence() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    fs::write(
+        snapshot.worktree_path.join("own.rs"),
+        "pub fn own() -> u8 { 9 }\n",
+    )
+    .unwrap();
+    let ledger = crate::ledger::TaskLedger::new();
+    ledger.set_shared_snapshot(Some(snapshot));
+    let output = tempfile::tempdir().unwrap();
+    let pack = output.path().join("pack");
+    let governor = crate::governor::ResourceGovernor::new();
+    generate_fixture_pack_with_ledger(repo.path(), &pack, &target, &base, &governor, &ledger)
+        .unwrap();
+
+    let evidence = pack.join("20_quality/SNAPSHOT_INTEGRITY.json");
+    assert!(
+        evidence.is_file(),
+        "tracked changes in the shared snapshot need durable evidence"
+    );
+    let evidence: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(evidence).unwrap()).unwrap();
+    assert_eq!(evidence["expected_target_sha"], target);
+    assert_eq!(evidence["status"], "modified");
+    assert_eq!(evidence["changed_paths"][0], "own.rs");
+    let gate: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(pack.join("00_summary/MERGE_GATE.json")).unwrap())
+            .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(pack.join("report.json")).unwrap()).unwrap();
+    for caveats in [
+        &gate["decision"]["review_caveats"],
+        &report["gate"]["review_caveats"],
+    ] {
+        assert!(caveats.as_array().unwrap().iter().any(|c| {
+            c.as_str()
+                .is_some_and(|s| s.contains("Snapshot integrity") && s.contains("own.rs"))
+        }));
     }
 }
 
@@ -1137,6 +1335,7 @@ macro_rules! generate_merge_gate_test {
             resolved_target: $resolved_target,
             resolved_bases: $resolved_bases,
             clean_comparison: CleanComparison::for_test(true, true),
+            snapshot_integrity: None,
         })
     };
 }
@@ -1272,6 +1471,7 @@ async fn artifact_pipeline_diffs_from_merge_base_when_base_advanced() {
         .build();
     config.run_bundle = false;
     config.run_security = false;
+    config.skip_security = true;
     config.run_heuristics = false;
     config.create_dashboard = false;
     config.quiet = true;
@@ -5091,7 +5291,10 @@ fn static_tauri_commands_follow_the_shared_reviewed_tree() {
         &base_sha,
         &crate::governor::ResourceGovernor::new(),
         &ledger,
-        &diffs,
+        FixturePackOptions {
+            diffs: &diffs,
+            ..Default::default()
+        },
     )
     .expect("reviewed-tree pack");
 
@@ -7345,4 +7548,129 @@ fn breaking_markdown_write_failure_is_not_reported_as_success() {
         risk_level: signal::BreakingRisk::High,
     };
     assert!(signal::write_breaking_changes_with_api(dir.path(), None, &[finding]).is_err());
+}
+
+#[test]
+fn snapshot_integrity_gate_preserves_check_results_and_dashboard_parity() {
+    let (repo, base, target) = init_advanced_base_fixture();
+    let snapshot = crate::git::create_worktree_snapshot(repo.path(), &target).unwrap();
+    let clean = signal::SnapshotIntegrity::observe(&snapshot.worktree_path, repo.path(), &target);
+    fs::write(
+        snapshot.worktree_path.join("own.rs"),
+        "pub fn own() -> u8 { 7 }\n",
+    )
+    .unwrap();
+    let changed = signal::SnapshotIntegrity::observe(&snapshot.worktree_path, repo.path(), &target);
+    let policy = PolicyConfig {
+        mode: crate::policy::PolicyMode::Block,
+        default_severity: crate::policy::PolicySeverity::Ignore,
+        checks: std::collections::HashMap::from([(
+            "cargo_test".to_owned(),
+            crate::policy::PolicySeverity::Block,
+        )]),
+        ..PolicyConfig::default()
+    };
+    let config = test_config_builder()
+        .repo_root(repo.path())
+        .profile(test_generic_profile())
+        .policy(policy)
+        .build();
+    let target_ref = ResolvedRef {
+        name: "feature".to_owned(),
+        commit_id: target,
+        is_remote: false,
+    };
+    let bases = [ResolvedRef {
+        name: "main".to_owned(),
+        commit_id: base,
+        is_remote: false,
+    }];
+    let inline = InlineFindingsSummary {
+        status: "passed".to_owned(),
+        findings_count: 0,
+        dashboard_findings: Vec::new(),
+    };
+    for (integrity, raw_status, verdict) in [
+        (&clean, CheckStatus::Passed, "PASS"),
+        (&changed, CheckStatus::Passed, "CONDITIONAL"),
+        (&changed, CheckStatus::Failed, "BLOCK"),
+    ] {
+        let output = tempfile::tempdir().unwrap();
+        let checks = [CheckResult {
+            name: "Cargo test".to_owned(),
+            status: raw_status,
+            duration: Duration::ZERO,
+            output: "real result preserved".to_owned(),
+            cached: false,
+            provenance: None,
+        }];
+        let coverage = CoverageDelta {
+            total_source: 0,
+            covered_count: 0,
+            pct: None,
+            uncovered: Vec::new(),
+            covered: Vec::new(),
+            non_code_count: 0,
+            ghost_tests: Vec::new(),
+        };
+        let ledger = crate::ledger::TaskLedger::new();
+        generate_merge_gate(MergeGateInput {
+            dir: output.path(),
+            config: &config,
+            ledger: &ledger,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &coverage,
+            diffs: &[],
+            skipped_checks: &[],
+            resolved_target: &target_ref,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(false, true),
+            snapshot_integrity: Some(integrity),
+        })
+        .unwrap();
+        let dashboard = build_dashboard_context(DashboardContextInput {
+            config: &config,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: Vec::new(),
+            rust_api_delta: None,
+            coverage,
+            diff_dir: output.path(),
+            skipped_checks: Vec::new(),
+            out_dir: output.path(),
+            diffs: &[],
+            ownership_map: Vec::new(),
+            clean_comparison: CleanComparison::for_test(false, true),
+            snapshot_integrity: Some(integrity),
+            provenance: &ProvenanceConsistency::default(),
+        });
+        let gate: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output.path().join("MERGE_GATE.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gate["decision"]["verdict"], verdict);
+        assert_eq!(dashboard.verdict, verdict);
+        assert_eq!(gate["checks"][0]["status"], raw_status.as_str());
+        assert_eq!(checks[0].status, raw_status);
+        let gate_caveats = gate["decision"]["review_caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .filter(|c| c.starts_with("Snapshot integrity"))
+            .collect::<Vec<_>>();
+        let dashboard_caveats = dashboard
+            .review_caveats
+            .iter()
+            .filter(|c| c.starts_with("Snapshot integrity"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(gate_caveats, dashboard_caveats);
+        assert_eq!(gate_caveats.len(), usize::from(integrity.requires_review()));
+    }
 }

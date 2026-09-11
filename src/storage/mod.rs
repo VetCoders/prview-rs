@@ -1013,6 +1013,15 @@ fn platform_process_birth_identity(_pid: u32) -> std::io::Result<String> {
 
 /// True only when `pid` is alive and still denotes the exact process
 /// incarnation recorded in `expected`. Probe failures fail closed.
+///
+/// PID-reuse defence for the Unix cancellation path, which signals raw PIDs and
+/// PGIDs and therefore has to prove an identity before every kill. The Windows
+/// path terminates through a Job Object handle, which cannot address a recycled
+/// PID at all, so no production caller exists there — this gate names that
+/// asymmetry instead of letting a `windows` build carry an unreachable helper.
+/// `test` keeps it available to the unit test below and to the Windows-only
+/// process-tree test fixtures in `crate::proc`.
+#[cfg(any(unix, test))]
 pub(crate) fn process_birth_identity_matches(pid: u32, expected: &str) -> bool {
     is_process_alive(pid) && process_birth_identity(pid).is_ok_and(|observed| observed == expected)
 }

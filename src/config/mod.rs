@@ -55,6 +55,17 @@ fn gh_cmd() -> Command {
 pub struct Config {
     pub repo_root: PathBuf,
     pub target: Option<String>,
+    /// Target captured for this run's diff. Internal runtime state, never a CLI
+    /// or manifest override; cloned check configurations retain this identity.
+    pub pinned_target: Option<crate::git::ResolvedRef>,
+    /// Bases captured for this run's diff, pinned together with `pinned_target`.
+    /// Each entry already carries the merge-base commit the pack diff was
+    /// computed from (`Repository::resolve_diff_bases`), so a check that needs a
+    /// base range reads the captured SHA instead of re-resolving a symbolic base
+    /// ref that may have advanced past the target since capture. Internal
+    /// runtime state, never a CLI or manifest override; cloned check
+    /// configurations retain this range.
+    pub pinned_diff_bases: Option<Vec<crate::git::ResolvedRef>>,
     pub bases: Vec<String>,
     pub profile: DetectedProfile,
 
@@ -75,6 +86,8 @@ pub struct Config {
     pub lint_forced: bool,
     pub run_bundle: bool,
     pub run_security: bool,
+    /// Explicit operator opt-out, separate from the heavy security opt-in.
+    pub skip_security: bool,
     pub run_heuristics: bool,
     /// Opt-in to the full security tier (`cargo geiger`). When false, geiger is
     /// simply not part of the profile — cleanly absent, not a skipped caveat.
@@ -142,6 +155,7 @@ struct StepFlags {
     lint_forced: bool,
     run_bundle: bool,
     run_security: bool,
+    skip_security: bool,
     run_heuristics: bool,
 }
 
@@ -159,6 +173,7 @@ impl StepFlags {
             lint_forced: cli.with_lint,
             run_bundle,
             run_security,
+            skip_security: cli.skip_security,
             run_heuristics: cli.should_run_heuristics(),
         }
     }
@@ -690,6 +705,8 @@ impl Config {
         Self {
             repo_root,
             target: None,
+            pinned_target: None,
+            pinned_diff_bases: None,
             bases: vec![],
             profile,
             execution_mode: ExecutionMode::Standard,
@@ -703,6 +720,7 @@ impl Config {
             lint_forced: false,
             run_bundle: false,
             run_security: false,
+            skip_security: false,
             run_heuristics: false,
             security_full: false,
             do_fetch: false,
@@ -740,6 +758,7 @@ impl Config {
         self.lint_forced = flags.lint_forced;
         self.run_bundle = flags.run_bundle;
         self.run_security = flags.run_security;
+        self.skip_security = flags.skip_security;
         self.run_heuristics = flags.run_heuristics;
         self
     }
@@ -1667,6 +1686,37 @@ fn parse_github_owner_repo(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn explicit_security_opt_out_survives_step_flags_and_gate_profile() {
+        for args in [
+            vec!["prview", "--skip-security"],
+            vec!["prview", "--quick", "--skip-security"],
+            vec!["prview", "--deep", "--skip-security"],
+            vec!["prview", "--security-full", "--skip-security"],
+        ] {
+            let cli = Cli::parse_from(args);
+            let flags = StepFlags::from_cli(&cli, false, false, false, cli.should_run_security());
+            let mut config = test_config().with_step_flags(flags);
+            assert!(config.skip_security);
+            assert!(!config.run_security);
+            config.apply_gate_profile(config.enforcement_mode);
+            assert!(config.skip_security, "gate must preserve explicit opt-outs");
+        }
+        let cli = Cli::parse_from(["prview"]);
+        let config = test_config().with_step_flags(StepFlags::from_cli(
+            &cli,
+            false,
+            false,
+            false,
+            cli.should_run_security(),
+        ));
+        assert!(!config.run_security);
+        assert!(
+            !config.skip_security,
+            "no heavy opt-in is not an explicit opt-out"
+        );
+    }
 
     #[cfg(unix)]
     struct InterruptWhenFileExists {

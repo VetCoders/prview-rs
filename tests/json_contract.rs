@@ -1,3 +1,5 @@
+mod support;
+
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use prview::git::git_cmd;
@@ -37,10 +39,12 @@ fn create_fixture_repo() -> TempDir {
 }
 
 fn run_json_quiet(repo: &Path, extra_args: &[&str]) -> serde_json::Value {
+    let environment = support::ContractEnvironment::new();
     let mut args = vec!["--json", "--quiet", "--no-zip", "--no-heuristics"];
     args.extend_from_slice(extra_args);
 
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let assert = environment
+        .command()
         .current_dir(repo)
         .env("PRVIEW_HOME", repo.join(".prview-test-home"))
         .args(args)
@@ -58,7 +62,9 @@ fn run_json_quiet(repo: &Path, extra_args: &[&str]) -> serde_json::Value {
 
 #[test]
 fn gate_help_documents_exit_code_contract() {
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let environment = support::ContractEnvironment::new();
+    environment
+        .command()
         .args(["gate", "--help"])
         .assert()
         .success()
@@ -73,10 +79,12 @@ fn gate_help_documents_exit_code_contract() {
 
 #[test]
 fn fail_on_warnings_is_documented_and_scoped_to_ci() {
+    let environment = support::ContractEnvironment::new();
     // The escape hatch for the warning→failure change: warnings no longer break
     // `--ci` on their own, so a team that wants that exit asks for it. It is
     // meaningless outside `--ci`, and clap says so loudly instead of no-opping.
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .arg("--help")
         .assert()
         .success()
@@ -88,7 +96,8 @@ fn fail_on_warnings_is_documented_and_scoped_to_ci() {
             "canonical pack warning tally is non-zero",
         ));
 
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .arg("--fail-on-warnings")
         .assert()
         .failure()
@@ -97,10 +106,12 @@ fn fail_on_warnings_is_documented_and_scoped_to_ci() {
 
 #[test]
 fn gate_json_emits_verdict_and_caveats_from_merge_gate() {
+    let environment = support::ContractEnvironment::new();
     let temp = create_fixture_repo();
     let repo = temp.path();
 
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let assert = environment
+        .command()
         .current_dir(repo)
         .args(["gate", "--json"])
         .assert()
@@ -137,12 +148,14 @@ fn gate_json_emits_verdict_and_caveats_from_merge_gate() {
 
 #[test]
 fn json_without_quiet_still_writes_only_json_to_stdout() {
+    let environment = support::ContractEnvironment::new();
     let temp = create_fixture_repo();
     let repo = temp.path();
 
     // No --quiet: --json alone must keep stdout parseable. Previously the human
     // banner and progress printed to stdout ahead of the JSON payload.
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let assert = environment
+        .command()
         .current_dir(repo)
         .args([
             "--json",
@@ -166,13 +179,15 @@ fn json_without_quiet_still_writes_only_json_to_stdout() {
 
 #[test]
 fn quiet_without_json_suppresses_human_banner() {
+    let environment = support::ContractEnvironment::new();
     let temp = create_fixture_repo();
     let repo = temp.path();
 
     // --quiet must suppress the interactive human banner/progress even when
     // --json is absent. Previously the emit gate keyed only on --json, so a
     // quiet-but-not-json run still streamed the banner to stdout (PR #12 review).
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let output = environment
+        .command()
         .current_dir(repo)
         .args([
             "--quiet",
@@ -222,6 +237,50 @@ fn json_quiet_writes_machine_safe_json_to_stdout() {
 }
 
 #[test]
+fn json_review_uses_the_owned_contract_scanner() {
+    let repo = create_fixture_repo();
+    let environment = support::ContractEnvironment::new();
+    let output = environment
+        .command()
+        .current_dir(repo.path())
+        .args([
+            "feature/json-contract",
+            "main",
+            "--quick",
+            "--profile",
+            "generic",
+            "--json",
+            "--quiet",
+            "--no-fetch",
+            "--no-cache",
+            "--no-zip",
+            "--no-heuristics",
+        ])
+        .output()
+        .expect("run review with contract scanner");
+    assert!(output.status.success(), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report_path = Path::new(payload["output_dir"].as_str().unwrap()).join("report.json");
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+    let scanner = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "semgrep_scan")
+        .expect("Semgrep result");
+    assert_eq!(scanner["status"], "PASS", "{scanner}");
+    #[cfg(windows)]
+    assert!(
+        scanner["command"]
+            .as_str()
+            .unwrap()
+            .starts_with(environment.scanner_path().to_string_lossy().as_ref()),
+        "Windows must run the owned batch fixture, not a host scanner: {scanner}"
+    );
+}
+
+#[test]
 fn update_json_quiet_without_new_commits_still_returns_json_payload() {
     let temp = create_fixture_repo();
     let repo = temp.path();
@@ -239,13 +298,15 @@ fn update_json_quiet_without_new_commits_still_returns_json_payload() {
 
 #[test]
 fn update_without_json_exits_zero_when_unchanged() {
+    let environment = support::ContractEnvironment::new();
     let temp = create_fixture_repo();
     let repo = temp.path();
 
     // First --update run generates artifacts; the second sees no new commits.
     // The human (non-JSON) path must exit 0 for that unchanged run, matching
     // the JSON contract path.
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .current_dir(repo)
         .args([
             "--update",
@@ -257,7 +318,8 @@ fn update_without_json_exits_zero_when_unchanged() {
         .assert()
         .success();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .current_dir(repo)
         .args([
             "--update",
@@ -1858,6 +1920,7 @@ fn resolve_in_path(bin: &str) -> Option<std::path::PathBuf> {
 #[cfg(unix)]
 #[test]
 fn merge_gate_validates_when_a_quality_tool_is_missing() {
+    let environment = support::ContractEnvironment::new();
     let temp = create_fixture_repo();
     let repo = temp.path();
 
@@ -1865,7 +1928,8 @@ fn merge_gate_validates_when_a_quality_tool_is_missing() {
     let bin = tempfile::tempdir().expect("bin tempdir");
     std::os::unix::fs::symlink(&git_path, bin.path().join("git")).expect("symlink git");
 
-    let assert = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let assert = environment
+        .command()
         .current_dir(repo)
         .env("PATH", bin.path())
         .args([
@@ -2313,11 +2377,13 @@ fn generated_pack_carries_pack_level_provenance() {
 
 #[test]
 fn doctor_surfaces_config_error_cause_instead_of_blanket_message() {
+    let environment = support::ContractEnvironment::new();
     // Outside a git repo, Config::from_cli fails. Doctor must report the real
     // reason with a colon, not the old blanket "(maybe not in a project?)".
     let temp = tempfile::tempdir().expect("tempdir");
 
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .current_dir(temp.path())
         .arg("doctor")
         .assert()
@@ -2330,8 +2396,10 @@ fn doctor_surfaces_config_error_cause_instead_of_blanket_message() {
 
 #[test]
 fn completions_generates_valid_output_with_known_subcommands() {
+    let environment = support::ContractEnvironment::new();
     for shell in &["bash", "zsh", "fish"] {
-        let output = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+        let output = environment
+            .command()
             .args(["completions", shell])
             .output()
             .expect("run completions");
@@ -2363,6 +2431,7 @@ fn completions_generates_valid_output_with_known_subcommands() {
 
 #[test]
 fn init_command_creates_policy_and_updates_gitignore() {
+    let environment = support::ContractEnvironment::new();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path();
 
@@ -2371,7 +2440,8 @@ fn init_command_creates_policy_and_updates_gitignore() {
     fs::write(repo.join(".gitignore"), "target/\n").expect("write gitignore");
 
     // 2. Run prview init
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .current_dir(repo)
         .arg("init")
         .assert()
@@ -2396,7 +2466,8 @@ fn init_command_creates_policy_and_updates_gitignore() {
     assert!(gitignore_content.contains("target/"));
 
     // 4. Running init again should be idempotent (skipping)
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .current_dir(repo)
         .arg("init")
         .assert()
@@ -2427,6 +2498,7 @@ fn find_merge_gate(root: &Path) -> Option<std::path::PathBuf> {
 
 #[test]
 fn an_unchanged_update_run_still_honors_fail_on_warnings() {
+    let environment = support::ContractEnvironment::new();
     // `--update` with no new commits reuses the previous pack, and that pack is
     // what the run reports. Forcing exit 0 there made a warnings-clean CI job
     // turn green on its second invocation while the reused pack still carried
@@ -2436,7 +2508,8 @@ fn an_unchanged_update_run_still_honors_fail_on_warnings() {
     let home = tempfile::tempdir().expect("prview home");
 
     // A first run produces the pack the update run will reuse.
-    Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    environment
+        .command()
         .current_dir(repo)
         .env("PRVIEW_HOME", home.path())
         .args([
@@ -2480,7 +2553,8 @@ fn an_unchanged_update_run_still_honors_fail_on_warnings() {
     ];
 
     // Without the flag the reused pack is advisory: warnings do not fail CI.
-    let lenient = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let lenient = environment
+        .command()
         .current_dir(repo)
         .env("PRVIEW_HOME", home.path())
         .args(update_args)
@@ -2493,7 +2567,8 @@ fn an_unchanged_update_run_still_honors_fail_on_warnings() {
         String::from_utf8_lossy(&lenient.stderr)
     );
 
-    let strict = Command::new(assert_cmd::cargo::cargo_bin!("prview"))
+    let strict = environment
+        .command()
         .current_dir(repo)
         .env("PRVIEW_HOME", home.path())
         .args(update_args)
@@ -2533,7 +2608,7 @@ fn an_unchanged_update_run_still_honors_fail_on_warnings() {
     .expect("plant legacy conditional gate");
 
     for fail_on_warnings in [false, true] {
-        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("prview"));
+        let mut command = environment.command();
         command
             .current_dir(repo)
             .env("PRVIEW_HOME", home.path())
@@ -2587,7 +2662,7 @@ fn an_unchanged_update_run_still_honors_fail_on_warnings() {
     .expect("plant fresh mixed gate");
 
     for (fail_on_warnings, expected) in [(false, 0), (true, 1)] {
-        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("prview"));
+        let mut command = environment.command();
         command
             .current_dir(repo)
             .env("PRVIEW_HOME", home.path())

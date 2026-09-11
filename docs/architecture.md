@@ -118,6 +118,14 @@ with_cancellation(app.run(), run governor)
     └─► artifacts::generate()  ─── numbered layout + signal generators
 ```
 
+`main.rs` is a synchronous entrypoint: it spawns a `prview-main` thread with a
+64 MiB stack, builds the multi-threaded Tokio runtime there and `block_on`s the
+pipeline, then resumes any panic from that thread so the exit code is unchanged.
+Everything above is one composed future polled by that `block_on`, and Tokio
+cannot size the thread that runs it, so the whole pipeline would otherwise be
+held by the platform's main-thread stack — 1 MiB on Windows, which a debug build
+overflows.
+
 ## Modules
 
 ### cli/mod.rs
@@ -222,7 +230,10 @@ Implementations:
 - `CargoAuditCheck` - `cargo audit`
 - `SemgrepCheck` - Semgrep JSON scan; default is diff-scoped with
   `--baseline-commit <merge-base>` when the git baseline is clean and available,
-  while `--security-full` keeps a full-tree scan
+  while `--security-full` keeps a full-tree scan. Explicit `--skip-security`
+  is carried separately from the heavy-security opt-in and disables this check
+  before tool discovery. The shared `security disabled` mode-skip reason keeps
+  policy evaluation `skipped` and review-required when the scanner is required.
 - `CargoGeigerCheck` - `cargo geiger`
 - `RuffCheck` - `ruff check`
 - `MypyCheck` - `mypy`
@@ -345,6 +356,28 @@ dependency set is still installed and judged, in a prview-owned environment kept
 warm across runs. A local review sets no override and uses the checkout's own
 environment exactly as before.
 
+Pytest adds `SnapshotPytestHome` for a snapshot run. A per-run temporary module
+loaded via `-p` in a neutral outer invocation redirects HOME, USERPROFILE, XDG
+and Windows application-data selectors. The outer invocation uses a null config,
+`--noconftest`, no plugin autoload and empty pytest plugin/addopts environment.
+Its command hook restores the original pytest environment and invokes the public
+`pytest.main` API with the bounded arguments carried after `--`. This keeps
+pytest in charge of configuration precedence while ensuring even plugins in ini
+or environment addopts load after the home redirect. Redirection happens
+inside pytest: the uv launcher and Python startup still find their existing
+interpreter, dependencies and user-installed pytest. The plugin pins Python's
+original user package base for child/xdist bootstraps, preserving an explicit
+`PYTHONUSERBASE` when present. Its directory is prepended to the existing
+`PYTHONPATH`; each run uses a unique module name and private home. The owner
+retains the module, JSON environment description and directories through the
+check, then removes them together. The pytest header and command provenance
+identify the isolation. It is a default home/config view, not OS-level access
+control or a claim that all explicit host paths have been removed. Local
+checkout tests retain their environment. The version probe uses the same
+plugin in snapshot mode and always passes `--noconftest` to prevent conftest
+execution during version discovery.
+
+
 The cold `uv sync` pre-step is resolved only after the run-wide target snapshot
 exists, through that same `plan_python_run()`. Its cwd and
 `UV_PROJECT_ENVIRONMENT` are therefore identical to the later gates; it never
@@ -383,7 +416,10 @@ Pytest 7.2-8.x recognizes `.pytest.ini` as a candidate but does not select an
 empty hidden file unconditionally; that behavior begins with pytest 9. The
 versioned discovery model preserves this distinction instead of treating every
 recognized basename as an automatic winner.
-Existing but unreadable, non-UTF-8, malformed, or conflicting recognized config
+Pytest and uv share a 1 MiB read cap checked against the opened regular file,
+with at most one extra byte read to detect growth. Pytest retains its existing
+regular-file symlink discovery; non-file candidates remain ignored. Existing
+but oversized, unreadable, non-UTF-8, malformed, or conflicting recognized config
 is an execution error, not absence. Pytest-xdist gets the same upper bound
 through its auto-worker environment and a final CLI override only when the
 effective shell-tokenized config/environment request exceeds that bound or is
@@ -725,6 +761,81 @@ the `.log` output and the `.prov.json` provenance as three separate files; those
 legacy triples are still read (so a warm cache survives the upgrade) and are
 removed the first time the key is rewritten. An entry whose blob no longer
 parses replays with no provenance instead of failing the run.
+
+#### Shared snapshot integrity at check boundaries
+
+Headless and TUI pipelines copy the resolved diff target into the run's
+`Config.pinned_target` and the resolved diff bases into `Config.pinned_diff_bases`
+before dispatching checks; update-mode clones preserve both. The whole review
+range — base and target — is therefore resolved exactly once, at diff capture.
+Both are runtime-only state, not CLI/manifest settings. `Repository::resolve_target`
+then parses the captured SHA as an object ID and requires that exact commit,
+preserving its original display name and remote classification. A branch whose
+name is the forty-character SHA cannot shadow it. A deleted ref
+does not invalidate an available commit. An unavailable pinned commit or
+repository is a planning error, including runs with no snapshot-backed gates;
+it cannot fall back to the operator checkout. The independent Semgrep planner
+enforces the same rule; only unpinned scans retain in-place fallback behavior.
+Its `--baseline-commit` range comes from `pinned_diff_bases` verbatim — the same
+merge-base commit the pack diff was computed from — and is never re-derived from
+a symbolic base ref, which a base branch advancing past the target mid-run would
+collapse onto the target and reduce the scanned delta to nothing while the pack
+diff stays non-empty. A pinned target carrying no captured base is the same class
+of planning refusal as an unavailable pinned commit, never a symbolic fallback.
+Multi-base and `--current-only` runs still fall back to a full scan (R3-15).
+Local targets that still match HEAD
+keep the operator checkout. Each new watch iteration resolves its target anew.
+
+`checks::snapshot_integrity::SnapshotObservation` compares the ledger-owned
+worktree with the immutable commit resolved before worktree creation. The shared
+`execute_live_check` path (headless and TUI) observes before and after every live
+check, including errors. The ledger retains non-clean observations even when a
+later check restores the checkout. Artifact generation adds a final observation
+before context commands run, using the same ledger-owned creation SHA. If that SHA
+differs from the resolved diff target, publication fails before output allocation
+instead of combining two review identities. The absence of an observation is
+checked independently of the ledger: an off-`HEAD` target — or a target whose
+operator checkout could not be captured at all, an unborn `HEAD` or a checkout
+that moved during capture — that reaches artifact generation with no shared
+snapshot fails at the same seam, so a dispatcher that
+failed to materialise the reviewed tree cannot publish the operator checkout as
+the target. Only a review of the captured `HEAD`, or a run whose operator `HEAD`
+is unreadable, keeps the snapshot-free path. Comparisons union target-tree→index and
+index→worktree paths: staged changes and test-created commits remain visible.
+Newly untracked files are excluded; tracked lockfile changes, deletions and type
+changes remain. A changed HEAD or unreadable/foreign/raced observation cannot
+certify clean. Check-boundary Git reads run in a blocking worker, outside ledger
+data locks. Async admission limits a run to one observation at a time without
+blocking the dispatcher, even on a current-thread runtime. Both boundaries are
+awaited before the result can be cached; worker failure retains `unknown`
+evidence. Native libgit2 walks already running are not preemptible, and retain
+their observation permit until completion if the async waiter is cancelled.
+
+Modified or unknown observations emit `20_quality/SNAPSHOT_INTEGRITY.json/.md`;
+clean runs and runs without a shared snapshot emit no extra file. JSON schema 1.0
+carries `observation: shared-snapshot-check-boundaries`, `expected_target_sha`,
+final `observed_head_sha`, aggregate `status` (`modified` or `unknown`), the union
+of `changed_paths` (null if any comparison is unknown), nullable `error`, and
+`observations`. The latter retains non-clean boundaries plus the final observation,
+each with its own SHA, paths, status, error, `phase` and nullable `check_name`.
+Known paths remain in individual observations even when the aggregate is unknown.
+The human HEAD-change caveat inspects all retained observations, so restoring
+HEAD after an empty commit does not leave an unexplained zero-path review signal.
+Non-UTF8 Git path bytes are hex-escaped. A failed evidence write aborts publication.
+AI_INDEX and the dashboard artifact explorer link only published evidence.
+The same typed report raises both merge-gate and dashboard analysis to at least
+degraded and merge recommendation to at least review_required without lowering
+BLOCK. Report and HTML consume that decision; check results and exit codes are
+preserved, and no check is added. Existing gate/provenance schemas keep their shape.
+
+A live result is not written to cache when a non-clean observation occurs before,
+after, or during its execution (including observations from concurrent checks).
+Existing cache entries are not retroactively revalidated by this guard.
+Check names identify observation boundaries, not the writer: checks can overlap.
+Observation is not atomic; mutations restored between observations, including
+within one check, are not guaranteed to be detected. Writes by later context tools
+are outside this observation window. Per-check `snapshot-dirty` remains a separate
+record and can still reflect a harmless untracked lockfile.
 
 #### Pack-level provenance — `00_summary/PROVENANCE.json`
 
@@ -1266,6 +1377,11 @@ Job Object contract cannot disappear with an unrelated dependency change.
   makes two locks deadlock-free, and this direction also avoids parking half the
   budget on a cargo check that is still queueing for `target/`. Nothing acquires
   the cargo lock once it holds budget, so there is no cycle the other way.
+  Regression coverage exercises all six cargo-family names: a waiter leaves
+  the whole budget available while the target lock is held, remains queued
+  while waiting for budget after taking that lock, and releases the target
+  lock when cancellation interrupts the budget wait. A separate regression
+  checks cancellation while the target lock itself is still held.
 
 #### Queued vs running
 

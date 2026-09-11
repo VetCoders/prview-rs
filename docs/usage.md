@@ -106,7 +106,7 @@ Effective profile:
 | Surface | Gate behavior |
 |---------|---------------|
 | Rust / Cargo | `Cargo check` runs; `Clippy`, `Rustfmt`, `Cargo test`, and `Cargo audit` stay visible as skipped checks |
-| Security | Semgrep runs when the `semgrep` binary is available |
+| Security | Semgrep runs when the `semgrep` binary is available, unless `--skip-security` is explicit |
 | Geiger | `Cargo geiger` is out of the gate profile |
 | Tests, lint, bundle, heuristics | Disabled for the pre-push gate budget |
 | JS/TS | Existing JS checks only run when repo-local `node_modules` tools exist; they are not part of the measured budget below |
@@ -235,6 +235,8 @@ packages. Each uv pool is the minimum of the run plan, a positive inherited
 environment value, and the matching project value from `uv.toml` or
 `[tool.uv]`; `uv.toml` wins when both project files exist. Invalid or
 unreadable concurrency authority fails closed instead of widening the run.
+Pytest configuration reads are also capped at 1 MiB; an oversized candidate
+fails the check before collection rather than falling back to another config.
 The selected project-scoped uv authority is opened only as a regular file and
 read up to 1 MiB before parsing; a FIFO, device, or oversized `uv.toml` or
 `pyproject.toml` therefore cannot block or exhaust the synchronous planner.
@@ -262,7 +264,9 @@ Pytest also receives `PYTEST_XDIST_AUTO_NUM_WORKERS`; when project or inherited 
 xdist (`-n auto`, `logical`, or explicit `-n N`), prview caps only a dynamic or
 too-large pool. An explicit smaller count and `-n 0` remain unchanged. A short,
 isolated probe of the actual project pytest selects the matching supported
-major/minor config-discovery rules; unsupported versions fail closed. Prview then
+major/minor config-discovery rules; unsupported versions fail closed. The probe
+disables conftest loading, so discovering the version does not execute project
+`conftest.py` code. Prview then
 passes `-c` for the single highest-precedence config inside the reviewed root,
 or an explicit empty config when none exists, and fixes `--rootdir` to that
 root. Malformed, unreadable, non-UTF-8, or conflicting recognized config and
@@ -280,6 +284,30 @@ universally capped child pool. The same boundary applies to executable project
 `conftest.py` code and third-party pytest plugins: Pytest remains Exclusive, but
 prview does not claim to infer arbitrary plugin-created processes or xdist hook
 mutations.
+
+When Pytest runs in a reviewed snapshot, prview first starts it with a null
+config, disabled plugin autoload, empty plugin/addopts environment and no
+conftests. A temporary bootstrap plugin supplies fresh `HOME`,
+`USERPROFILE`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`,
+`XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `APPDATA` and `LOCALAPPDATA` directories.
+The bootstrap then restores the original pytest environment and calls
+`pytest.main` with the original bounded test arguments. Project and environment
+addopts keep their native precedence, including early `-p` plugins and ini
+overrides; pytest-managed project plugins and tests load after HOME is redirected.
+Tests that census the default home directory therefore see snapshot-local data,
+rather than the operator's live stores. The pytest log identifies this as
+`prview: snapshot-local HOME/XDG`; command provenance includes both the
+bootstrap options and the original test arguments after `--`.
+The directories and plugin are retained through the run and removed together
+when pytest finishes. Each concurrent run gets its own home.
+
+The uv/pytest launcher still uses the existing tool and dependency environment.
+Python's user package base is pinned before redirecting HOME, so user-installed
+pytest and xdist subprocess imports continue to work. Existing `PYTHONPATH`
+entries and explicit application-specific paths remain available. This is
+isolation of default home/config lookups, not an OS filesystem sandbox. A local
+checkout review keeps its original HOME/XDG behavior; only a snapshot enables
+the temporary plugin. Ruff, Mypy and uv dependency preparation are unaffected.
 
 Before checks start, the human preflight prints the requested/effective budget,
 parent and child caps, expensive tools, and the cheap-first execution schedule.
@@ -380,10 +408,19 @@ prview --help
 | `--with-bundle` | Enable the bundle build |
 | `--skip-bundle` | Skip the bundle build |
 | `--with-security` | Raise the heavy security posture (does not add cargo-geiger or full-tree Semgrep) |
-| `--skip-security` | Skip heavy security checks |
+| `--skip-security` | Skip Semgrep and heavy security checks; cargo-audit follows the selected profile |
 | `--security-full` | Full security tier: runs full-tree Semgrep and adds cargo-geiger's unsafe scan (slow; off even under `--deep`) |
 | `--resource-budget safe\|balanced` | Select the whole-machine envelope (`safe` is the default; `balanced` is capped and load-aware) |
 | `--tests-pattern PATTERN` | Filter Vitest by regex or Cargo/libtest by literal substring; Mixed uses the literal intersection and Pytest remains unfiltered |
+
+An explicit `--skip-security` disables Semgrep before tool discovery, including
+in quick review runs. This is separate from the heavy-security opt-in; an
+ordinary run without `--with-security` still uses the default Semgrep scan.
+The explicit opt-out is a declared mode skip. If policy requires Semgrep at
+`block` severity, the missing scan requires review and leaves analysis incomplete.
+A required scanner that is unavailable without an explicit opt-out still blocks.
+Cargo audit retains its separate lint/security eligibility; quick and gate
+profiles can skip it when both settings are disabled.
 
 By default, Semgrep is scoped to the change when prview can resolve a clean git
 baseline: it passes Semgrep `--baseline-commit <merge-base>` so existing
@@ -859,6 +896,53 @@ as an unordered set. Declaring scope intentionally remains part of the proof bec
 paths inside an impl can change meaning when it moves modules. Aliases used only
 inside generic arguments can therefore still produce a conservative warning;
 they are not neutralized without compiler-backed name resolution.
+
+#### Changes made inside a review snapshot
+
+Before and after each live check, and after checks finish, prview compares the
+shared snapshot with the original reviewed commit. Tracked/index changes or a changed snapshot HEAD require review; an
+unverifiable comparison also requires review. The original check status and exit
+code stay intact: passing Cargo tests still show PASS, while the pack becomes at
+least CONDITIONAL. Existing blocking failures remain BLOCK.
+
+`20_quality/SNAPSHOT_INTEGRITY.json` and `.md` preserve the original target,
+observed HEAD, complete tracked-path list, and any observation error. AI_INDEX
+points at this evidence; the dashboard artifact explorer links both files only
+when they exist. The gate and dashboard carry the same review signal.
+Newly untracked files, including a generated Cargo.lock, do not trigger this rule;
+a changed **tracked** Cargo.lock does. Staged changes, deletions and changes
+committed inside the snapshot are included. Local operator worktrees are outside
+this snapshot rule. An observed change remains visible even if a later check
+restores the file. Check names label observation boundaries and do not identify
+the writer when checks overlap. An observed HEAD change also remains in the
+human caveat after HEAD is restored, including an empty commit with no changed
+paths. Results overlapping an observed change are not
+written to cache. These observations are not atomic and do not cover later
+context commands; a change restored between observations can remain undetected.
+Boundary comparisons run on a blocking worker so progress and cancellation can
+still be polled. A failed comparison worker requires review and prevents caching
+the affected result.
+
+Checks use the commit resolved for the diff, even if its branch or PR ref moves
+or is deleted before snapshot creation. If that commit is unavailable, planning
+fails instead of scanning the operator checkout, including Semgrep's planner.
+A branch named exactly like the captured SHA cannot redirect the pinned object.
+The base is pinned the same way: a check that needs a base range (Semgrep's
+diff-scoped scan) reads the exact merge-base commit the pack diff was computed
+from, so a base branch that advances past your target while the run is still in
+flight cannot shrink the scanned range below what the pack reports.
+A new watch iteration resolves
+the target again. As a final consistency check, `shared snapshot target mismatch`
+aborts publication if the snapshot creation SHA differs from the diff target, and
+`shared snapshot missing for an off-HEAD review` aborts it when a review of a
+commit other than your checkout produced no reviewed tree at all, and
+`shared snapshot missing for a review with an unknown operator checkout` aborts
+it when no reviewed tree was materialised and your checkout could not be
+identified — an unborn `HEAD`, or a checkout switched while prview was reading
+provenance, which is discarded rather than certified. Rerun once the tree is
+settled.
+Changes made inside an already created snapshot still follow the integrity rule
+above.
 
 #### How to read an artifact pack
 

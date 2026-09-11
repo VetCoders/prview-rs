@@ -213,6 +213,7 @@ struct MergeGateInput<'a> {
     /// (R2-9/R3-16). Computed once per run for verdict parity with the dashboard
     /// context.
     clean_comparison: CleanComparison,
+    snapshot_integrity: Option<&'a signal::SnapshotIntegrity>,
 }
 
 pub(crate) struct DashboardContextInput<'a> {
@@ -231,6 +232,7 @@ pub(crate) struct DashboardContextInput<'a> {
     /// Mirrors `MergeGateInput::clean_comparison` — the same value feeds both so
     /// the two verdict surfaces cannot disagree on the pre-existing downgrade.
     clean_comparison: CleanComparison,
+    snapshot_integrity: Option<&'a signal::SnapshotIntegrity>,
     /// The run's substrate cross-check, resolved ONCE for the whole pack.
     ///
     /// The dashboard context is what `report.json` (`gate.review_caveats`), the
@@ -553,11 +555,56 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     // materialises one whenever the target is off-`HEAD`, whether or not a gate
     // needed it, so the fallback below is reached only for a local review (target
     // == `HEAD`, where the repo root IS the reviewed tree) or for a run whose
-    // snapshot could not be created at all — the same degraded path the checks
-    // themselves take.
+    // operator `HEAD` could not be read at all. The guard right below refuses to
+    // publish anything else.
     let context_scan_root = ledger
         .scan_dir()
         .unwrap_or_else(|| config.repo_root.clone());
+    // Freeze this run-wide observation before context commands can write more files.
+    let snapshot_integrity = match ledger.current_snapshot_observation() {
+        Some(observation) => {
+            // Re-resolving a moving ref before snapshot creation must not combine
+            // checks of one commit with a diff and metadata for another commit.
+            anyhow::ensure!(
+                observation.expected_target_sha == resolved_target.commit_id,
+                "shared snapshot target mismatch: reviewed target {}, snapshot created from {}; rerun the review against a stable target",
+                resolved_target.commit_id,
+                observation.expected_target_sha,
+            );
+            Some(signal::SnapshotIntegrity::from_observations(
+                observation,
+                ledger.snapshot_observations(),
+            ))
+        }
+        None => {
+            // The integrity question cannot be answered by asking the ledger
+            // whether it has anything to say: a run that reaches this point
+            // reviewing a commit other than the operator's own checkout never
+            // materialised the reviewed tree, so the stages below would read the
+            // operator's files while the pack claims the target. That is the
+            // `PRV-CONTEXT-SNAPSHOT-PROVENANCE` failure itself, and no missing
+            // observation may license it.
+            // An unknown checkout is not a known-good one. `--quick`/`--watch`
+            // publish with an empty ledger, and a HEAD that moved during capture
+            // (or an unborn one) leaves the operator identity `None` by design —
+            // the capture discards a raced reading rather than certify it. With
+            // no snapshot and no identity, nothing proves the local tree is the
+            // target, so the same refusal applies.
+            let Some(head) = worktree_head_sha.as_deref() else {
+                anyhow::bail!(
+                    "shared snapshot missing for a review with an unknown operator checkout: reviewed target {}; the checkout identity could not be captured and the reviewed tree was never materialised, so nothing proves this pack describes the target",
+                    resolved_target.commit_id,
+                );
+            };
+            anyhow::ensure!(
+                head == resolved_target.commit_id,
+                "shared snapshot missing for an off-HEAD review: reviewed target {}, operator checkout {}; the reviewed tree was never materialised, so no pack describes the target",
+                resolved_target.commit_id,
+                head,
+            );
+            None
+        }
+    };
     let mut context_artifacts =
         plan_context_artifacts(config, &context_scan_root, diffs, &all_checks, ledger);
 
@@ -589,6 +636,9 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     fs::create_dir_all(&quality_dir)?;
     fs::create_dir_all(&context_dir)?;
     fs::create_dir_all(&per_commit_dir)?;
+    if let Some(integrity) = &snapshot_integrity {
+        integrity.write(&quality_dir)?;
+    }
     ensure_generation_active(
         governor,
         &out_dir,
@@ -838,6 +888,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         resolved_target,
         resolved_bases,
         clean_comparison: clean_comparison.clone(),
+        snapshot_integrity: snapshot_integrity.as_ref(),
     })?;
     generate_failures_summary(&summary_dir, &all_checks)?;
     stage_timings.push(finish_timing(
@@ -978,6 +1029,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         diffs,
         ownership_map,
         clean_comparison,
+        snapshot_integrity: snapshot_integrity.as_ref(),
         provenance: &provenance_consistency,
     });
 

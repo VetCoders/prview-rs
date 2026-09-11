@@ -69,6 +69,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A real review on Windows no longer dies with `STATUS_STACK_OVERFLOW`: the
+  composed root future of the review pipeline did not fit the 1 MiB default
+  Windows main-thread stack, and Tokio cannot size the thread that runs
+  `block_on`. The entrypoint now builds its own runtime on a dedicated
+  64 MiB-stack thread on every platform.
+
+- Reviews of a commit other than the operator checkout fail publication when no
+  shared snapshot was materialised, instead of silently skipping the snapshot
+  integrity validation and describing the target with local files. An operator
+  checkout that could not be captured at all — an unborn `HEAD`, or one that moved
+  while provenance was being read, which the capture deliberately discards — now
+  fails the same way instead of skipping the guard: `--quick` and `--watch`
+  publish with an empty ledger, so an unknown checkout identity was the one way a
+  snapshot-free pack could still claim a target it never read.
+
+- Pinned targets use exact commit lookup even when a branch has the SHA as its
+  name; Semgrep cannot fall back to the operator checkout for an unavailable pin.
+  Snapshot boundary comparisons run off the async dispatcher and retain worker
+  failures as unknown evidence. Windows Semgrep invocation honors discovered
+  batch executables, with native CI coverage of the owned contract fixture.
+
+- Snapshot caveats retain observed HEAD changes after restoration, including
+  empty commits with no tracked-path changes. Security option help names the
+  Semgrep opt-out and no longer promises unconditional cargo-audit execution.
+
+- Check configurations pin the target resolved for the diff in headless, update
+  and TUI runs. Moved or deleted branch/PR refs cannot redirect shared checks to
+  the operator checkout; unavailable pinned commits fail planning explicitly.
+
+- Check configurations pin the review BASE alongside the target, so the whole
+  range is resolved once at diff capture. Semgrep's diff-scoped
+  `--baseline-commit` now reads that captured merge-base SHA instead of
+  re-resolving the symbolic base ref: a base branch that advanced past the target
+  mid-run (the reviewed branch merged into `main` while the run was in flight)
+  used to collapse the re-derived merge-base onto the target, so the scanner saw
+  an empty delta while the pack diff was non-empty and the report and the scanner
+  described different ranges. A pinned run carrying no captured base refuses to
+  plan, exactly like an unavailable pinned commit, rather than falling back to
+  symbolic resolution.
+
+- Final snapshot observations use the same immutable creation SHA as check
+  boundaries. A snapshot/diff target mismatch aborts publication before output
+  allocation, preventing a pack from combining two reviewed commits.
+
+- An explicit Semgrep security opt-out is a declared mode skip, requiring review
+  when policy requires the scanner instead of being classified as unknown.
+
+- Shared review snapshots now preserve tracked/index changes against the original
+  target as SNAPSHOT_INTEGRITY evidence and require review without rewriting
+  passing or failed Cargo results. Committed changes and unknown observations
+  cannot certify clean; newly untracked lockfiles do not trigger this rule.
+  Non-clean check boundaries remain visible after later restoration and prevent
+  overlapping results from entering the target cache.
+
 - `tools/validate_merge_gate.py` no longer certifies a schema-3.0 gate that
   omits `provenance_contradictions`, that carries contradiction rows with no
   `decision.review_caveats` array, that attributes a row to a `check_id` absent
