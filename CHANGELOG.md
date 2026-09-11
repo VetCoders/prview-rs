@@ -88,6 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as required by the new library, using the same scan options in tests.
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.
+- The repo's git hooks are fast guards only: the pre-commit hook runs
+  `rustfmt --check` on staged Rust files instead of `cargo check`, and the
+  `prview gate` pre-push hook is gone. Quality proof lives in required CI, where
+  clippy now covers `--all-targets`, and in an explicitly invoked `make check`.
 
 ### Fixed
 
@@ -168,6 +172,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-existing failure classification uses the operator HEAD captured before
   checks. A later checkout can invalidate stability but cannot grant a new
   downgrade; unknown captured HEAD no longer takes a permissive local fallback.
+
+- MCP process-ownership tests wait for a *complete* published pid instead of the
+  bare existence of the pid file. A shell's `>` redirection creates the file
+  before `printf`/`echo` writes the digits, so under parallel test load the
+  fixtures read an empty file and failed containment assertions that production
+  code had satisfied.
 
 - `locales/en.json` and `locales/pl.json` declare `summary.lintTotals` once.
   The obsolete `{new}/{legacy}` template was a duplicate key that JSON parsers

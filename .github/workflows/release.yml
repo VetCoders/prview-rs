@@ -18,7 +18,7 @@ jobs:
     name: Validate Release Metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate tag, Cargo.toml, and CHANGELOG
         shell: bash
         run: |
@@ -52,7 +52,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pinned master snapshot verified 2026-09-04; supports Rust branches through 1.120.
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:
@@ -73,7 +73,7 @@ jobs:
           ARCHIVE="prview-${{ matrix.target }}.tar.gz"
           tar czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" prview
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: prview-${{ matrix.target }}
           path: |
@@ -87,8 +87,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -97,7 +97,7 @@ jobs:
           cd artifacts
           cat ./*.sha256 | sort > SHA256SUMS
           rm -f -- ./*.sha256
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: |
@@ -115,7 +115,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pinned master snapshot verified 2026-09-04; supports Rust branches through 1.120.
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:

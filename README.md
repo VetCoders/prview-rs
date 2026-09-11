@@ -56,7 +56,7 @@ cargo install prview --locked --force
 From a local checkout (contributors / maintainers):
 
 ```bash
-make install        # binary + local pre-commit / pre-push hooks
+make install        # binary + local git hooks (fast guards, no compilation)
 make install-bin    # binary only
 ```
 
