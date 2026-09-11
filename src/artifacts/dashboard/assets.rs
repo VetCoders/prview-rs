@@ -2786,6 +2786,65 @@ mod tests {
         (&js[en_start..pl_start], &js[pl_value_start..end])
     }
 
+    /// Every key/value pair in source order, duplicates included.
+    ///
+    /// `serde_json::from_str` into a map silently keeps the last value for a
+    /// repeated key, so a duplicate is invisible to every other locale test
+    /// while the earlier translation is unreachable and the file is ambiguous
+    /// for a strict validator.
+    fn locale_entries(json: &str) -> Vec<(String, String)> {
+        struct Entries(Vec<(String, String)>);
+
+        impl<'de> serde::Deserialize<'de> for Entries {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct EntriesVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for EntriesVisitor {
+                    type Value = Entries;
+
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("a locale object of string values")
+                    }
+
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Entries, A::Error> {
+                        let mut entries = Vec::new();
+                        while let Some(entry) = map.next_entry::<String, String>()? {
+                            entries.push(entry);
+                        }
+                        Ok(Entries(entries))
+                    }
+                }
+
+                deserializer.deserialize_map(EntriesVisitor)
+            }
+        }
+
+        serde_json::from_str::<Entries>(json)
+            .expect("locale JSON should parse as string map")
+            .0
+    }
+
+    #[test]
+    fn locale_files_declare_each_key_once() {
+        for (name, json) in [("en", I18N_EN_JSON), ("pl", I18N_PL_JSON)] {
+            let entries = locale_entries(json);
+            let mut seen = BTreeMap::new();
+            let mut duplicates = Vec::new();
+            for (key, _) in entries {
+                if seen.insert(key.clone(), ()).is_some() {
+                    duplicates.push(key);
+                }
+            }
+            assert!(
+                duplicates.is_empty(),
+                "locales/{name}.json declares duplicate keys: {duplicates:?}"
+            );
+        }
+    }
+
     #[test]
     fn dashboard_locale_key_parity_en_pl() {
         let en = locale_map(I18N_EN_JSON);

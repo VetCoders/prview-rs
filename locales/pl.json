@@ -264,7 +264,6 @@
   "summary.filesBreakdown": "Pliki: {total} | kod poza testami: {code} | testy: {tests} | pozostałe: {other}",
   "summary.findingsCount": "Uwagi z narzędzi: {count}",
   "summary.headerStats": "Pliki: {total} | kod poza testami: {code} | testy: {test} | pozostałe: {other} | +{add} / -{del}",
-  "summary.lintTotals": "nowe: {new} / wcześniejsze: {legacy} / łącznie: {total}",
   "summary.lintTotals": "w zmienionych plikach: {changed} / poza zmienionymi: {outside} / pochodzenie nieustalone: {unknown} / łącznie: {total}",
   "summary.none": "brak",
   "summary.packContents": "zawartość paczki artefaktów",

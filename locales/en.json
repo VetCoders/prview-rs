@@ -264,7 +264,6 @@
   "summary.filesBreakdown": "{total} files | {code} non-test code | {tests} tests | {other} other",
   "summary.findingsCount": "{count} tool observations",
   "summary.headerStats": "{total} files | {code} non-test code | {test} tests | {other} other | +{add} / -{del}",
-  "summary.lintTotals": "{new} new / {legacy} legacy / {total} total",
   "summary.lintTotals": "{changed} in changed files / {outside} outside changed files / {unknown} origin unknown / {total} total",
   "summary.none": "none",
   "summary.packContents": "artifact pack contents",

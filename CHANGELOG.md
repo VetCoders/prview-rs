@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `locales/en.json` and `locales/pl.json` declare `summary.lintTotals` once.
+  The obsolete `{new}/{legacy}` template was a duplicate key that JSON parsers
+  silently discarded; a locale test now rejects duplicate keys outright.
+
 - A Rust source file counted as covered through an inline `#[cfg(test)]` module
   shows the marker as text. It was rendered as a source link, and clicking it
   opened a "source unavailable" dialog because no blob exists under a synthetic
