@@ -118,6 +118,14 @@ with_cancellation(app.run(), run governor)
     └─► artifacts::generate()  ─── numbered layout + signal generators
 ```
 
+`main.rs` is a synchronous entrypoint: it spawns a `prview-main` thread with a
+64 MiB stack, builds the multi-threaded Tokio runtime there and `block_on`s the
+pipeline, then resumes any panic from that thread so the exit code is unchanged.
+Everything above is one composed future polled by that `block_on`, and Tokio
+cannot size the thread that runs it, so the whole pipeline would otherwise be
+held by the platform's main-thread stack — 1 MiB on Windows, which a debug build
+overflows.
+
 ## Modules
 
 ### cli/mod.rs

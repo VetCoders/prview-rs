@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A real review on Windows no longer dies with `STATUS_STACK_OVERFLOW`: the
+  composed root future of the review pipeline did not fit the 1 MiB default
+  Windows main-thread stack, and Tokio cannot size the thread that runs
+  `block_on`. The entrypoint now builds its own runtime on a dedicated
+  64 MiB-stack thread on every platform.
+
 - Reviews of a commit other than the operator checkout fail publication when no
   shared snapshot was materialised, instead of silently skipping the snapshot
   integrity validation and describing the target with local files.

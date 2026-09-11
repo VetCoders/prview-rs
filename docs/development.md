@@ -156,7 +156,7 @@ cargo doc --open
 
 ```
 src/
-├── main.rs            # Entry point
+├── main.rs            # Entry point (sync; runs the pipeline on a big-stack thread)
 ├── lib.rs             # App orchestration
 ├── cli/mod.rs         # CLI parsing (clap)
 ├── config/mod.rs      # Configuration & profile detection
