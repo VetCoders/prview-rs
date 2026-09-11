@@ -20,8 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::signal::{
-    ArtifactCounters, HOTSPOT_THRESHOLD, compute_risk_heatmap, detect_orphaned_resource_delete,
-    find_per_file_patch, read_disk_artifact_counters,
+    ArtifactCounters, HOTSPOT_THRESHOLD, ProvenanceConsistency, ProvenanceContradiction,
+    compute_risk_heatmap, detect_orphaned_resource_delete, find_per_file_patch,
+    read_disk_artifact_counters,
 };
 
 const GENERATED_PATH_PREFIXES: &[&str] = &[
@@ -55,6 +56,17 @@ pub struct ReportInput<'a> {
     pub run_started_at: &'a str,
     pub heuristics: Option<&'a crate::heuristics::HeuristicsResult>,
     pub regression: Option<&'a crate::regression::RegressionReport>,
+    /// The run's substrate cross-check, resolved ONCE for the whole pack and
+    /// handed to every surface that publishes it (see
+    /// [`super::signal::detect_provenance_contradictions`]).
+    ///
+    /// Passed rather than re-derived here because `report.json` has no access to
+    /// the operator cleanliness frozen before the checks ran; taking the value
+    /// itself is the strongest form of the same guarantee the merge gate gets by
+    /// re-deriving it from identical inputs — `report.json`, `PROVENANCE.json`,
+    /// `MERGE_GATE.json` and `CONSISTENCY_CHECK.json` cannot name different
+    /// contradictions.
+    pub provenance: &'a ProvenanceConsistency,
 }
 
 /// Generate `report.json` in the artifact root directory.
@@ -584,6 +596,16 @@ struct ConsistencySection {
     checked_fields: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<ConsistencyWarningEntry>,
+    /// How many run/check substrate statements were comparable. Emitted even
+    /// when nothing disagreed, so "checked and agreed" stays distinguishable
+    /// from "nothing could be checked".
+    provenance_comparisons: usize,
+    /// The IDENTICAL rows `00_summary/PROVENANCE.json` publishes as
+    /// `consistency.contradictions` and `00_summary/MERGE_GATE.json` as
+    /// `provenance_contradictions`. Always emitted, empty included: a reader who
+    /// only has `report.json` must be able to see that the substrate was
+    /// cross-checked at all.
+    provenance_contradictions: Vec<ProvenanceContradiction>,
 }
 
 #[derive(Serialize)]
@@ -1063,7 +1085,7 @@ fn build_report(input: &ReportInput<'_>) -> Report {
             // from the report (the b1697d4 class). Pairing a value with itself,
             // as before, could never catch a mismatch.
             let disk = read_disk_artifact_counters(input.dir);
-            let consistency = ArtifactCounters {
+            let mut consistency = ArtifactCounters {
                 files_changed_diff: Some(all_files.len()),
                 files_changed_report: None,
                 findings_count_sarif: disk.findings_count_sarif,
@@ -1081,10 +1103,19 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                 verdict_report: Some(ctx.verdict.to_string()),
             }
             .check_consistency();
+            // Semantics, not just counters — and the SAME fold
+            // `CONSISTENCY_CHECK.json` applies. Counter parity cannot see a pack
+            // whose run-level substrate and per-check substrate describe
+            // different trees, so before this, `report.json` could publish
+            // `consistent: true` for the very run `CONSISTENCY_CHECK.json`
+            // called inconsistent: one fact, two values.
+            consistency.merge_provenance(input.provenance);
 
             ConsistencySection {
                 consistent: consistency.consistent,
                 checked_fields: consistency.checked_fields,
+                provenance_comparisons: input.provenance.comparisons,
+                provenance_contradictions: input.provenance.contradictions.clone(),
                 warnings: consistency
                     .warnings
                     .into_iter()
@@ -1394,6 +1425,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-09T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1500,6 +1532,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-09T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1617,6 +1650,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-09T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1740,6 +1774,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1879,6 +1914,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics: Some(&heuristics),
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -1978,6 +2014,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
         serde_json::to_value(build_report(&input)).expect("serialize report")
     }
@@ -2255,6 +2292,7 @@ test result: FAILED. 0 passed; 1 failed
             run_started_at: "2026-03-12T00:00:00Z",
             heuristics: None,
             regression: None,
+            provenance: &ProvenanceConsistency::default(),
         };
 
         let report = build_report(&input);
@@ -2273,5 +2311,127 @@ test result: FAILED. 0 passed; 1 failed
                 .as_str()
                 .is_some_and(|text| text.contains("paste (unmaintained)"))
         }));
+    }
+    /// report.json must not call a run consistent that CONSISTENCY_CHECK.json
+    /// calls inconsistent. Its counter comparison is narrower than the summary
+    /// checker's, so the substrate contradictions have to be folded in here too
+    /// — from the SAME value PROVENANCE.json and the gate publish.
+    #[test]
+    fn report_consistency_publishes_the_pack_provenance_contradictions() {
+        use crate::artifacts::signal::detect_provenance_contradictions;
+        use crate::checks::{CheckProvenance, TreeState};
+        use crate::config::test_config;
+        use crate::git::ResolvedRef;
+        use std::time::Duration;
+
+        let target_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let checks = vec![CheckResult {
+            name: "Cargo clippy".to_string(),
+            status: CheckStatus::Passed,
+            duration: Duration::from_secs(1),
+            output: String::new(),
+            cached: false,
+            provenance: Some(CheckProvenance {
+                command: "cargo clippy".to_string(),
+                tool_version: None,
+                cwd: "/repo".to_string(),
+                target_sha: Some(target_sha.to_string()),
+                // The run froze the operator tree clean below; this row says the
+                // opposite about that same tree.
+                tree_state: Some(TreeState::LocalDirty),
+                exit_code: Some(0),
+                started_at: "2026-09-11T10:00:00+02:00".to_string(),
+                finished_at: "2026-09-11T10:00:01+02:00".to_string(),
+                hard_fail_signatures: Vec::new(),
+                cache_key: None,
+            }),
+        }];
+        let provenance = detect_provenance_contradictions(
+            crate::artifacts::signal::RunProvenance {
+                target_sha,
+                operator_worktree_clean: Some(true),
+            },
+            &checks,
+        );
+        assert_eq!(
+            provenance.contradictions.len(),
+            1,
+            "fixture must produce exactly one contradiction"
+        );
+
+        let config = test_config();
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let target = ResolvedRef {
+            name: "feature/provenance".to_string(),
+            commit_id: target_sha.to_string(),
+            is_remote: false,
+        };
+        let bases = vec![ResolvedRef {
+            name: "main".to_string(),
+            commit_id: "cafebabe".to_string(),
+            is_remote: false,
+        }];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let input = ReportInput {
+            dir: tmp.path(),
+            config: &config,
+            diffs: &[],
+            checks: &checks,
+            resolved_target: &target,
+            resolved_bases: &bases,
+            ctx: &ctx,
+            run_started_at: "2026-09-11T00:00:00Z",
+            heuristics: None,
+            regression: None,
+            provenance: &provenance,
+        };
+
+        let json = serde_json::to_value(build_report(&input)).expect("serialize report");
+        let consistency = &json["quality"]["consistency"];
+
+        assert_eq!(
+            consistency["consistent"].as_bool(),
+            Some(false),
+            "a contradicted substrate cannot be published as consistent: {consistency}"
+        );
+        assert_eq!(
+            consistency["provenance_contradictions"],
+            serde_json::to_value(&provenance.contradictions).expect("serialize contradictions"),
+            "report.json must carry the pack's rows verbatim, not a summary of them"
+        );
+        assert_eq!(
+            consistency["provenance_comparisons"].as_u64(),
+            Some(provenance.comparisons as u64)
+        );
+        assert!(
+            consistency["warnings"]
+                .as_array()
+                .expect("warnings array")
+                .iter()
+                .any(|warning| warning["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("PROVENANCE_CONTRADICTION"))),
+            "the contradiction is also a consistency warning: {consistency}"
+        );
+    }
+
+    /// The other half of the invariant: a run with nothing to contradict still
+    /// SAYS so, rather than omitting the field and leaving "checked and agreed"
+    /// indistinguishable from "never checked".
+    #[test]
+    fn report_consistency_states_an_empty_provenance_cross_check() {
+        let ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        let json = skip_as_zero_report(&ctx, None, false);
+        let consistency = &json["quality"]["consistency"];
+
+        assert_eq!(consistency["consistent"].as_bool(), Some(true));
+        assert_eq!(
+            consistency["provenance_contradictions"]
+                .as_array()
+                .expect("contradictions must always be an array")
+                .len(),
+            0
+        );
+        assert_eq!(consistency["provenance_comparisons"].as_u64(), Some(0));
     }
 }
