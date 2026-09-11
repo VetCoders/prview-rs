@@ -24,7 +24,7 @@ pub(super) fn inventory(dir: &Path) -> Vec<EvidenceFile> {
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| e.path().strip_prefix(dir).ok().map(Path::to_path_buf))
         .filter(|p| !matches!(p.extension().and_then(|s| s.to_str()), Some("html" | "zip")))
-        // An `prview mcp` run leaves its liveness and launcher logs in the
+        // A `prview mcp` run leaves its liveness and launcher logs in the
         // output directory while this walk happens. They are mutable launcher
         // controls, not pack payload — `RUNNING.json` is deleted when the run
         // ends and `run.log` can still grow after this snapshot — which is why
