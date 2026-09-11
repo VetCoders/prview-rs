@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assumes that type — or that matches `classification` without a default branch
   — needs updating. `docs/contracts/merge_gate.md` documents the tri-state.
 
+- Updated the bundled Loctree library from 0.13.0 to 0.14.4, together with
+  its `loctree-ast` and `report-leptos` dependencies. Structural analysis uses
+  this compiled library independently of any installed Loctree CLI.
+  The integration explicitly permits deliberate non-git revision archives,
+  as required by the new library, using the same scan options in tests.
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.
 
