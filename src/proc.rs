@@ -142,7 +142,7 @@ fn unix_child_exited_without_reaping(_pid: u32) -> std::io::Result<bool> {
     ))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn child_exited_without_reaping_for_test(pid: u32) -> std::io::Result<bool> {
     unix_child_exited_without_reaping(pid)
 }
