@@ -1223,16 +1223,34 @@ fn read_bounded_python_config(file: std::fs::File, label: &str) -> Result<Vec<u8
 
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > MAX_PYTHON_CONFIG_BYTES {
-        anyhow::bail!("{label} is not a bounded regular file (limit: 1 MiB)");
+        anyhow::bail!(
+            "{label} is not a bounded regular file (limit: {})",
+            python_config_limit()
+        );
     }
 
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_PYTHON_CONFIG_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_PYTHON_CONFIG_BYTES {
-        anyhow::bail!("{label} exceeds the bounded read limit (1 MiB)");
+        anyhow::bail!(
+            "{label} exceeds the bounded read limit ({})",
+            python_config_limit()
+        );
     }
     Ok(bytes)
+}
+
+/// Render the enforced bound for operator messages. Derived from
+/// [`MAX_PYTHON_CONFIG_BYTES`] so a changed limit cannot leave the refusal
+/// quoting a number the code no longer applies.
+fn python_config_limit() -> String {
+    const MIB: u64 = 1024 * 1024;
+    if MAX_PYTHON_CONFIG_BYTES.is_multiple_of(MIB) {
+        format!("{} MiB", MAX_PYTHON_CONFIG_BYTES / MIB)
+    } else {
+        format!("{MAX_PYTHON_CONFIG_BYTES} bytes")
+    }
 }
 
 fn positive_uv_concurrency_limit(
@@ -3552,7 +3570,7 @@ mod tests {
                     .chars()
                     .take(200)
                     .collect::<String>()
-                    .contains("limit: 1 MiB"),
+                    .contains(&format!("limit: {}", python_config_limit())),
                 "{name}: {error:#}"
             );
         }
@@ -3589,7 +3607,12 @@ mod tests {
             .unwrap();
         let error = selected_pytest_config(root.path(), PytestConfigDialect::Nine)
             .expect_err("symlink targets have the same size bound");
-        assert!(error.to_string().contains("limit: 1 MiB"));
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("limit: {}", python_config_limit())),
+            "{error:#}"
+        );
     }
 
     #[cfg(unix)]
