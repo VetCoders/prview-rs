@@ -73,6 +73,20 @@ Scope is optional but welcome: `fix(dashboard): XSS in copy button`.
 - Ensure CI passes (fmt, clippy, tests)
 - Link related issues if applicable
 
+## Dependency maintenance
+
+`.github/dependabot.yml` checks Cargo dependencies and GitHub Actions weekly
+on Mondays at 07:00 Europe/Warsaw. Cargo version updates have at most two
+open PRs; the Loctree library, AST crate, and report renderer are grouped.
+Actions updates share one group and at most one open version-update PR.
+These limits apply to version updates; GitHub handles security-update PRs
+separately ([Dependabot options](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference)).
+
+The bot proposes changes for review and the normal CI gates; this repository
+configuration does not enable auto-merge. Dependabot reads its configuration
+from the default branch, so adding this file on a feature branch does not yet
+activate scheduled updates.
+
 ## Release maintenance
 
 Maintainers should use the repo-level helpers instead of ad-hoc commands:

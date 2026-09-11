@@ -50,6 +50,19 @@ cargo test --lib
 cargo test --test json_contract
 ```
 
+For resource-constrained validation, run stages sequentially with explicit caps:
+
+```bash
+CARGO_BUILD_JOBS=2 RAYON_NUM_THREADS=2 RUST_TEST_THREADS=1 cargo test --locked -- --test-threads=1
+```
+
+Caps supplement test correctness. Subprocess tests must use small owned fixtures,
+bounded waits, and cleanup on assertion failure or timeout. The MCP contract
+harness bounds each RPC response and cleans its owned process tree before reaping
+the server, so a timed-out deep-review test cannot discard the live ancestry
+needed to find its detached review. A cleanup failure is a failed test, not a
+successful timeout. Pagination over a finite fixture also has a finite page bound.
+
 JSON and MCP binary contract tests use `tests/support/mod.rs` to own a temporary
 `PRVIEW_HOME` and prepend a local Semgrep test double to each child process's
 `PATH`. The fixture returns an empty successful scan without downloading rules
