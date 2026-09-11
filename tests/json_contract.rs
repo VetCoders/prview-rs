@@ -2290,6 +2290,35 @@ fn generated_pack_carries_pack_level_provenance() {
         Some(true),
         "a run with no contradiction stays consistent: {consistency_check}"
     );
+    // report.json is the fourth surface that states this fact, and it has its
+    // own, narrower consistency section. One fact, one value: its contradiction
+    // list must be the SAME list, its comparison count the same count, and its
+    // `consistent` flag must not disagree with the summary checker's.
+    let report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output_dir.join("report.json")).expect("read report.json"),
+    )
+    .expect("parse report.json");
+    let report_consistency = &report["quality"]["consistency"];
+    assert_eq!(
+        report_consistency["provenance_contradictions"],
+        *consistency.get("contradictions").expect("contradictions"),
+        "report.json and PROVENANCE.json must name the same contradictions"
+    );
+    assert_eq!(
+        report_consistency["provenance_contradictions"], merge_gate["provenance_contradictions"],
+        "report.json and MERGE_GATE.json must name the same contradictions"
+    );
+    assert_eq!(
+        report_consistency["provenance_comparisons"],
+        *consistency.get("comparisons").expect("comparisons"),
+        "report.json must report the same number of substrate comparisons"
+    );
+    assert_eq!(
+        report_consistency["consistent"].as_bool(),
+        consistency_check["consistent"].as_bool(),
+        "report.json and CONSISTENCY_CHECK.json must agree on consistency: \
+         {report_consistency} vs {consistency_check}"
+    );
     let checks_status: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(output_dir.join("checks-status.json"))
             .expect("read checks-status.json"),

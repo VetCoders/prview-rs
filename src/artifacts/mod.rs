@@ -1028,6 +1028,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         run_started_at: &run_started_at,
         heuristics,
         regression: Some(&regression_report),
+        provenance: &provenance_consistency,
     })?;
     generate_consistency_check(&summary_dir, &out_dir, diffs, &provenance_consistency)?;
     if config.create_dashboard {
