@@ -13,6 +13,24 @@ pub(super) fn is_operator_finding(finding: &DashboardFinding) -> bool {
     matches!(finding.level, "error" | "warning")
 }
 
+/// The operator-finding list: the canonical rows that are diagnostics rather
+/// than evidence about the run.
+///
+/// This is the only place the predicate is applied to a whole summary, and the
+/// rows it keeps are exactly the ones emitted as SARIF results — informational
+/// notes stay in `InlineFindingsSummary::dashboard_findings` but never reach
+/// the SARIF file, so counting them would make `quality.sarif.findings_count`
+/// describe a file that does not contain them. Build
+/// `DashboardContext::findings` through this function rather
+/// than copying the unfiltered list, so the current count, the run history and
+/// the previous-run delta cannot drift apart.
+pub(super) fn operator_findings(all: &[DashboardFinding]) -> Vec<DashboardFinding> {
+    all.iter()
+        .filter(|finding| is_operator_finding(finding))
+        .cloned()
+        .collect()
+}
+
 /// The origin tri-state every SARIF result carries, per
 /// `docs/contracts/merge_gate.md`.
 ///

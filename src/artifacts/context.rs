@@ -83,7 +83,10 @@ pub(crate) struct DashboardContext {
     pub coverage: CoverageDelta,
     /// Operator findings only — the canonical rows that pass
     /// [`super::findings::is_operator_finding`], filtered exactly once when
-    /// this context is built.
+    /// this context is built. Populate it with
+    /// [`super::findings::operator_findings`]; that is also the set emitted as
+    /// SARIF results, so the count cannot describe a file that carries
+    /// something else.
     ///
     /// Informational notes (a Cargo audit baseline row, a Loctree repository
     /// summary) are evidence about the run, not diagnostics, and never enter
@@ -240,12 +243,7 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
     // The single application of the operator predicate. Everything downstream
     // — report.json, the run-history row below, and the previous-run delta —
     // counts this list, so the three numbers stay comparable across runs.
-    let findings = inline
-        .dashboard_findings
-        .iter()
-        .filter(|finding| is_operator_finding(finding))
-        .cloned()
-        .collect::<Vec<_>>();
+    let findings = findings::operator_findings(&inline.dashboard_findings);
     // Discover per-file diff files
     let per_file_dir = diff_dir.join("per-file-diffs");
     let per_file_diff_files = if per_file_dir.exists() {

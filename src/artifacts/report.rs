@@ -2129,7 +2129,11 @@ test result: FAILED. 0 passed; 1 failed
         )
         .unwrap();
         let mut ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
-        ctx.findings = inline.dashboard_findings;
+        // Build the context the way `build_dashboard_context` does: the
+        // operator-finding list, not the raw summary. Copying the unfiltered
+        // rows here would make the fixture report a number no production run
+        // can produce.
+        ctx.findings = crate::artifacts::findings::operator_findings(&inline.dashboard_findings);
         let config = crate::config::test_config();
         let target = ResolvedRef {
             name: "feature/findings".into(),
@@ -2148,7 +2152,35 @@ test result: FAILED. 0 passed; 1 failed
             heuristics: None,
             regression: None,
         });
-        serde_json::to_value(report).expect("serialize report")
+        let report = serde_json::to_value(report).expect("serialize report");
+
+        // `quality.sarif.findings_count` describes the SARIF artifact, so it has
+        // to equal the number of results that file actually carries. Notes are
+        // canonical evidence about the run, not SARIF results, so they are
+        // absent from both sides of this equality.
+        let sarif_path = context_dir.join("INLINE_FINDINGS.sarif");
+        let emitted: usize = if sarif_path.exists() {
+            let sarif: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&sarif_path).expect("read sarif"))
+                    .expect("parse sarif");
+            sarif["runs"]
+                .as_array()
+                .map(|runs| {
+                    runs.iter()
+                        .map(|run| run["results"].as_array().map_or(0, |r| r.len()))
+                        .sum()
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        assert_eq!(
+            report["quality"]["sarif"]["findings_count"].as_u64(),
+            Some(emitted as u64),
+            "the reported count must match the results the SARIF file carries"
+        );
+
+        report
     }
 
     #[test]
