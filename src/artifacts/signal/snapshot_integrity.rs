@@ -123,10 +123,16 @@ impl SnapshotIntegrity {
             } else {
                 ""
             };
-            format!(
-                "{} tracked path(s) observed changed: {paths}{suffix}{head}",
-                changed_paths.len()
-            )
+            if changed_paths.is_empty() {
+                // A bare "0 tracked path(s) observed changed:" reads as "nothing
+                // happened" and then trails an empty list. Say what was observed.
+                format!("no tracked path change observed{head}")
+            } else {
+                format!(
+                    "{} tracked path(s) observed changed: {paths}{suffix}{head}",
+                    changed_paths.len()
+                )
+            }
         } else {
             "tracked-path comparison is unavailable".to_owned()
         };
@@ -204,7 +210,12 @@ mod tests {
         assert!(!restored.requires_review());
         let evidence = SnapshotIntegrity::from_observations(restored, vec![changed]);
         assert!(evidence.requires_review());
-        assert!(evidence.review_caveat().contains("snapshot HEAD changed"));
+        let caveat = evidence.review_caveat();
+        assert!(caveat.contains("snapshot HEAD changed"), "{caveat}");
+        assert!(
+            caveat.contains("no tracked path change observed"),
+            "an empty list must not be announced as a path enumeration: {caveat}"
+        );
     }
 
     #[test]
