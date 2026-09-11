@@ -417,8 +417,11 @@ fn plan_semgrep_scan(config: &Config) -> std::result::Result<SemgrepScanPlan, St
         Ok(repo) => repo,
         Err(error) => {
             if config.pinned_target.is_some() {
+                // Name the class, not only the cause: the policy engine reads
+                // this reason, and an unavailable substrate must never be
+                // scored as a declared mode skip.
                 return Err(format!(
-                    "semgrep: cannot open repository for pinned review target: {error:#}"
+                    "semgrep: the pinned review target is unavailable, its repository cannot be opened: {error:#}"
                 ));
             }
             // Unpinned, non-repository scans retain their in-place behavior.
@@ -438,7 +441,7 @@ fn plan_semgrep_scan(config: &Config) -> std::result::Result<SemgrepScanPlan, St
         Err(error) => {
             if config.pinned_target.is_some() {
                 return Err(format!(
-                    "semgrep: cannot plan scan for pinned review target: {error:#}"
+                    "semgrep: the pinned review target is unavailable for scan planning: {error:#}"
                 ));
             }
             // An unresolved, unpinned input retains its in-place fallback.
@@ -967,8 +970,40 @@ mod tests {
             commit_id: "f".repeat(40),
             is_remote: true,
         });
-        assert!(plan_semgrep_scan(&config).is_err());
+        let Err(reason) = plan_semgrep_scan(&config) else {
+            panic!("an unavailable pin cannot be planned");
+        };
         assert_eq!(worktree_count(tmp.path()), 1);
+
+        // The refusal must reach the gate as missing evidence, never as one of
+        // the declared mode skips that merely make the run advisory.
+        use crate::policy::engine::{
+            CheckExecutionState, MergeRecommendation, PolicyConclusion, PolicyEngine, ToolOutcome,
+        };
+        config.policy.checks.insert(
+            "semgrep_scan".to_string(),
+            crate::policy::PolicySeverity::Block,
+        );
+        let evaluation = PolicyEngine::new(&config).evaluate_run(&CheckResult {
+            name: SemgrepCheck.name().to_string(),
+            status: CheckStatus::Skipped,
+            duration: std::time::Duration::ZERO,
+            output: reason.clone(),
+            cached: false,
+            provenance: None,
+        });
+        assert_eq!(
+            evaluation.execution_state,
+            CheckExecutionState::Unavailable,
+            "{reason}"
+        );
+        assert_eq!(evaluation.outcome, ToolOutcome::Unavailable, "{reason}");
+        assert_eq!(evaluation.conclusion, PolicyConclusion::Blocked, "{reason}");
+        assert_eq!(
+            evaluation.merge_impact,
+            MergeRecommendation::Block,
+            "{reason}"
+        );
     }
 
     #[test]
