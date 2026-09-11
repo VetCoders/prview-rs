@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -499,10 +500,32 @@ def validate(path: Path) -> list[str]:
     # one artifact naming a contradiction the other hides is the exact failure
     # this field exists to prevent.
     if schema_at_least(data.get("schema_version"), (3, 0)):
-        contradictions = data.get("provenance_contradictions", [])
+        # The array is REQUIRED from 3.0, empty included: "cross-checked and
+        # agreed" and "never cross-checked" are different results, and a reader
+        # holding only this file must be able to tell them apart. Defaulting a
+        # missing field to [] certified a gate that simply omitted it -- and
+        # omitting it is precisely how a contradiction disappears.
+        if "provenance_contradictions" not in data:
+            issues.append("root: missing key 'provenance_contradictions'")
+            contradictions: Any = []
+        else:
+            contradictions = data["provenance_contradictions"]
         if not isinstance(contradictions, list):
             issues.append("provenance_contradictions must be an array")
             contradictions = []
+        # Attribution: a row names the check whose provenance disagrees, spelled
+        # the way `checks[].id` spells it (both sides call
+        # `check_id_from_name`). A row pointing at a check this gate never
+        # emitted is evidence no reader can follow back to anything.
+        emitted_check_ids = {
+            check["id"]
+            for check in (data["checks"] if isinstance(data.get("checks"), list) else [])
+            if isinstance(check, dict) and isinstance(check.get("id"), str)
+        }
+        # The review signal each valid row obliges, built exactly as
+        # `ProvenanceConsistency::review_caveats` builds it in
+        # src/artifacts/signal/consistency.rs.
+        expected_signals: list[str] = []
         for index, row in enumerate(contradictions):
             ctx = f"provenance_contradictions[{index}]"
             if not isinstance(row, dict):
@@ -521,24 +544,53 @@ def validate(path: Path) -> list[str]:
                 )
             for field in PROVENANCE_CONTRADICTION_KEYS[2:]:
                 require_non_empty_string(row[field], f"{ctx}.{field}", issues)
+            if isinstance(row["check_id"], str) and row["check_id"] not in emitted_check_ids:
+                issues.append(
+                    f"{ctx}.check_id must name a check emitted by this gate "
+                    f"(no checks[] entry with id {row['check_id']!r})"
+                )
+            if isinstance(row["code"], str) and isinstance(row["explanation"], str):
+                expected_signals.append(f"{row['code']}: {row['explanation']}")
         raw_caveats = (
             data["decision"].get("review_caveats")
             if isinstance(data.get("decision"), dict)
             else None
         )
-        if isinstance(raw_caveats, list):
-            signalled = sum(
-                1
+        if not isinstance(raw_caveats, list):
+            # Absent or mistyped is only silence about nothing when there is
+            # nothing to be silent about. Counting it as "zero signals" was how
+            # a gate carrying rows and no caveats at all validated clean.
+            if contradictions:
+                issues.append(
+                    "decision.review_caveats must be an array carrying one "
+                    f"{PROVENANCE_CONTRADICTION_CODE} signal per "
+                    f"provenance_contradictions row ({len(contradictions)} rows, "
+                    "no review_caveats array)"
+                )
+        else:
+            observed_signals = [
+                caveat
                 for caveat in raw_caveats
                 if isinstance(caveat, str)
                 and caveat.startswith(PROVENANCE_CONTRADICTION_CODE)
-            )
-            if signalled != len(contradictions):
+            ]
+            # Correspondence, not arithmetic: equal counts proved nothing about
+            # WHICH contradictions were signalled, so N rows could be announced
+            # by N copies of one signal, or by N signals naming something else
+            # entirely. Compared as multisets, every row must be spoken for and
+            # nothing may be announced that no row supports.
+            missing_signals = Counter(expected_signals) - Counter(observed_signals)
+            unsupported_signals = Counter(observed_signals) - Counter(expected_signals)
+            for signal, count in sorted(missing_signals.items()):
                 issues.append(
-                    "decision.review_caveats must carry one "
-                    f"{PROVENANCE_CONTRADICTION_CODE} signal per "
-                    f"provenance_contradictions row ({signalled} signals for "
-                    f"{len(contradictions)} rows)"
+                    f"decision.review_caveats is missing {count} signal(s) for "
+                    f"provenance_contradictions rows: {signal!r}"
+                )
+            for signal, count in sorted(unsupported_signals.items()):
+                issues.append(
+                    f"decision.review_caveats carries {count} "
+                    f"{PROVENANCE_CONTRADICTION_CODE} signal(s) no "
+                    f"provenance_contradictions row supports: {signal!r}"
                 )
 
     policy_mode = policy.get("mode") if isinstance(policy, dict) else None

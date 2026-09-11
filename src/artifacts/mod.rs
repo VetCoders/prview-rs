@@ -233,6 +233,13 @@ pub(crate) struct DashboardContextInput<'a> {
     /// the two verdict surfaces cannot disagree on the pre-existing downgrade.
     clean_comparison: CleanComparison,
     snapshot_integrity: Option<&'a signal::SnapshotIntegrity>,
+    /// The run's substrate cross-check, resolved ONCE for the whole pack.
+    ///
+    /// The dashboard context is what `report.json` (`gate.review_caveats`), the
+    /// dashboard HTML and its "Copy PR comment" projection all read, so the
+    /// contradictions have to reach it or those three surfaces stay silent about
+    /// a disagreement `MERGE_GATE.json` names.
+    provenance: &'a ProvenanceConsistency,
 }
 
 /// Provenance for the synthetic `heuristics_loctree` result.
@@ -1023,6 +1030,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         ownership_map,
         clean_comparison,
         snapshot_integrity: snapshot_integrity.as_ref(),
+        provenance: &provenance_consistency,
     });
 
     // Root-level report.json (generated first so dashboard can embed it)

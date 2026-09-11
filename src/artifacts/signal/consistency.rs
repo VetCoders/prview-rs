@@ -332,6 +332,27 @@ impl ProvenanceConsistency {
     pub fn is_empty(&self) -> bool {
         self.contradictions.is_empty()
     }
+
+    /// The review signals these contradictions contribute, rendered ONCE here.
+    ///
+    /// Every surface that publishes review caveats reads this list:
+    /// `MERGE_GATE.json`'s `decision.review_caveats`, `report.json`'s
+    /// `gate.review_caveats`, and — through the dashboard context both the
+    /// dashboard HTML and its "Copy PR comment" projection sit on — the
+    /// operator-facing summary. The format is the contract
+    /// (`docs/contracts/merge_gate.md`): `<code>: <explanation>`, one entry per
+    /// row, which `tools/validate_merge_gate.py` matches against the typed rows
+    /// as a multiset.
+    ///
+    /// It is a method rather than a copied `format!` at each consumer because
+    /// that copy is exactly how the surfaces drifted: the gate named a
+    /// contradiction that report.json and the PR comment did not.
+    pub fn review_caveats(&self) -> Vec<String> {
+        self.contradictions
+            .iter()
+            .map(|contradiction| format!("{}: {}", contradiction.code, contradiction.explanation))
+            .collect()
+    }
 }
 
 /// The run-level substrate every check row is held against.

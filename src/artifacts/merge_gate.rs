@@ -377,12 +377,12 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
         },
         checks,
     );
-    for contradiction in &provenance.contradictions {
-        all_review_caveats.push(format!(
-            "{}: {}",
-            contradiction.code, contradiction.explanation
-        ));
-    }
+    //
+    // The signal strings come from `ProvenanceConsistency::review_caveats` — the
+    // single renderer the dashboard context (and through it report.json and the
+    // "Copy PR comment" projection) reads as well, so no surface can name a
+    // contradiction another one spells differently or omits.
+    all_review_caveats.extend(provenance.review_caveats());
 
     if worst_merge == MergeRecommendation::ReviewRequired && all_review_caveats.is_empty() {
         all_review_caveats.push("Partial or degraded analysis coverage".to_string());
@@ -1011,6 +1011,119 @@ mod tests {
         );
     }
 
+    /// One canonical review-signal list, not three that happen to agree.
+    ///
+    /// The contradiction used to reach `MERGE_GATE.json` alone: report.json's
+    /// `gate.review_caveats`, the dashboard, and the dashboard's "Copy PR
+    /// comment" (which reads that very field out of the embedded report) all
+    /// derive from the dashboard context, and the context was built with no
+    /// provenance at all. The pack therefore named the disagreement in the
+    /// artifact machines read and hid it from the three a human reads. Every
+    /// surface now takes the string from
+    /// `ProvenanceConsistency::review_caveats`, so the signal is not merely
+    /// present in each — it is the identical string.
+    #[test]
+    fn one_provenance_signal_reaches_gate_report_and_dashboard_identically() {
+        let checks = [passing_check_on(
+            "/repo",
+            crate::checks::TreeState::LocalDirty,
+        )];
+        let (target, bases) = resolved_refs();
+        let provenance = detect_provenance_contradictions(
+            RunProvenance {
+                target_sha: &target.commit_id,
+                // The same value `CleanComparison::for_test(true, true)` gives
+                // the gate below, so all three surfaces judge one substrate.
+                operator_worktree_clean: Some(true),
+            },
+            &checks,
+        );
+        let expected = provenance.review_caveats();
+        assert_eq!(
+            expected.len(),
+            1,
+            "fixture must plant exactly one contradiction"
+        );
+
+        let (gate, _md) = run_gate_over(&checks);
+        let gate_caveats: Vec<String> = gate["decision"]["review_caveats"]
+            .as_array()
+            .expect("gate review caveats")
+            .iter()
+            .map(|value| value.as_str().expect("caveat string").to_string())
+            .collect();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = test_config();
+        let inline = InlineFindingsSummary {
+            status: "passed".into(),
+            findings_count: 0,
+            dashboard_findings: vec![],
+        };
+        let dashboard = build_dashboard_context(DashboardContextInput {
+            config: &config,
+            checks: &checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: Vec::new(),
+            rust_api_delta: None,
+            coverage: empty_coverage(),
+            diff_dir: tmp.path(),
+            skipped_checks: Vec::new(),
+            out_dir: tmp.path(),
+            diffs: &[],
+            ownership_map: Vec::new(),
+            clean_comparison: CleanComparison::for_test(true, true),
+            snapshot_integrity: None,
+            provenance: &provenance,
+        });
+
+        crate::artifacts::report::generate(&crate::artifacts::report::ReportInput {
+            dir: tmp.path(),
+            config: &config,
+            diffs: &[],
+            checks: &checks,
+            resolved_target: &target,
+            resolved_bases: &bases,
+            ctx: &dashboard,
+            run_started_at: "2026-09-11T00:00:00Z",
+            heuristics: None,
+            regression: None,
+            provenance: &provenance,
+        })
+        .expect("report.json");
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(tmp.path().join("report.json")).expect("read report"))
+                .expect("parse report.json");
+        let report_caveats: Vec<String> = report["gate"]["review_caveats"]
+            .as_array()
+            .expect("report review caveats")
+            .iter()
+            .map(|value| value.as_str().expect("caveat string").to_string())
+            .collect();
+
+        let expected_signals: Vec<&String> = expected.iter().collect();
+        for (surface, caveats) in [
+            ("MERGE_GATE.json decision.review_caveats", &gate_caveats),
+            (
+                "dashboard context review_caveats",
+                &dashboard.review_caveats,
+            ),
+            ("report.json gate.review_caveats", &report_caveats),
+        ] {
+            let signals: Vec<&String> = caveats
+                .iter()
+                .filter(|caveat| {
+                    caveat.starts_with(crate::artifacts::signal::PROVENANCE_CONTRADICTION_CODE)
+                })
+                .collect();
+            assert_eq!(
+                signals, expected_signals,
+                "{surface} must carry the identical provenance review signal"
+            );
+        }
+    }
+
     #[test]
     fn review_signals_markdown_lists_all_canonical_caveats_in_both_readers() {
         let (gate, index, caveats) = review_signal_documents(13);
@@ -1512,6 +1625,7 @@ mod tests {
             ownership_map: Vec::new(),
             clean_comparison: CleanComparison::for_test(true, true),
             snapshot_integrity: None,
+            provenance: &ProvenanceConsistency::default(),
         });
 
         assert_eq!(
@@ -1578,6 +1692,7 @@ mod tests {
             ownership_map: Vec::new(),
             clean_comparison: CleanComparison::for_test(true, true),
             snapshot_integrity: None,
+            provenance: &ProvenanceConsistency::default(),
         });
 
         assert_eq!(gate["decision"]["verdict"].as_str(), Some("CONDITIONAL"));

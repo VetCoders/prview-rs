@@ -316,13 +316,37 @@ it says the evidence may not describe the reviewed commit, not that the reviewed
 product is defective. Nothing in `decision` is derived from it — no quality
 failure, no blocking issue, no axis movement — and it sits outside that object
 for the same reason `stale_cache_caveats` does. It is never silent either: every
-row is also rendered as a `decision.review_caveats` entry prefixed with
-`PROVENANCE_CONTRADICTION`, `MERGE_GATE.md` explains the class in words, and
-`tools/validate_merge_gate.py` rejects a 3.0 gate whose typed rows and review
-signals do not correspond one-to-one. A pack carrying a contradiction is also
+row is also rendered as a `decision.review_caveats` entry spelled
+`PROVENANCE_CONTRADICTION: <explanation>`, `MERGE_GATE.md` explains the class in
+words, and `tools/validate_merge_gate.py` rejects a 3.0 gate whose typed rows and
+review signals do not correspond one-to-one. That entry is rendered once, by
+`ProvenanceConsistency::review_caveats`, and every surface that publishes review
+caveats reads that one list: this file's `decision.review_caveats`,
+`report.json`'s `gate.review_caveats`, and — through the dashboard context both
+sit on — the dashboard and its "Copy PR comment" output. A contradiction visible
+to a machine reading `MERGE_GATE.json` but absent from the summary a reviewer
+pastes into the PR is the same silence this field exists to prevent. A pack
+carrying a contradiction is also
 reported as `consistent: false` in `00_summary/CONSISTENCY_CHECK.json` **and** in
 `report.json`'s `quality.consistency`: the two sections check different counters,
 but neither may call a run consistent while a substrate contradiction stands.
+
+`tools/validate_merge_gate.py` enforces the whole of the above on a 3.0 gate, not
+just the row shapes:
+
+- the root `provenance_contradictions` field is **required**, empty array
+  included — omitting it is rejected rather than read as "no contradictions",
+  because "cross-checked and agreed" and "never cross-checked" are different
+  facts and only the field distinguishes them;
+- each row's `check_id` must appear as some `checks[].id` in the same file — a
+  row attributed to a check the gate never emitted is evidence no reader can
+  follow back to anything;
+- the `PROVENANCE_CONTRADICTION` entries of `decision.review_caveats` must
+  correspond **one-to-one** to the rows as a multiset, each spelled exactly
+  `<code>: <explanation>`. Equal counts are not enough: a missing signal, a
+  duplicated one covering a second row, or a signal no row supports is rejected.
+  When rows exist, an absent or non-array `decision.review_caveats` is rejected
+  for the same reason.
 
 ## `decision`
 

@@ -125,8 +125,8 @@ jobs:
             --initialize-only \
             --receipt-dir "$PRVIEW_ACCEPTANCE_DIR" \
             --source-sha "$PRVIEW_SOURCE_SHA"
-      - name: Test bounded-runtime gate evidence classifier
-        run: python3 -m unittest discover -s tools/tests -p 'test_bounded_runtime_acceptance.py'
+      - name: Test the Python tooling gates
+        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
       # Pinned master snapshot verified 2026-09-04; supports Rust branches through 1.120.
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:

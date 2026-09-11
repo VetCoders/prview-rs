@@ -7647,6 +7647,7 @@ fn snapshot_integrity_gate_preserves_check_results_and_dashboard_parity() {
             ownership_map: Vec::new(),
             clean_comparison: CleanComparison::for_test(false, true),
             snapshot_integrity: Some(integrity),
+            provenance: &ProvenanceConsistency::default(),
         });
         let gate: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(output.path().join("MERGE_GATE.json")).unwrap(),
