@@ -101,9 +101,16 @@ Measured baselines from the initial gate profile:
 Treat those as starting budgets. If a repo is consistently slower, tune the
 policy or Semgrep scope before moving from Shadow to Warn.
 
-## Repository-local hook
+## Repository-local hooks
 
-This repo ships a raw pre-push hook installer:
+The pre-push gate is a product feature for repos that adopt prview. It is opt-in
+through the recipes below and is **not** installed in this repo.
+
+prview-rs' own git hooks are fast push/commit guards only. No hook compiles the
+crate or runs a heavy gate: no `cargo check`, `cargo clippy`, `cargo test`,
+`cargo build`, and no `prview gate`. Quality proof lives in required CI (the
+prview Action) and in an explicitly invoked `make check` or `prview gate` on a
+dedicated host.
 
 ```bash
 make git-hooks
@@ -112,23 +119,12 @@ make git-hooks
 The target is idempotent. It symlinks:
 
 - `tools/githooks/pre-commit` -> `.git/hooks/pre-commit`
-- `tools/githooks/pre-push` -> `.git/hooks/pre-push`
 
-The pre-push hook calls `prview gate` and supports rollout modes:
-
-```bash
-# Shadow/advisory: never blocks the push
-git push
-
-# Warn: blocks BLOCK and execution errors
-PRVIEW_GATE_HOOK_MODE=warn git push
-
-# Strict local dry-run of the required CI behavior
-PRVIEW_GATE_HOOK_MODE=strict git push
-```
-
-Set `PRVIEW_GATE_HOOK_MODE=warn` in your shell environment once the repo has
-cleared the Shadow criteria.
+The pre-commit guard runs `rustfmt --check` on staged `.rs` files; `rustfmt`
+formats without building, so the guard stays fast. When `rustfmt` is missing the
+hook prints a note and exits 0, because formatting is enforced in CI. Re-running
+`make git-hooks` also removes an older `.git/hooks/pre-push` symlink into
+`tools/githooks` — the one that used to run `prview gate` on every push.
 
 ## Hook recipes
 
