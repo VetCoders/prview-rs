@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same wording.
 - Security cards report "not executed" for a scanner that was skipped or
   errored instead of scraping a metric out of its skip reason.
+- `30_context/INLINE_FINDINGS.sarif` emits `properties.in_diff: null` and
+  `properties.classification: "unclassified"` for a finding whose origin was not
+  established. `in_diff` was previously always a boolean, so a consumer that
+  assumes that type — or that matches `classification` without a default branch
+  — needs updating. `docs/contracts/merge_gate.md` documents the tri-state.
 
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.

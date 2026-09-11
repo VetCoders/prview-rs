@@ -134,6 +134,26 @@ reported test file changed. The complete Pytest log remains the evidence source;
 the dashboard and narrative use a compact diagnostic excerpt instead of test
 startup/progress output.
 
+### SARIF result properties
+
+`30_context/INLINE_FINDINGS.sarif` carries the same tri-state on every result:
+
+| Property | Type | Notes |
+|---|---|---|
+| `properties.in_diff` | boolean \| null | `true` when the reported location is in a file this diff touches, `false` when it is outside, `null` when the origin was not established |
+| `properties.classification` | string | `introduced` (`in_diff == true`), `preexisting` (`in_diff == false`), `unclassified` (`in_diff == null`) |
+
+Outside Pytest, `introduced` is derived from the diff intersection alone: the
+tool reported the finding in a file this diff touches. That is a location
+signal, not a base-versus-target comparison, so it does not prove the change
+created the finding.
+
+`in_diff` was previously always a boolean; readers that assume that type must be
+updated. `classification` gained the `unclassified` value, so a consumer that
+matches on it needs a default branch. Neither `null` nor `unclassified` is a
+pass: they mean the origin of the finding is unknown, and the gate treats them
+like introduced findings rather than trusted pre-existing ones.
+
 `introduced_count + preexisting_count` may be less than `findings_count`: the
 split counts only operator findings with a known `in_diff` value, so the
 remainder has no trusted pre-existing proof. Schema 2.3 therefore does not
