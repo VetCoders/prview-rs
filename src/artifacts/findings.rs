@@ -874,14 +874,41 @@ pub(super) fn is_pathish_candidate(candidate: &str) -> bool {
     true
 }
 
+/// Does `candidate` (the text before a `:line:` token in Pytest output) name a
+/// file a collector reported?
+///
+/// Two shapes used to be rejected for reasons Pytest does not share. A
+/// repository path may contain spaces (`tests with space/test_bad.py:2: in
+/// test_bad`), and a location need not be Python at all: doctest and plugin
+/// collectors report `.rst`, `.txt` or `.md` files. What a location never is,
+/// is a fragment of source text, so the candidate is rejected when it carries
+/// characters that only occur in code and must end in a file extension.
+fn is_pytest_location_candidate(candidate: &str) -> bool {
+    const CODE_CHARS: &[char] = &[
+        '{', '}', '"', '=', '(', ')', ';', ',', '\'', '`', '*', '<', '>', '[', ']', '#',
+    ];
+    if candidate.is_empty() || candidate.contains(CODE_CHARS) {
+        return false;
+    }
+    let name = candidate.rsplit(['/', '\\']).next().unwrap_or(candidate);
+    name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && !extension.is_empty()
+            && extension.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
 /// Extract located Pytest diagnostics only from its failure/error sections.
 /// A traceback location says where the failure was reported, not what caused it.
 pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
     use regex::Regex;
     use std::sync::LazyLock;
 
+    // The path is captured lazily up to the numeric `:line:` suffix rather
+    // than as a run of non-whitespace with a `.py` extension; see
+    // `is_pytest_location_candidate` for what is then accepted as a path.
     static LOCATION: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(\S+\.py):([1-9][0-9]*):\s+(.+)$").expect("pytest location regex")
+        Regex::new(r"^(.+?):([1-9][0-9]*):\s+(.+)$").expect("pytest location regex")
     });
     let mut findings = Vec::new();
     let mut in_failures = false;
@@ -938,6 +965,9 @@ pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
         let Some(caps) = LOCATION.captures(trimmed) else {
             continue;
         };
+        if !is_pytest_location_candidate(&caps[1]) {
+            continue;
+        }
         if caps[3].starts_with("in ") {
             // Retain the last frame until an error corroborates it. A later
             // terminal location takes precedence over abbreviated frames.
@@ -1389,6 +1419,43 @@ FAILED tests/test_parser.py::test_roundtrip\n\
         let located = super::parse_pytest_failures(terminal);
         assert_eq!(located.len(), 1);
         assert_eq!((&*located[0].file, located[0].line), ("src/y.py", 8));
+    }
+
+    #[test]
+    fn pytest_locations_keep_paths_with_spaces() {
+        let output = "===== FAILURES =====\n\
+            _____ test_bad _____\n\
+            tests with space/test_bad.py:2: in test_bad\n\
+            E   AssertionError: mismatch\n";
+        let located = super::parse_pytest_failures(output);
+        assert_eq!(located.len(), 1);
+        assert_eq!(located[0].file, "tests with space/test_bad.py");
+        assert_eq!(located[0].line, 2);
+    }
+
+    #[test]
+    fn pytest_locations_accept_non_python_collectors() {
+        let output = "===== FAILURES =====\n\
+            _____ [doctest] docs/example.rst _____\n\
+            E   Expected 2, got 3\n\
+            docs/example.rst:4: DocTestFailure\n";
+        let located = super::parse_pytest_failures(output);
+        assert_eq!(located.len(), 1);
+        assert_eq!(located[0].file, "docs/example.rst");
+        assert_eq!(located[0].line, 4);
+        assert!(located[0].message.contains("Expected 2, got 3"));
+    }
+
+    #[test]
+    fn pytest_location_candidate_rejects_code_fragments() {
+        assert!(super::is_pytest_location_candidate("tests/a b/test_x.py"));
+        assert!(super::is_pytest_location_candidate("docs/example.rst"));
+        assert!(super::is_pytest_location_candidate("test_bad.py"));
+        assert!(!super::is_pytest_location_candidate(
+            "raise ValueError(\"x\""
+        ));
+        assert!(!super::is_pytest_location_candidate("no_extension_here"));
+        assert!(!super::is_pytest_location_candidate(""));
     }
 
     #[test]

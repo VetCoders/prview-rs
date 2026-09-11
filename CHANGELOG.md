@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pytest locations are recognized in repository paths containing spaces and in
+  non-Python files reported by doctest or plugin collectors (`.rst`, `.txt`,
+  `.md`). Both were previously dropped, so `INLINE_FINDINGS.sarif` and
+  `report.json` lost a source location Pytest had supplied.
+
 - `report.json`'s `quality.sarif.findings_count`, the dashboard run history and
   the previous-run delta all count the same operator-finding list, so
   informational notes (the Cargo audit baseline row, the Loctree repository
