@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reviews of a commit other than the operator checkout fail publication when no
+  shared snapshot was materialised, instead of silently skipping the snapshot
+  integrity validation and describing the target with local files.
+
 - Pinned targets use exact commit lookup even when a branch has the SHA as its
   name; Semgrep cannot fall back to the operator checkout for an unavailable pin.
   Snapshot boundary comparisons run off the async dispatcher and retain worker

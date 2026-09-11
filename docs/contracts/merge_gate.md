@@ -813,3 +813,6 @@ from the resolved target used for the diff, artifact generation fails before
 allocating the output directory. No gate or successful pack is published for
 mixed review identities; rerun against a stable target. A later commit made
 inside the snapshot remains an integrity signal, not a creation-target mismatch.
+A run that reviews a commit other than the captured operator `HEAD` and holds no
+shared snapshot at all fails the same way, before allocating the output
+directory: a missing observation is never permission to publish.

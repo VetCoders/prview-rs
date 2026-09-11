@@ -29,6 +29,7 @@ fn generate_fixture_pack_with_ledger(
         governor,
         ledger,
         &[],
+        None,
     )
 }
 
@@ -40,6 +41,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
     governor: &crate::governor::ResourceGovernor,
     ledger: &crate::ledger::TaskLedger,
     diffs: &[Diff],
+    worktree_head_sha: Option<&str>,
 ) -> Result<PathBuf> {
     let mut config = test_config_builder()
         .repo_root(repo_root)
@@ -83,7 +85,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
         skipped_checks: Vec::new(),
         worktree_clean: Some(true),
         worktree_status_digest: None,
-        worktree_head_sha: None,
+        worktree_head_sha: worktree_head_sha.map(str::to_owned),
         governor,
     })
 }
@@ -144,6 +146,56 @@ fn snapshot_target_mismatch_aborts_before_pack_publication() {
         !output.exists(),
         "mismatched identities must fail before output allocation"
     );
+}
+
+/// An empty ledger is not evidence of a clean review: if the reviewed target is
+/// not the operator's own checkout, the dispatcher owed this run a materialised
+/// tree. Publishing anyway would describe the target with the operator's files.
+#[test]
+fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
+    let publication_home = tempfile::tempdir().unwrap();
+    let _home = crate::config::override_test_prview_home(publication_home.path().to_path_buf());
+    let (repo, base, target) = init_advanced_base_fixture();
+    let governor = crate::governor::ResourceGovernor::new();
+    let unverified = publication_home.path().join("unverified-pack");
+    let error = generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &unverified,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        &[],
+        Some(&base),
+    )
+    .expect_err("an unmaterialised reviewed tree must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot missing for an off-HEAD review"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&target) && message.contains(&base),
+        "{message}"
+    );
+    assert!(
+        !unverified.exists(),
+        "an unobserved reviewed tree must fail before output allocation"
+    );
+
+    // The local review keeps its snapshot-free path: the repo root IS the target.
+    let local = publication_home.path().join("local-pack");
+    generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &local,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        &[],
+        Some(&target),
+    )
+    .expect("a review of the operator checkout needs no snapshot");
 }
 
 #[test]
@@ -5185,6 +5237,7 @@ fn static_tauri_commands_follow_the_shared_reviewed_tree() {
         &crate::governor::ResourceGovernor::new(),
         &ledger,
         &diffs,
+        None,
     )
     .expect("reviewed-tree pack");
 

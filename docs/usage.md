@@ -919,7 +919,9 @@ fails instead of scanning the operator checkout, including Semgrep's planner.
 A branch named exactly like the captured SHA cannot redirect the pinned object.
 A new watch iteration resolves
 the target again. As a final consistency check, `shared snapshot target mismatch`
-aborts publication if the snapshot creation SHA differs from the diff target.
+aborts publication if the snapshot creation SHA differs from the diff target, and
+`shared snapshot missing for an off-HEAD review` aborts it when a review of a
+commit other than your checkout produced no reviewed tree at all.
 Changes made inside an already created snapshot still follow the integrity rule
 above.
 

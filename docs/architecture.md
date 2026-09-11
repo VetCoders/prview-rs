@@ -769,7 +769,12 @@ check, including errors. The ledger retains non-clean observations even when a
 later check restores the checkout. Artifact generation adds a final observation
 before context commands run, using the same ledger-owned creation SHA. If that SHA
 differs from the resolved diff target, publication fails before output allocation
-instead of combining two review identities. Comparisons union target-tree→index and
+instead of combining two review identities. The absence of an observation is
+checked independently of the ledger: an off-`HEAD` target that reaches artifact
+generation with no shared snapshot fails at the same seam, so a dispatcher that
+failed to materialise the reviewed tree cannot publish the operator checkout as
+the target. Only a review of the captured `HEAD`, or a run whose operator `HEAD`
+is unreadable, keeps the snapshot-free path. Comparisons union target-tree→index and
 index→worktree paths: staged changes and test-created commits remain visible.
 Newly untracked files are excluded; tracked lockfile changes, deletions and type
 changes remain. A changed HEAD or unreadable/foreign/raced observation cannot
