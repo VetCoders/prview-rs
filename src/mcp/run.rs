@@ -1201,19 +1201,20 @@ mod tests {
         let pid = child.id();
         std::fs::write(dir.join("tool.pid"), pid.to_string()).expect("publish short-child pid");
 
+        // `sh`'s `>` creates the pid file before `printf` writes it, so the
+        // path existing proves nothing. Wait for a complete publication —
+        // exactly one pid, newline-terminated, stable across two reads.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !survivor_path.is_file() {
+        let survivor_pid = loop {
+            if let Some(pids) = crate::proc::read_published_unix_pids(&survivor_path, 1) {
+                break pids[0] as u32;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "short-lived leader did not publish its surviving group member"
             );
             std::thread::sleep(Duration::from_millis(1));
-        }
-        let survivor_pid = std::fs::read_to_string(&survivor_path)
-            .expect("read surviving member pid")
-            .trim()
-            .parse::<u32>()
-            .expect("surviving member pid");
+        };
         loop {
             let birth_identity_missing = crate::storage::process_birth_identity(pid).is_err();
             let child_is_waitable =
@@ -1622,15 +1623,19 @@ mod tests {
         )
         .unwrap();
 
+        // Same create-before-write gap as the short-child fixture: `echo $! >`
+        // publishes the path first and the digits afterwards.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !pidfile.exists() && std::time::Instant::now() < deadline {
+        let grandchild = loop {
+            if let Some(pids) = crate::proc::read_published_unix_pids(&pidfile, 1) {
+                break pids[0] as u32;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture never published a complete grandchild pid"
+            );
             std::thread::sleep(Duration::from_millis(10));
-        }
-        let grandchild: u32 = std::fs::read_to_string(&pidfile)
-            .expect("fixture records grandchild pid")
-            .trim()
-            .parse()
-            .expect("numeric grandchild pid");
+        };
         assert!(crate::storage::is_process_alive(grandchild));
 
         std::fs::write(&signal, b"go").unwrap();

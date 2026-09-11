@@ -70,9 +70,9 @@ install-cargo:
 	cargo install --path . --force
 	@echo "Installed via cargo: prview → $(CARGO_BIN)"
 
-# Install local git hooks
+# Install local git hooks (fast guards only; no compilation, no gate)
 git-hooks:
-	@chmod +x "$(HOOK_SETUP_SCRIPT)" tools/githooks/pre-commit tools/githooks/pre-push
+	@chmod +x "$(HOOK_SETUP_SCRIPT)" tools/githooks/pre-commit
 	@"$(HOOK_SETUP_SCRIPT)"
 
 # Fast pre-commit gate (safe to run manually)
@@ -202,7 +202,7 @@ help:
 	@echo "  make install         - Install prview + local git hooks"
 	@echo "  make install-bin     - Install only the prview binary"
 	@echo "  make install-cargo   - Install via cargo install --path ."
-	@echo "  make git-hooks       - Install pre-commit + pre-push hooks"
+	@echo "  make git-hooks       - Install the fast pre-commit guard"
 	@echo "  make precommit       - Fast staged-file Rust gate"
 	@echo "  make precheck        - Quick cargo check"
 	@echo "  make check           - Full local gate (fmt, clippy, test, build, semgrep)"

@@ -117,6 +117,16 @@ matters when you want to restore it after a lighter preset. Under standard
 `--remote-only`, heavy Rust lint (`clippy`, `rustfmt`) is trimmed, so `--with-lint`
 or `--deep` restores the fuller pass.
 
+### Git hooks
+
+`make git-hooks` installs the repo's hooks. They are fast push/commit guards
+only: the pre-commit hook runs `rustfmt --check` on staged `.rs` files and
+nothing else. No hook compiles the crate or runs a heavy gate (`cargo check`,
+`cargo clippy`, `cargo test`, `cargo build`, `prview gate`) — that proof belongs
+to required CI and to the local gate below, invoked explicitly. There is no
+pre-push hook in this repo; downstream adopters can opt in to one via
+[`docs/gate-playbook.md`](gate-playbook.md).
+
 ### Local gate
 
 Before pushing, run the same gate CI runs:
