@@ -2655,15 +2655,31 @@ fn provenance_contradiction_validator_contract() {
 
     validate(&original, true);
 
+    // A row is attributed to a check THIS gate emitted, spelled the way
+    // `checks[].id` spells it, and its review signal is the canonical
+    // `<code>: <explanation>` rendering. The validator holds the pack to both,
+    // so the fixture must be built the way the emitter builds it.
+    let attributed_check_id = original["checks"]
+        .as_array()
+        .and_then(|checks| checks.first())
+        .and_then(|check| check["id"].as_str())
+        .expect("a gate always emits at least one check")
+        .to_string();
+    let explanation = format!(
+        "The run froze the operator working tree as clean, but check \
+         `{attributed_check_id}` recorded `local-dirty` for that same tree."
+    );
+    let signal = format!("PROVENANCE_CONTRADICTION: {explanation}");
+
     let mut unsignalled = original.clone();
     unsignalled["provenance_contradictions"] = serde_json::json!([{
         "code": "PROVENANCE_CONTRADICTION",
         "kind": "operator-worktree-state",
-        "check_id": "cargo_fmt",
+        "check_id": attributed_check_id,
         "field": "operator_worktree.clean",
         "run_value": "clean",
         "check_value": "local-dirty",
-        "explanation": "The run froze the operator working tree as clean, but check `cargo_fmt` recorded `local-dirty` for that same tree."
+        "explanation": explanation,
     }]);
     validate(&unsignalled, false);
 
@@ -2671,10 +2687,31 @@ fn provenance_contradiction_validator_contract() {
     signalled["decision"]["review_caveats"]
         .as_array_mut()
         .expect("review caveats array")
-        .push(serde_json::json!(
-            "PROVENANCE_CONTRADICTION: the run froze the operator working tree as clean, but check `cargo_fmt` recorded `local-dirty`."
-        ));
+        .push(serde_json::json!(signal));
     validate(&signalled, true);
+
+    // Equal counts are not correspondence: a signal that does not spell the row
+    // it claims to announce leaves the contradiction unannounced and tells the
+    // reader something no row supports.
+    let mut mismatched_signal = signalled.clone();
+    mismatched_signal["decision"]["review_caveats"] =
+        serde_json::json!(["PROVENANCE_CONTRADICTION: something else entirely"]);
+    validate(&mismatched_signal, false);
+
+    // A row attributed to a check this gate never emitted is evidence no reader
+    // can follow back to anything.
+    let mut unknown_check = signalled.clone();
+    unknown_check["provenance_contradictions"][0]["check_id"] = serde_json::json!("no_such_check");
+    validate(&unknown_check, false);
+
+    // Omitting the array is not the same fact as cross-checking and finding
+    // nothing, and 3.0 requires the field for exactly that reason.
+    let mut without_array = original.clone();
+    without_array
+        .as_object_mut()
+        .expect("gate object")
+        .remove("provenance_contradictions");
+    validate(&without_array, false);
 
     for (key, value) in [
         ("kind", serde_json::json!("something-else")),

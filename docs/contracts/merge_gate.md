@@ -325,6 +325,23 @@ reported as `consistent: false` in `00_summary/CONSISTENCY_CHECK.json` **and** i
 `report.json`'s `quality.consistency`: the two sections check different counters,
 but neither may call a run consistent while a substrate contradiction stands.
 
+`tools/validate_merge_gate.py` enforces the whole of the above on a 3.0 gate, not
+just the row shapes:
+
+- the root `provenance_contradictions` field is **required**, empty array
+  included — omitting it is rejected rather than read as "no contradictions",
+  because "cross-checked and agreed" and "never cross-checked" are different
+  facts and only the field distinguishes them;
+- each row's `check_id` must appear as some `checks[].id` in the same file — a
+  row attributed to a check the gate never emitted is evidence no reader can
+  follow back to anything;
+- the `PROVENANCE_CONTRADICTION` entries of `decision.review_caveats` must
+  correspond **one-to-one** to the rows as a multiset, each spelled exactly
+  `<code>: <explanation>`. Equal counts are not enough: a missing signal, a
+  duplicated one covering a second row, or a signal no row supports is rejected.
+  When rows exist, an absent or non-array `decision.review_caveats` is rejected
+  for the same reason.
+
 ## `decision`
 
 The decision object is the merge verdict. Its scalar fields are derived from two

@@ -65,6 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `tools/validate_merge_gate.py` no longer certifies a schema-3.0 gate that
+  omits `provenance_contradictions`, that carries contradiction rows with no
+  `decision.review_caveats` array, that attributes a row to a `check_id` absent
+  from its own `checks[]`, or whose `PROVENANCE_CONTRADICTION` signals merely
+  COUNT the rows. Signals are now matched to rows one-to-one as a multiset on
+  the exact `<code>: <explanation>` spelling, so a duplicated, missing or
+  unsupported signal is an error. `tools/tests/test_validate_merge_gate.py`
+  pins all five cases against real gates in `tools/fixtures/merge-gate/`, and
+  CI runs every `tools/tests/test_*.py` rather than one named file.
+
 - Provenance contradictions are published as review signals by every artifact,
   not only `MERGE_GATE.json`. The signal strings now come from one renderer
   (`ProvenanceConsistency::review_caveats`) that the merge gate and the
