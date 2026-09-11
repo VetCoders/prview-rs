@@ -158,6 +158,33 @@ static PROCESS_TABLE_CAPTURE_SEQ: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(unix)]
 const PROCESS_TABLE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Ceiling for a single `/bin/ps` snapshot attempt.
+///
+/// A healthy census costs tens of milliseconds, but on a loaded macOS host
+/// (CI runner, or a workstation with a parallel build) forking `ps` and having
+/// it walk the whole table routinely costs far more. This is only the bound on
+/// one attempt; the caller's outer deadline is the real bound, so a genuinely
+/// hung `ps` still cannot hold cancellation open past that deadline.
+#[cfg(unix)]
+const PROCESS_TABLE_SNAPSHOT_ATTEMPT_BUDGET: Duration = Duration::from_millis(1_000);
+/// Pause between snapshot attempts, so a retry does not re-fork `ps` into the
+/// same momentary load spike that starved the previous attempt.
+#[cfg(unix)]
+const PROCESS_TABLE_SNAPSHOT_RETRY_PAUSE: Duration = Duration::from_millis(10);
+/// Total bound for a snapshot taken outside any outer deadline, where the
+/// retry loop itself has to be the bound.
+#[cfg(unix)]
+const PROCESS_TABLE_SNAPSHOT_TOTAL_BUDGET: Duration = Duration::from_secs(2);
+/// Outer bound for a descendant-containment census: the true limit on how long
+/// cleanup may wait for a stable stopped census, across as many `/bin/ps`
+/// attempts as fit.
+#[cfg(unix)]
+const HARDENED_DESCENDANT_CENSUS_BUDGET: Duration = Duration::from_secs(3);
+/// Scheduling guard for the blocking census run from async cleanup. It must
+/// exceed [`HARDENED_DESCENDANT_CENSUS_BUDGET`] so the census reports its own
+/// fail-closed verdict instead of being cut off by the scheduler.
+#[cfg(unix)]
+const HARDENED_DESCENDANT_CENSUS_SCHEDULING_BUDGET: Duration = Duration::from_millis(3_250);
 #[cfg(unix)]
 static PROCESS_TABLE_REAPER_QUARANTINE: std::sync::OnceLock<
     std::sync::Mutex<Vec<std::process::Child>>,
@@ -874,7 +901,10 @@ impl Drop for ExternalChildGroupTracker {
             if let Some(pid) = self.root_pid.take() {
                 let root_suspended = suspend_process_group(pid);
                 let descendants_terminated = root_suspended
-                    && match unix_stopped_descendant_process_groups(pid, Duration::from_secs(1)) {
+                    && match unix_stopped_descendant_process_groups(
+                        pid,
+                        HARDENED_DESCENDANT_CENSUS_BUDGET,
+                    ) {
                         Ok(groups) => self.terminate_proven_descendant_groups(&groups),
                         Err(error) => {
                             eprintln!(
@@ -991,7 +1021,7 @@ pub(crate) fn close_exited_child_process_group(pid: u32) -> std::io::Result<()> 
     close_exited_child_process_group_with(
         pid,
         || sigkill_process_group_result(pid),
-        || bounded_unix_process_table(Duration::from_millis(250)),
+        || process_table_snapshot_within(PROCESS_TABLE_SNAPSHOT_TOTAL_BUDGET),
     )
 }
 
@@ -1420,6 +1450,64 @@ fn bounded_unix_process_table(timeout: Duration) -> std::io::Result<Vec<UnixProc
     parse_unix_process_table(&stdout)
 }
 
+/// Take one process-table snapshot, retrying attempts that only ran out of
+/// per-attempt budget until `remaining` reaches zero.
+///
+/// A slow-but-healthy `/bin/ps` on a loaded host is not evidence that
+/// containment cannot be proven, so a timed-out attempt is retried rather than
+/// surfaced. Every other failure is a real census failure and stays
+/// fail-closed on the first occurrence. The caller's remaining time is the
+/// only bound: a genuinely hung `ps` exhausts it and the timeout error is
+/// returned unchanged, so the existing "unconfirmed" handling is untouched.
+#[cfg(unix)]
+fn retry_process_table_snapshot(
+    mut remaining: impl FnMut() -> Duration,
+    mut attempt: impl FnMut(Duration) -> std::io::Result<Vec<UnixProcessRow>>,
+    mut pause: impl FnMut(Duration),
+) -> std::io::Result<Vec<UnixProcessRow>> {
+    loop {
+        let budget = remaining();
+        if budget.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "/bin/ps exceeded the process-table snapshot budget",
+            ));
+        }
+        match attempt(budget.min(PROCESS_TABLE_SNAPSHOT_ATTEMPT_BUDGET)) {
+            Ok(rows) => return Ok(rows),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                if remaining().is_zero() {
+                    return Err(error);
+                }
+                pause(PROCESS_TABLE_SNAPSHOT_RETRY_PAUSE);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Retry local process-table snapshots until `deadline`.
+#[cfg(unix)]
+fn process_table_snapshot_until(
+    deadline: std::time::Instant,
+) -> std::io::Result<Vec<UnixProcessRow>> {
+    retry_process_table_snapshot(
+        || deadline.saturating_duration_since(std::time::Instant::now()),
+        bounded_unix_process_table,
+        std::thread::sleep,
+    )
+}
+
+/// Retry local process-table snapshots for at most `total`, for callers that
+/// have no outer deadline of their own.
+#[cfg(unix)]
+fn process_table_snapshot_within(total: Duration) -> std::io::Result<Vec<UnixProcessRow>> {
+    let deadline = std::time::Instant::now()
+        .checked_add(total)
+        .ok_or_else(|| std::io::Error::other("process-table snapshot budget overflow"))?;
+    process_table_snapshot_until(deadline)
+}
+
 /// Freeze every live descendant group of a stopped hardened tool until two
 /// consecutive censuses reach a stable fixed point.
 ///
@@ -1454,11 +1542,7 @@ fn freeze_hardened_descendant_groups(
                 ),
             ));
         }
-        let rows = match bounded_unix_process_table(
-            deadline
-                .saturating_duration_since(now)
-                .min(Duration::from_millis(250)),
-        ) {
+        let rows = match process_table_snapshot_until(deadline) {
             Ok(rows) => rows,
             Err(error) => {
                 return Err(HardenedDescendantFreezeError::Other(
@@ -1620,7 +1704,7 @@ pub fn terminate_hardened_process_tree(pid: u32) -> bool {
 
     let root_suspended = suspend_process_group(pid);
     let descendants = if root_suspended {
-        freeze_hardened_descendant_groups(pid, Duration::from_secs(1))
+        freeze_hardened_descendant_groups(pid, HARDENED_DESCENDANT_CENSUS_BUDGET)
     } else {
         Err(HardenedDescendantFreezeError::Other(std::io::Error::other(
             format!("could not suspend hardened root process group {pid}"),
@@ -1669,17 +1753,10 @@ fn unix_stopped_descendant_process_groups(
                 "review root did not reach stopped state before census deadline",
             ));
         }
-        let remaining = deadline.saturating_duration_since(now);
-        let rows = match bounded_unix_process_table(remaining.min(Duration::from_millis(250))) {
-            Ok(rows) => rows,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::TimedOut
-                    && std::time::Instant::now() < deadline =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
+        // `process_table_snapshot_until` already retries a slow-but-healthy
+        // `ps` inside this deadline, so any error reaching here is either a
+        // real census failure or the exhausted deadline itself.
+        let rows = process_table_snapshot_until(deadline)?;
         let root = rows.iter().find(|row| row.pid == root_pid).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -1786,9 +1863,9 @@ pub(crate) async fn terminate_supervised_tokio_child(
     let descendant_groups = match pid {
         Some(pid) if root_suspended => {
             let census = tokio::task::spawn_blocking(move || {
-                unix_stopped_descendant_process_groups(pid, Duration::from_secs(1))
+                unix_stopped_descendant_process_groups(pid, HARDENED_DESCENDANT_CENSUS_BUDGET)
             });
-            match tokio::time::timeout(Duration::from_millis(1_250), census).await {
+            match tokio::time::timeout(HARDENED_DESCENDANT_CENSUS_SCHEDULING_BUDGET, census).await {
                 Ok(Ok(Ok(groups))) => Some(groups),
                 Ok(Ok(Err(error))) => {
                     eprintln!(
@@ -3317,6 +3394,103 @@ mod tests {
             rows.iter().any(|row| row.pid == std::process::id()),
             "process-table snapshot must contain its caller"
         );
+    }
+
+    /// A `/bin/ps` that is merely slow under load must not be read as "the
+    /// containment proof is unobtainable". The retry's rows are the caller's
+    /// answer, each attempt stays inside the per-attempt budget, and the
+    /// attempts are spaced by the retry pause.
+    #[cfg(unix)]
+    #[test]
+    fn process_table_snapshot_accepts_rows_from_a_retried_attempt() {
+        let row = UnixProcessRow {
+            pid: 7,
+            ppid: 1,
+            pgid: 7,
+            state: "S".to_string(),
+        };
+        let mut remaining = [
+            HARDENED_DESCENDANT_CENSUS_BUDGET,
+            Duration::from_millis(1_900),
+            Duration::from_millis(1_900),
+        ]
+        .into_iter();
+        let mut budgets = Vec::new();
+        let mut pauses = Vec::new();
+        let expected = vec![row.clone()];
+        let rows = retry_process_table_snapshot(
+            || {
+                remaining
+                    .next()
+                    .expect("the deadline must be consulted once per attempt outcome")
+            },
+            |budget| {
+                budgets.push(budget);
+                if budgets.len() == 1 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "/bin/ps exceeded the process-table snapshot budget",
+                    ))
+                } else {
+                    Ok(vec![row.clone()])
+                }
+            },
+            |pause| pauses.push(pause),
+        )
+        .expect("a snapshot that succeeds on retry proves containment");
+
+        assert_eq!(rows, expected);
+        assert_eq!(budgets, vec![PROCESS_TABLE_SNAPSHOT_ATTEMPT_BUDGET; 2]);
+        assert_eq!(pauses, vec![PROCESS_TABLE_SNAPSHOT_RETRY_PAUSE]);
+        assert_eq!(remaining.next(), None);
+    }
+
+    /// Retrying never softens the fail-closed contract: once the outer
+    /// deadline is gone the timeout error still reaches the caller, and a
+    /// non-timeout census failure is never retried at all.
+    #[cfg(unix)]
+    #[test]
+    fn process_table_snapshot_retries_stay_fail_closed() {
+        let mut remaining = [Duration::from_millis(400), Duration::ZERO].into_iter();
+        let mut attempts = 0;
+        let error = retry_process_table_snapshot(
+            || remaining.next().expect("deadline consulted twice"),
+            |budget| {
+                attempts += 1;
+                // Below the per-attempt budget the remaining deadline wins.
+                assert_eq!(budget, Duration::from_millis(400));
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "/bin/ps exceeded the process-table snapshot budget",
+                ))
+            },
+            |_| panic!("an exhausted deadline must not pause for another attempt"),
+        )
+        .expect_err("an exhausted deadline cannot certify containment");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            error
+                .to_string()
+                .contains("exceeded the process-table snapshot budget"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(attempts, 1);
+
+        let mut attempts = 0;
+        let error = retry_process_table_snapshot(
+            || Duration::from_secs(30),
+            |_| {
+                attempts += 1;
+                Err(std::io::Error::other("fixture census failure"))
+            },
+            |_| panic!("a real census failure must not be retried"),
+        )
+        .expect_err("a non-timeout census failure is a real failure");
+        assert!(
+            error.to_string().contains("fixture census failure"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(attempts, 1);
     }
 
     #[cfg(unix)]

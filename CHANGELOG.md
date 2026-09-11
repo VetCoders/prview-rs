@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Descendant-containment proofs retry the `/bin/ps` process-table snapshot
+  inside the census deadline instead of failing on the first slow attempt, with
+  a 1 s per-attempt budget and a 3 s census deadline. A loaded macOS host no
+  longer reports unconfirmed containment or a retained ownership sidecar for a
+  `ps` that was merely slow; a census that genuinely cannot be read within the
+  deadline stays fail-closed exactly as before.
+
 - MCP contract tests bound response waits and pagination, and clean the owned
   server tree before reaping it on timeout or drop, including detached reviews.
 
