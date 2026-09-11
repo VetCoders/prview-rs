@@ -854,11 +854,15 @@ overlap non-clean observations are not written to cache; raw results are preserv
 Check-boundary comparisons are awaited blocking-worker jobs; worker failure is
 retained as `unknown`, not treated as a clean observation or cache permission.
 
-Checks pin the commit resolved for the diff before dispatch; moving or deleting
-the configured ref cannot redirect snapshot planning to the operator checkout.
+Checks pin the whole review range — the commit resolved for the diff and the
+merge-base commits the diff was computed from — before dispatch; moving or
+deleting the configured refs cannot redirect snapshot planning to the operator
+checkout, nor re-derive a base range that a moved base branch would collapse onto
+the target.
 Pinned SHAs are looked up as exact commit objects, including when a symbolic
 branch has the same hexadecimal name. Semgrep's planner also rejects unavailable
-pinned repositories or commits; that refusal is reported as unavailable evidence,
+pinned repositories or commits, and refuses to plan a pinned run that carries no
+captured base; that refusal is reported as unavailable evidence,
 never as one of the declared mode skips, so a `block` policy still blocks. An unavailable pinned commit is a planning error, not permission to publish a
 local-tree pack. Every observation uses the snapshot's immutable creation SHA. If that SHA differs
 from the resolved target used for the diff, artifact generation fails before

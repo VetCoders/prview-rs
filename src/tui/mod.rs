@@ -588,6 +588,10 @@ pub async fn run_analysis(
 
         let mut config = app.config.clone();
         config.pinned_target = Some(target.clone());
+        // Pin the captured base range with the target: a check that needs a base
+        // must read the SHA this pack's diff was computed from, never re-resolve
+        // a symbolic base ref that may have moved since capture.
+        config.pinned_diff_bases = Some(diff_bases);
         // app (with git2::Repository) is dropped here
         Ok((
             config,

@@ -58,6 +58,14 @@ pub struct Config {
     /// Target captured for this run's diff. Internal runtime state, never a CLI
     /// or manifest override; cloned check configurations retain this identity.
     pub pinned_target: Option<crate::git::ResolvedRef>,
+    /// Bases captured for this run's diff, pinned together with `pinned_target`.
+    /// Each entry already carries the merge-base commit the pack diff was
+    /// computed from (`Repository::resolve_diff_bases`), so a check that needs a
+    /// base range reads the captured SHA instead of re-resolving a symbolic base
+    /// ref that may have advanced past the target since capture. Internal
+    /// runtime state, never a CLI or manifest override; cloned check
+    /// configurations retain this range.
+    pub pinned_diff_bases: Option<Vec<crate::git::ResolvedRef>>,
     pub bases: Vec<String>,
     pub profile: DetectedProfile,
 
@@ -698,6 +706,7 @@ impl Config {
             repo_root,
             target: None,
             pinned_target: None,
+            pinned_diff_bases: None,
             bases: vec![],
             profile,
             execution_mode: ExecutionMode::Standard,

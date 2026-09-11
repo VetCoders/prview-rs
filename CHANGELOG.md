@@ -89,6 +89,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and TUI runs. Moved or deleted branch/PR refs cannot redirect shared checks to
   the operator checkout; unavailable pinned commits fail planning explicitly.
 
+- Check configurations pin the review BASE alongside the target, so the whole
+  range is resolved once at diff capture. Semgrep's diff-scoped
+  `--baseline-commit` now reads that captured merge-base SHA instead of
+  re-resolving the symbolic base ref: a base branch that advanced past the target
+  mid-run (the reviewed branch merged into `main` while the run was in flight)
+  used to collapse the re-derived merge-base onto the target, so the scanner saw
+  an empty delta while the pack diff was non-empty and the report and the scanner
+  described different ranges. A pinned run carrying no captured base refuses to
+  plan, exactly like an unavailable pinned commit, rather than falling back to
+  symbolic resolution.
+
 - Final snapshot observations use the same immutable creation SHA as check
   boundaries. A snapshot/diff target mismatch aborts publication before output
   allocation, preventing a pack from combining two reviewed commits.

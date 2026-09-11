@@ -205,6 +205,13 @@ impl App {
         let ledger = ledger::TaskLedger::new();
         let mut check_config = self.config.clone();
         check_config.pinned_target = Some(target.clone());
+        // Pin the BASE alongside the target. Step 4 already resolved the review
+        // range once; handing checks only the target would let a check that needs
+        // a base range re-read a symbolic base ref that has since advanced (a
+        // merge of this branch into `main` mid-run makes the re-derived
+        // merge-base equal the target), so the scanner would see an empty delta
+        // while the pack diff is non-empty. One captured range, one truth.
+        check_config.pinned_diff_bases = Some(diff_bases.clone());
         let (check_results, skipped_checks) = if self.config.update_mode {
             // In update mode, skip heavy checks UNLESS user explicitly forced them
             // via --with-tests or --with-security (respect user intent over preset)

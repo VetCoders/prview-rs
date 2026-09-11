@@ -927,6 +927,10 @@ Checks use the commit resolved for the diff, even if its branch or PR ref moves
 or is deleted before snapshot creation. If that commit is unavailable, planning
 fails instead of scanning the operator checkout, including Semgrep's planner.
 A branch named exactly like the captured SHA cannot redirect the pinned object.
+The base is pinned the same way: a check that needs a base range (Semgrep's
+diff-scoped scan) reads the exact merge-base commit the pack diff was computed
+from, so a base branch that advances past your target while the run is still in
+flight cannot shrink the scanned range below what the pack reports.
 A new watch iteration resolves
 the target again. As a final consistency check, `shared snapshot target mismatch`
 aborts publication if the snapshot creation SHA differs from the diff target, and

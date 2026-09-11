@@ -765,8 +765,10 @@ parses replays with no provenance instead of failing the run.
 #### Shared snapshot integrity at check boundaries
 
 Headless and TUI pipelines copy the resolved diff target into the run's
-`Config.pinned_target` before dispatching checks; update-mode clones preserve it.
-It is runtime-only state, not a CLI/manifest setting. `Repository::resolve_target`
+`Config.pinned_target` and the resolved diff bases into `Config.pinned_diff_bases`
+before dispatching checks; update-mode clones preserve both. The whole review
+range — base and target — is therefore resolved exactly once, at diff capture.
+Both are runtime-only state, not CLI/manifest settings. `Repository::resolve_target`
 then parses the captured SHA as an object ID and requires that exact commit,
 preserving its original display name and remote classification. A branch whose
 name is the forty-character SHA cannot shadow it. A deleted ref
@@ -774,6 +776,13 @@ does not invalidate an available commit. An unavailable pinned commit or
 repository is a planning error, including runs with no snapshot-backed gates;
 it cannot fall back to the operator checkout. The independent Semgrep planner
 enforces the same rule; only unpinned scans retain in-place fallback behavior.
+Its `--baseline-commit` range comes from `pinned_diff_bases` verbatim — the same
+merge-base commit the pack diff was computed from — and is never re-derived from
+a symbolic base ref, which a base branch advancing past the target mid-run would
+collapse onto the target and reduce the scanned delta to nothing while the pack
+diff stays non-empty. A pinned target carrying no captured base is the same class
+of planning refusal as an unavailable pinned commit, never a symbolic fallback.
+Multi-base and `--current-only` runs still fall back to a full scan (R3-15).
 Local targets that still match HEAD
 keep the operator checkout. Each new watch iteration resolves its target anew.
 
