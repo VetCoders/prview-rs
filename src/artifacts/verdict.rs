@@ -772,6 +772,16 @@ impl CleanComparison {
         }
     }
 
+    /// The operator working-tree cleanliness this comparison was built from —
+    /// the value frozen before the checks ran, `None` when it could not be read.
+    ///
+    /// Exposed so the merge gate can hold the per-check substrate rows against
+    /// the SAME observation the pre-existing downgrade uses, instead of taking a
+    /// second, later reading of the tree.
+    pub(crate) fn operator_worktree_clean(&self) -> Option<bool> {
+        self.worktree_clean
+    }
+
     /// Whether the pre-existing downgrade may fire for `check_id`'s findings.
     pub(crate) fn applies_to(&self, check_id: &str) -> bool {
         if self.configs_changed.iter().any(|owner| *owner == check_id) {

@@ -355,6 +355,27 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
         ));
     }
 
+    // Provenance/confidence, deliberately NOT a verified failure: when the run's
+    // substrate and a check's own row disagree, the evidence may describe
+    // another tree — that is a reason to doubt the evidence, not a defect of the
+    // product under review. The rows are re-derived from the SAME pure function
+    // and the SAME inputs `PROVENANCE.json` publishes (the checks of this run,
+    // the reviewed target, and the operator cleanliness frozen before the run),
+    // so the two artifacts cannot name different contradictions.
+    let provenance = detect_provenance_contradictions(
+        RunProvenance {
+            target_sha: &resolved_target.commit_id,
+            operator_worktree_clean: clean_comparison.operator_worktree_clean(),
+        },
+        checks,
+    );
+    for contradiction in &provenance.contradictions {
+        all_review_caveats.push(format!(
+            "{}: {}",
+            contradiction.code, contradiction.explanation
+        ));
+    }
+
     if worst_merge == MergeRecommendation::ReviewRequired && all_review_caveats.is_empty() {
         all_review_caveats.push("Partial or degraded analysis coverage".to_string());
     }
@@ -420,6 +441,12 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
         // about the pack, not an axis of it. The decision object is closed by
         // contract, and every field in it ranks the verdict — this one must not.
         "stale_cache_caveats": stale_cache_caveats,
+        // Additive and OUTSIDE `decision` for the same reason: a substrate
+        // contradiction ranks no axis of the verdict. It says the evidence the
+        // axes rest on may not describe the reviewed commit, and every row is
+        // also carried as a review signal so no reader has to parse this array
+        // to see it.
+        "provenance_contradictions": provenance.contradictions,
         "decision": {
             "enforcement_disposition": enforcement_disposition,
             "analysis_status": worst_confidence,
@@ -481,6 +508,29 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
             "A non-blocking check can still fail quality. `HOLD` recommends reviewing \
              that failed evidence even though policy has no hard blocker; the canonical \
              verdict above remains authoritative.\n\n",
+        );
+    }
+    if !provenance.is_empty() {
+        let _ = write!(
+            md,
+            "{} provenance contradiction{} (`{}`) {} detected: the run and at least one check \
+             describe different substrates. This is a confidence problem about the evidence, not \
+             a verified check failure — no quality failure or blocking issue is derived from it, \
+             and the verdict above is unchanged. Re-read every affected result as possibly \
+             describing another tree; the rows are listed below and in \
+             `00_summary/PROVENANCE.json`.\n\n",
+            provenance.contradictions.len(),
+            if provenance.contradictions.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            crate::artifacts::signal::PROVENANCE_CONTRADICTION_CODE,
+            if provenance.contradictions.len() == 1 {
+                "was"
+            } else {
+                "were"
+            },
         );
     }
     append_review_signals(&mut md, all_review_caveats.iter().map(String::as_str));
@@ -816,6 +866,138 @@ mod tests {
         assert!(md.contains("- Policy has no hard blockers: `true`"));
         assert!(md.contains("- Allow merge: `false`"));
         assert!(md.contains("A non-blocking check can still fail quality"));
+    }
+
+    /// Run the gate over `checks` with everything else neutral, on a run whose
+    /// operator tree was frozen clean.
+    fn run_gate_over(checks: &[CheckResult]) -> (serde_json::Value, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = test_config();
+        let inline = InlineFindingsSummary {
+            status: "passed".into(),
+            findings_count: 0,
+            dashboard_findings: vec![],
+        };
+        let (target, bases) = resolved_refs();
+        generate_merge_gate(MergeGateInput {
+            dir: tmp.path(),
+            config: &config,
+            ledger: &empty_ledger(),
+            checks,
+            heuristics: None,
+            inline: &inline,
+            breaking: &[],
+            rust_api_delta: None,
+            coverage: &empty_coverage(),
+            diffs: &[],
+            skipped_checks: &[],
+            resolved_target: &target,
+            resolved_bases: &bases,
+            clean_comparison: CleanComparison::for_test(true, true),
+        })
+        .expect("merge gate");
+        (
+            serde_json::from_slice(&fs::read(tmp.path().join("MERGE_GATE.json")).unwrap()).unwrap(),
+            fs::read_to_string(tmp.path().join("MERGE_GATE.md")).unwrap(),
+        )
+    }
+
+    fn passing_check_on(cwd: &str, tree_state: crate::checks::TreeState) -> CheckResult {
+        CheckResult {
+            name: "Cargo fmt".into(),
+            status: CheckStatus::Passed,
+            duration: Duration::from_secs(1),
+            output: String::new(),
+            cached: false,
+            provenance: Some(crate::checks::CheckProvenance {
+                command: "cargo fmt --check".into(),
+                tool_version: None,
+                cwd: cwd.into(),
+                target_sha: Some(resolved_refs().0.commit_id),
+                tree_state: Some(tree_state),
+                exit_code: Some(0),
+                started_at: "2026-09-11T10:00:00+02:00".into(),
+                finished_at: "2026-09-11T10:00:01+02:00".into(),
+                hard_fail_signatures: Vec::new(),
+                cache_key: None,
+            }),
+        }
+    }
+
+    /// A substrate contradiction is a confidence problem, not a verified
+    /// failure: it must be named as a review signal and a typed row, and it
+    /// must not manufacture a quality failure or a blocking issue.
+    #[test]
+    fn a_substrate_contradiction_is_reported_as_a_provenance_signal() {
+        let (gate, md) = run_gate_over(&[passing_check_on(
+            "/repo",
+            crate::checks::TreeState::LocalDirty,
+        )]);
+
+        let rows = gate["provenance_contradictions"]
+            .as_array()
+            .expect("provenance_contradictions array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["code"], "PROVENANCE_CONTRADICTION");
+        assert_eq!(rows[0]["kind"], "operator-worktree-state");
+        assert_eq!(rows[0]["check_id"], "cargo_fmt");
+
+        let caveats = gate["decision"]["review_caveats"]
+            .as_array()
+            .expect("review caveats");
+        assert_eq!(
+            caveats
+                .iter()
+                .filter(|caveat| caveat
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("PROVENANCE_CONTRADICTION")))
+                .count(),
+            1,
+            "the contradiction must also be readable as a review signal"
+        );
+        assert_eq!(
+            gate["decision"]["quality_failures"]
+                .as_array()
+                .expect("quality failures")
+                .len(),
+            0,
+            "a provenance contradiction must not be counted as a verified failure"
+        );
+        assert_eq!(
+            gate["decision"]["blocking_issues"]
+                .as_array()
+                .expect("blocking issues")
+                .len(),
+            0
+        );
+        assert!(
+            md.contains("1 provenance contradiction (`PROVENANCE_CONTRADICTION`) was detected")
+        );
+        assert!(md.contains("not a verified check failure"));
+        assert!(md.contains("## Review signals (1)"));
+    }
+
+    /// Regression: a run whose rows agree keeps the gate it always had, and
+    /// gains only an empty typed array.
+    #[test]
+    fn a_run_without_contradictions_keeps_its_gate_unchanged() {
+        let (agreeing, md) = run_gate_over(&[passing_check_on(
+            "/tmp/snapshot",
+            crate::checks::TreeState::Snapshot,
+        )]);
+
+        assert_eq!(agreeing["decision"]["verdict"], "PASS");
+        assert_eq!(agreeing["decision"]["allow_merge"], true);
+        assert!(
+            agreeing["provenance_contradictions"]
+                .as_array()
+                .expect("provenance_contradictions array")
+                .is_empty()
+        );
+        assert!(
+            !md.contains("provenance contradiction"),
+            "no contradiction, no wording about one"
+        );
     }
 
     #[test]

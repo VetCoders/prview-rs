@@ -70,6 +70,24 @@ VALID_MERGE_IMPACTS = {"approve", "review_required", "block"}
 # written these.
 VALID_ANALYSIS_STATUSES = {"complete", "degraded", "incomplete"}
 VALID_MERGE_RECOMMENDATIONS = {"approve", "review_required", "block"}
+# Schema 3.0 names disagreements between the run's substrate and a check's own
+# provenance row. Mirrors `ProvenanceContradiction` in
+# src/artifacts/signal/consistency.rs (`#[serde(rename_all = "kebab-case")]`).
+PROVENANCE_CONTRADICTION_CODE = "PROVENANCE_CONTRADICTION"
+VALID_PROVENANCE_CONTRADICTION_KINDS = {
+    "operator-worktree-state",
+    "check-target-sha",
+    "foreign-substrate",
+}
+PROVENANCE_CONTRADICTION_KEYS = (
+    "code",
+    "kind",
+    "check_id",
+    "field",
+    "run_value",
+    "check_value",
+    "explanation",
+)
 # Schema 2.3 separates strict enforcement from the stable verdict vocabulary.
 # Mirrors `EnforcementDisposition` in src/policy/engine.rs.
 VALID_ENFORCEMENT_DISPOSITIONS = {
@@ -474,6 +492,54 @@ def validate(path: Path) -> list[str]:
                 issues.append("policy.origin must be one of builtin-default|file")
         else:
             require_non_empty_string(policy.get("source"), "policy.source", issues)
+
+    # Provenance contradictions (3.0+): additive, typed, and deliberately OUTSIDE
+    # `decision` -- a substrate disagreement ranks no verdict axis. It must never
+    # be silent either, so every row is required to appear as a review signal:
+    # one artifact naming a contradiction the other hides is the exact failure
+    # this field exists to prevent.
+    if schema_at_least(data.get("schema_version"), (3, 0)):
+        contradictions = data.get("provenance_contradictions", [])
+        if not isinstance(contradictions, list):
+            issues.append("provenance_contradictions must be an array")
+            contradictions = []
+        for index, row in enumerate(contradictions):
+            ctx = f"provenance_contradictions[{index}]"
+            if not isinstance(row, dict):
+                issues.append(f"{ctx} must be an object")
+                continue
+            missing = ensure_keys(row, PROVENANCE_CONTRADICTION_KEYS, ctx)
+            issues.extend(missing)
+            if missing:
+                continue
+            if row["code"] != PROVENANCE_CONTRADICTION_CODE:
+                issues.append(f"{ctx}.code must be {PROVENANCE_CONTRADICTION_CODE}")
+            if row["kind"] not in VALID_PROVENANCE_CONTRADICTION_KINDS:
+                issues.append(
+                    f"{ctx}.kind must be one of "
+                    + "|".join(sorted(VALID_PROVENANCE_CONTRADICTION_KINDS))
+                )
+            for field in PROVENANCE_CONTRADICTION_KEYS[2:]:
+                require_non_empty_string(row[field], f"{ctx}.{field}", issues)
+        raw_caveats = (
+            data["decision"].get("review_caveats")
+            if isinstance(data.get("decision"), dict)
+            else None
+        )
+        if isinstance(raw_caveats, list):
+            signalled = sum(
+                1
+                for caveat in raw_caveats
+                if isinstance(caveat, str)
+                and caveat.startswith(PROVENANCE_CONTRADICTION_CODE)
+            )
+            if signalled != len(contradictions):
+                issues.append(
+                    "decision.review_caveats must carry one "
+                    f"{PROVENANCE_CONTRADICTION_CODE} signal per "
+                    f"provenance_contradictions row ({signalled} signals for "
+                    f"{len(contradictions)} rows)"
+                )
 
     policy_mode = policy.get("mode") if isinstance(policy, dict) else None
     raw_decision = data.get("decision")

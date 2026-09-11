@@ -58,7 +58,8 @@ use crate::regression;
 use crate::regression::tests::is_test_file;
 use anyhow::{Context, Result};
 use signal::{
-    BreakingFinding, BreakingKind, CoverageDelta, ReviewFileCategory, classify_review_file,
+    BreakingFinding, BreakingKind, CoverageDelta, ProvenanceConsistency, ReviewFileCategory,
+    RunProvenance, classify_review_file, detect_provenance_contradictions,
 };
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
@@ -801,6 +802,20 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         diffs,
     );
 
+    // Does the pack tell ONE story about the tree it read? PROVENANCE.json
+    // states the substrate twice — once for the run, once per check — and until
+    // this cross-check the two could disagree inside the same file with nothing
+    // noticing. Derived once here from the run's own inputs and published by
+    // PROVENANCE.json, CONSISTENCY_CHECK.json and the merge gate, which derives
+    // the identical list from the identical inputs through the same function.
+    let provenance_consistency = detect_provenance_contradictions(
+        RunProvenance {
+            target_sha: &resolved_target.commit_id,
+            operator_worktree_clean: worktree_clean,
+        },
+        &all_checks,
+    );
+
     generate_merge_gate(MergeGateInput {
         dir: &summary_dir,
         config,
@@ -972,7 +987,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         heuristics,
         regression: Some(&regression_report),
     })?;
-    generate_consistency_check(&summary_dir, &out_dir, diffs)?;
+    generate_consistency_check(&summary_dir, &out_dir, diffs, &provenance_consistency)?;
     if config.create_dashboard {
         // Dashboard reads report.json for embedding
         dashboard::generate(
@@ -1030,6 +1045,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         worktree_clean,
         worktree_status_digest: worktree_status_digest.as_deref(),
         worktree_head_sha: worktree_head_sha.as_deref(),
+        contradictions: &provenance_consistency,
     })?;
     stage_timings.push(finish_timing(emit_human_stdout, "PROVENANCE.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::Provenance)?;
@@ -1412,7 +1428,12 @@ fn claim_explicit_output_dir_with_reservation(
     Ok(())
 }
 
-fn generate_consistency_check(summary_dir: &Path, out_dir: &Path, diffs: &[Diff]) -> Result<()> {
+fn generate_consistency_check(
+    summary_dir: &Path,
+    out_dir: &Path,
+    diffs: &[Diff],
+    provenance: &ProvenanceConsistency,
+) -> Result<()> {
     let commit_count: usize = diffs.iter().map(|diff| diff.commits.len()).sum();
 
     // Cross-check the IN-MEMORY truth (diffs, ctx) against the ALREADY-SERIALIZED
@@ -1441,7 +1462,11 @@ fn generate_consistency_check(summary_dir: &Path, out_dir: &Path, diffs: &[Diff]
         verdict_gate: disk.verdict_gate,
         verdict_report: disk.verdict_report,
     };
-    let report = counters.check_consistency();
+    let mut report = counters.check_consistency();
+    // Semantics, not just counters: a pack whose run-level substrate and
+    // per-check substrate disagree cannot be published as consistent, however
+    // well its numbers line up.
+    report.merge_provenance(provenance);
 
     fs::write(
         summary_dir.join("CONSISTENCY_CHECK.json"),
@@ -1769,6 +1794,9 @@ struct ProvenanceJsonInput<'a> {
     worktree_clean: Option<bool>,
     worktree_status_digest: Option<&'a str>,
     worktree_head_sha: Option<&'a str>,
+    /// Disagreements between the run's substrate and the per-check rows below,
+    /// resolved once for the whole pack (see [`detect_provenance_contradictions`]).
+    contradictions: &'a ProvenanceConsistency,
 }
 
 /// Every baseline the pack's diffs were actually produced from, named.
@@ -1824,6 +1852,7 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
         worktree_clean,
         worktree_status_digest,
         worktree_head_sha,
+        contradictions,
     } = input;
 
     let executed = checks.iter().map(|c| {
@@ -1887,6 +1916,15 @@ fn generate_provenance_json(input: ProvenanceJsonInput<'_>) -> Result<()> {
             "status_digest": worktree_status_digest,
         },
         "checks": check_rows,
+        // The file's own cross-check: every row above is held against the run
+        // state above it, and a disagreement is named here rather than left for
+        // a reader to spot. Empty means checked and agreed — `comparisons`
+        // says how much was actually comparable, so "nothing to compare" stays
+        // distinguishable from "compared and clean".
+        "consistency": {
+            "comparisons": contradictions.comparisons,
+            "contradictions": contradictions.contradictions,
+        },
     });
 
     fs::write(

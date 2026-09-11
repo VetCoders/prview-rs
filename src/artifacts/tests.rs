@@ -6925,6 +6925,16 @@ fn write_provenance_fixture_with_capture(
         is_remote: true,
     }];
 
+    // The fixture runs the real detector, so a contradiction planted in a
+    // check row reaches PROVENANCE.json exactly as it would in a live run.
+    let contradictions = detect_provenance_contradictions(
+        RunProvenance {
+            target_sha: &resolved_target.commit_id,
+            operator_worktree_clean: worktree.clean,
+        },
+        checks,
+    );
+
     generate_provenance_json(ProvenanceJsonInput {
         dir: out,
         checks,
@@ -6935,6 +6945,7 @@ fn write_provenance_fixture_with_capture(
         worktree_clean: worktree.clean,
         worktree_status_digest: worktree.status_digest.as_deref(),
         worktree_head_sha: worktree.head_sha.as_deref(),
+        contradictions: &contradictions,
     })
     .expect("generate_provenance_json");
 
@@ -6997,6 +7008,54 @@ fn provenance_json_records_pack_level_substrate() {
     let heuristics = &rows[2];
     assert!(heuristics["cwd"].is_null());
     assert!(heuristics["tree_state"].is_null());
+
+    // Rows that agree still record that they were compared: "checked and
+    // consistent" must not read like "nothing was checked".
+    assert_eq!(
+        json["consistency"]["contradictions"]
+            .as_array()
+            .expect("contradictions array")
+            .len(),
+        0
+    );
+    assert_eq!(json["consistency"]["comparisons"], 1);
+}
+
+/// PROVENANCE.json states the substrate twice — once for the run, once per
+/// check. When the two disagree the file must SAY so; before this the reader
+/// was left to notice that `operator_worktree.clean` and a `local-dirty` row
+/// described the same tree.
+#[test]
+fn provenance_json_names_a_substrate_contradiction() {
+    let (repo_tmp, _head) = provenance_fixture_repo();
+    let out = tempfile::tempdir().expect("out tempdir");
+
+    let mut dirty_local = snapshot_provenance("abc1234");
+    dirty_local.cwd = repo_tmp.path().display().to_string();
+    dirty_local.tree_state = Some(crate::checks::TreeState::LocalDirty);
+    let checks = [provenance_check("Cargo check", false, Some(dirty_local))];
+
+    let json = write_provenance_fixture(repo_tmp.path(), out.path(), &checks);
+
+    assert_eq!(json["operator_worktree"]["clean"], true);
+    let contradictions = json["consistency"]["contradictions"]
+        .as_array()
+        .expect("contradictions array");
+    assert_eq!(contradictions.len(), 1);
+    let row = &contradictions[0];
+    assert_eq!(row["code"], "PROVENANCE_CONTRADICTION");
+    assert_eq!(row["kind"], "operator-worktree-state");
+    assert_eq!(row["check_id"], check_id_from_name("Cargo check"));
+    assert_eq!(row["field"], "operator_worktree.clean");
+    assert_eq!(row["run_value"], "clean");
+    assert_eq!(row["check_value"], "local-dirty");
+    assert!(
+        row["explanation"]
+            .as_str()
+            .expect("explanation")
+            .contains("two different states"),
+        "the row must explain the disagreement in words: {row}"
+    );
 }
 
 #[test]
