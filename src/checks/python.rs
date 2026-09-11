@@ -3560,8 +3560,11 @@ mod tests {
             std::fs::create_dir(&project).unwrap();
             let path = project.join(name);
             let file = std::fs::File::create(&path).expect("config file");
-            file.set_len(1024 * 1024 * 1024)
-                .expect("sparse oversized config");
+            // One byte over the bound is the whole contract; a gigabyte-long
+            // sparse file tests nothing extra and is the part that goes flaky on
+            // a filesystem without sparse support or a constrained runner.
+            file.set_len(MAX_PYTHON_CONFIG_BYTES + 1)
+                .expect("oversized config");
             let error = selected_pytest_config(&project, PytestConfigDialect::Nine)
                 .expect_err("oversized config must fail before parsing or choosing a fallback");
             assert!(
