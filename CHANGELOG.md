@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   established. `in_diff` was previously always a boolean, so a consumer that
   assumes that type — or that matches `classification` without a default branch
   — needs updating. `docs/contracts/merge_gate.md` documents the tri-state.
+  Every result carries both properties, including Cargo audit advisories and
+  rows from checks that have no dedicated parser.
 
 - Updated the bundled Loctree library from 0.13.0 to 0.14.4, together with
   its `loctree-ast` and `report-leptos` dependencies. Structural analysis uses

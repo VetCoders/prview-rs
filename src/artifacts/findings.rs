@@ -13,6 +13,23 @@ pub(super) fn is_operator_finding(finding: &DashboardFinding) -> bool {
     matches!(finding.level, "error" | "warning")
 }
 
+/// The origin tri-state every SARIF result carries, per
+/// `docs/contracts/merge_gate.md`.
+///
+/// `introduced` means the tool reported the finding in a file this diff
+/// touches — a location signal, not proof the change created it. `preexisting`
+/// means it reported it outside those files. `unclassified` means the origin
+/// was not established; it is not a pass, and a consumer must not read it as
+/// one. Every emitter uses this mapping so `properties.classification` cannot
+/// disagree with `properties.in_diff`.
+pub(super) fn origin_classification(in_diff: Option<bool>) -> &'static str {
+    match in_diff {
+        Some(true) => "introduced",
+        Some(false) => "preexisting",
+        None => "unclassified",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CargoAuditBaselineCounts {
     new: usize,
@@ -476,6 +493,7 @@ pub(super) fn generate_inline_findings(
                     "properties": {
                         "check": "cargo_audit",
                         "in_diff": current_audit_in_diff,
+                        "classification": origin_classification(current_audit_in_diff),
                         "package": finding.package_display(),
                         "severity": finding.severity,
                     }
@@ -618,7 +636,7 @@ pub(super) fn generate_inline_findings(
 
         // Extract file:line from output for proper SARIF locations.
         let extracted = extract_file_line_from_output(&check.output);
-        let sarif_location = if let Some((ref file, line_num)) = extracted {
+        let (sarif_location, generic_in_diff) = if let Some((ref file, line_num)) = extracted {
             let in_diff_val = is_in_diff(file);
             dashboard_findings.push(DashboardFinding {
                 file: Some(file.clone()),
@@ -629,12 +647,15 @@ pub(super) fn generate_inline_findings(
                 message: first_line.to_string(),
                 in_diff: Some(in_diff_val),
             });
-            json!({
-                "physicalLocation": {
-                    "artifactLocation": { "uri": file },
-                    "region": { "startLine": line_num }
-                }
-            })
+            (
+                json!({
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": file },
+                        "region": { "startLine": line_num }
+                    }
+                }),
+                Some(in_diff_val),
+            )
         } else {
             dashboard_findings.push(DashboardFinding {
                 file: None,
@@ -645,11 +666,14 @@ pub(super) fn generate_inline_findings(
                 message: first_line.to_string(),
                 in_diff: None,
             });
-            json!({
-                "physicalLocation": {
-                    "artifactLocation": { "uri": "20_quality/full-checks.log" }
-                }
-            })
+            (
+                json!({
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": "20_quality/full-checks.log" }
+                    }
+                }),
+                None,
+            )
         };
 
         let rule_id = format!("prview.{}", check_id_from_name(&check.name));
@@ -664,7 +688,16 @@ pub(super) fn generate_inline_findings(
             "ruleId": rule_id,
             "level": level,
             "message": { "text": format!("{}: {}", check.name, first_line) },
-            "locations": [sarif_location]
+            "locations": [sarif_location],
+            // Unparsed checks carry the same origin tri-state as parsed tool
+            // findings. A row that fell back to the combined log has no
+            // established location, so it reports `null`/`unclassified` rather
+            // than silently omitting the properties a consumer reads.
+            "properties": {
+                "in_diff": generic_in_diff,
+                "classification": origin_classification(generic_in_diff),
+                "source": &check_id,
+            }
         }));
     }
 
@@ -707,20 +740,12 @@ pub(super) fn generate_inline_findings(
             // A test can fail because of inputs or its environment. Its
             // traceback location alone cannot classify the failure's origin.
             let in_diff = (tool_set.source != "pytest").then(|| is_in_diff(&finding.file));
-            let classification = match in_diff {
-                Some(true) => {
-                    in_diff_count += 1;
-                    "introduced"
-                }
-                Some(false) => {
-                    preexisting_count += 1;
-                    "preexisting"
-                }
-                None => {
-                    unclassified_count += 1;
-                    "unclassified"
-                }
-            };
+            let classification = origin_classification(in_diff);
+            match in_diff {
+                Some(true) => in_diff_count += 1,
+                Some(false) => preexisting_count += 1,
+                None => unclassified_count += 1,
+            }
 
             dashboard_findings.push(DashboardFinding {
                 file: Some(finding.file.clone()),
@@ -2013,6 +2038,81 @@ FAILED tests/test_parser.py::test_roundtrip\n\
             .find(|finding| finding.check_id == "cargo_audit")
             .expect("cargo-audit advisory");
         assert_eq!(advisory.in_diff, Some(false));
+    }
+
+    fn sarif_results(dir: &Path) -> Vec<serde_json::Value> {
+        let sarif: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("INLINE_FINDINGS.sarif")).expect("sarif"),
+        )
+        .expect("parse sarif");
+        sarif["runs"][0]["results"]
+            .as_array()
+            .expect("sarif results")
+            .clone()
+    }
+
+    #[test]
+    fn generic_check_sarif_rows_carry_the_origin_tri_state() {
+        // A check without a dedicated parser is still a SARIF result, and the
+        // contract says every result carries `in_diff` + `classification`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = vec![rustfmt_check("Diff in src/changed.rs:3:\n-old\n+new\n")];
+        let diffs = vec![one_file_diff("src/changed.rs")];
+        generate_inline_findings(tmp.path(), &checks, &diffs, None, None).expect("findings");
+
+        let results = sarif_results(tmp.path());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["properties"]["in_diff"].as_bool(), Some(true));
+        assert_eq!(
+            results[0]["properties"]["classification"].as_str(),
+            Some("introduced")
+        );
+    }
+
+    #[test]
+    fn unlocated_generic_sarif_row_reports_unclassified_not_absent() {
+        // Falling back to the combined log establishes no origin. That is the
+        // `null` / `unclassified` state, not a missing property a consumer
+        // has to guess about.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = vec![rustfmt_check("some formatting problem\n")];
+        let diffs = vec![one_file_diff("src/changed.rs")];
+        generate_inline_findings(tmp.path(), &checks, &diffs, None, None).expect("findings");
+
+        let results = sarif_results(tmp.path());
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["properties"]["in_diff"].is_null());
+        assert_eq!(
+            results[0]["properties"]["classification"].as_str(),
+            Some("unclassified")
+        );
+    }
+
+    #[test]
+    fn cargo_audit_sarif_rows_classify_their_origin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [cargo_audit_check(
+            crate::checks::CheckStatus::Failed,
+            VULNERABLE_CARGO_AUDIT,
+        )];
+        let diffs = [one_file_diff("Cargo.toml")];
+        generate_inline_findings(tmp.path(), &checks, &diffs, None, None).expect("findings");
+
+        for result in sarif_results(tmp.path()) {
+            let in_diff = result["properties"]["in_diff"].as_bool();
+            assert_eq!(
+                result["properties"]["classification"].as_str(),
+                Some(origin_classification(in_diff)),
+                "classification must agree with in_diff on every advisory row"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_classification_covers_the_documented_tri_state() {
+        assert_eq!(origin_classification(Some(true)), "introduced");
+        assert_eq!(origin_classification(Some(false)), "preexisting");
+        assert_eq!(origin_classification(None), "unclassified");
     }
 
     #[test]
