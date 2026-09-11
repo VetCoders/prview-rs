@@ -7070,3 +7070,143 @@ fn worktree_digest_separates_nested_repositories_by_their_own_state() {
         "the same nested tree must fingerprint identically",
     );
 }
+
+/// A repeated run whose only finding row is an informational note must report
+/// no movement: the stored count, the synthetic current history row and the
+/// previous-run delta all count the same operator-only list.
+///
+/// Before this was pinned, `report.json` stored operator findings while the
+/// dashboard's current row counted every canonical row. A Cargo audit baseline
+/// note — emitted on every Rust run, diagnostic-free by construction — then
+/// turned a stored 0 into a current 1 and rendered a worsening trend for a run
+/// in which nothing changed.
+#[test]
+fn informational_notes_keep_current_and_historical_counts_comparable() {
+    let config = create_test_config(PolicyConfig::default());
+    let resolved_target = ResolvedRef {
+        name: "feature/security-gate".to_string(),
+        commit_id: "abc1234abc1234abc1234abc1234abc1234ab".to_string(),
+        is_remote: false,
+    };
+    let resolved_bases = vec![ResolvedRef {
+        name: "main".to_string(),
+        commit_id: "def5678def5678def5678def5678def5678de".to_string(),
+        is_remote: false,
+    }];
+
+    // The Cargo audit baseline note verbatim: no location, no diagnostic, and
+    // an `in_diff` value, so it cannot be filtered out by origin alone.
+    let baseline_note = DashboardFinding {
+        file: None,
+        line: None,
+        level: "note",
+        check_name: "Cargo audit baseline".to_string(),
+        check_id: "cargo_audit_baseline".to_string(),
+        message: "Cargo audit baseline: status=not-required, new=0, pre-existing=0, \
+                  resolved=0, unknown-baseline=0"
+            .to_string(),
+        in_diff: Some(false),
+    };
+    let inline = InlineFindingsSummary {
+        status: "passed".to_string(),
+        findings_count: 1,
+        dashboard_findings: vec![baseline_note],
+    };
+
+    let branch_dir = tempfile::tempdir().expect("tempdir");
+    let previous_dir = branch_dir.path().join("20260101-000000");
+    let current_dir = branch_dir.path().join("20260101-010000");
+    fs::create_dir_all(&previous_dir).expect("previous run dir");
+    fs::create_dir_all(&current_dir).expect("current run dir");
+
+    let context_for = |out_dir: &Path| {
+        build_dashboard_context(DashboardContextInput {
+            config: &config,
+            checks: &[],
+            heuristics: None,
+            inline: &inline,
+            breaking: Vec::new(),
+            rust_api_delta: None,
+            coverage: CoverageDelta {
+                total_source: 0,
+                covered_count: 0,
+                pct: None,
+                uncovered: vec![],
+                covered: vec![],
+                non_code_count: 0,
+                ghost_tests: vec![],
+            },
+            diff_dir: out_dir,
+            skipped_checks: Vec::new(),
+            out_dir,
+            diffs: &[],
+            ownership_map: Vec::new(),
+            clean_comparison: CleanComparison::for_test(true, true),
+        })
+    };
+
+    // Run one: the note is not an operator finding anywhere.
+    let previous_ctx = context_for(&previous_dir);
+    assert!(
+        previous_ctx.findings.is_empty(),
+        "an informational note is not an operator finding"
+    );
+    report::generate(&report::ReportInput {
+        dir: &previous_dir,
+        config: &config,
+        diffs: &[],
+        checks: &[],
+        resolved_target: &resolved_target,
+        resolved_bases: &resolved_bases,
+        ctx: &previous_ctx,
+        run_started_at: "2026-01-01T00:00:00Z",
+        heuristics: None,
+        regression: None,
+    })
+    .expect("previous report.json");
+
+    let stored: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(previous_dir.join("report.json")).expect("read previous report"),
+    )
+    .expect("parse previous report");
+    assert_eq!(
+        stored["quality"]["sarif"]["findings_count"].as_u64(),
+        Some(0),
+        "report.json must store the operator-finding count"
+    );
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&previous_dir, branch_dir.path().join("latest"))
+        .expect("latest symlink");
+
+    // Run two: identical evidence, so every comparable number stays at zero.
+    let current_ctx = context_for(&current_dir);
+    let current_row = current_ctx
+        .run_history
+        .first()
+        .expect("current run is prepended to the history");
+    assert_eq!(current_row.timestamp, "20260101-010000");
+    assert_eq!(
+        current_row.findings_count, 0,
+        "the synthetic current history row must count the same list report.json stored"
+    );
+    assert!(
+        current_ctx
+            .run_history
+            .iter()
+            .all(|run| run.findings_count == 0),
+        "a replayed run with unchanged diagnostics must not grow the trend"
+    );
+
+    // `build_delta_section` renders `ctx.findings.len()` against
+    // `previous_run.findings_before`; both must be the same operator count.
+    #[cfg(unix)]
+    {
+        let previous = current_ctx
+            .previous_run
+            .as_ref()
+            .expect("previous run delta resolved through the latest symlink");
+        assert_eq!(previous.findings_before, 0);
+        assert_eq!(current_ctx.findings.len(), previous.findings_before);
+    }
+}

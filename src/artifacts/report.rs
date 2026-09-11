@@ -656,12 +656,12 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         ..
     } = input;
 
-    // Dashboard notes retain general check context but are not SARIF results.
-    let sarif_findings_count = ctx
-        .findings
-        .iter()
-        .filter(|finding| super::findings::is_operator_finding(finding))
-        .count();
+    // `ctx.findings` is already the operator-only list (see
+    // `DashboardContext::findings`): informational notes retain general check
+    // context but are not SARIF results. Counting it here — rather than
+    // re-deriving the set — is what keeps this number comparable with the run
+    // history and the previous-run delta, which count the same list.
+    let sarif_findings_count = ctx.findings.len();
 
     let diff_merge_base = diffs
         .first()

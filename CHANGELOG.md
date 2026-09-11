@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `report.json`'s `quality.sarif.findings_count`, the dashboard run history and
+  the previous-run delta all count the same operator-finding list, so
+  informational notes (the Cargo audit baseline row, the Loctree repository
+  summary) cannot report a worsening trend for a run whose diagnostics did not
+  change.
+
 - `MERGE_GATE.json` `files.dashboard` names the HTML entry point the run
   actually generated: `review.html` under `--no-dashboard`, `dashboard.html`
   otherwise. It previously always named `dashboard.html`, so every

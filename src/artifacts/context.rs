@@ -81,6 +81,19 @@ pub(crate) struct DashboardContext {
     pub breaking: Vec<BreakingFinding>,
     pub rust_api_delta: Option<api_delta::ApiArtifactView>,
     pub coverage: CoverageDelta,
+    /// Operator findings only — the canonical rows that pass
+    /// [`super::findings::is_operator_finding`], filtered exactly once when
+    /// this context is built.
+    ///
+    /// Informational notes (a Cargo audit baseline row, a Loctree repository
+    /// summary) are evidence about the run, not diagnostics, and never enter
+    /// this list. That matters because the same list feeds three comparable
+    /// numbers: `report.json`'s `quality.sarif.findings_count`, the synthetic
+    /// current row in the run history, and the previous-run delta. Counting a
+    /// note in one of them and not in the others turned an unchanged run into
+    /// a worsening trend. Consumers must count this list, never re-filter it
+    /// and never fall back to the unfiltered
+    /// `InlineFindingsSummary::dashboard_findings`.
     pub findings: Vec<DashboardFinding>,
     pub per_file_diff_files: Vec<String>,
     pub skipped_checks: Vec<crate::checks::SkippedCheck>,
@@ -224,6 +237,9 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
         ));
     }
 
+    // The single application of the operator predicate. Everything downstream
+    // — report.json, the run-history row below, and the previous-run delta —
+    // counts this list, so the three numbers stay comparable across runs.
     let findings = inline
         .dashboard_findings
         .iter()
@@ -280,6 +296,9 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
                 .filter(|c| c.status == crate::checks::CheckStatus::Warnings)
                 .count(),
             quality_pass,
+            // Same list, same predicate as `quality.sarif.findings_count` in
+            // report.json — which is what `load_run_history` reads back for
+            // every earlier run.
             findings_count: findings.len(),
         };
         run_history.retain(|r| r.timestamp != current_ts);
