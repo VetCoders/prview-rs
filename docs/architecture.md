@@ -1435,12 +1435,8 @@ stops every newly discovered `setsid`/`setpgid` group until the census reaches a
 fixed point. Stability requires every visible member of every owned group to be
 stopped or zombie in two consecutive censuses, including the case where no
 detached group was found. Each detached group is paired with its native
-process-birth identity and killed leaf-first before the root PGID. A single
-`/bin/ps` attempt is bounded at 1 s and retried inside the 3 s census deadline,
-because a slow-but-healthy `ps` on a loaded host is latency, not evidence; the
-census deadline — not the per-attempt budget — is the bound that decides the
-verdict. An unreadable or unstable census is unconfirmed containment, never
-success. This portable
+process-birth identity and killed leaf-first before the root PGID. An unreadable
+or unstable census is unconfirmed containment, never success. This portable
 guarantee ends when a descendant has already double-forked and been reparented
 before cleanup; unlike a Windows Job Object, Unix process groups plus a PPID
 census are not an OS-owned container for an adversarial daemon.
