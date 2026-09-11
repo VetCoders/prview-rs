@@ -2247,6 +2247,23 @@ fn generated_pack_carries_pack_level_provenance() {
         );
     }
 
+    // The pack cross-checks its OWN two statements about the substrate: the run
+    // state above against every check row below. A clean run publishes the
+    // result as an empty list beside the number of comparisons actually made,
+    // so "checked and consistent" never reads like "nothing was checked".
+    let consistency = &provenance["consistency"];
+    assert!(
+        consistency["contradictions"]
+            .as_array()
+            .expect("contradictions must be an array")
+            .is_empty(),
+        "a coherent run must publish no contradiction: {consistency}"
+    );
+    assert!(
+        consistency["comparisons"].is_u64(),
+        "the number of substrate comparisons is part of the record"
+    );
+
     // Check projections share the policy evaluation produced for this run.
     // RUN.json deliberately carries executed checks only, while MERGE_GATE and
     // checks-status also expose pre-run skips; their overlapping rows must not
@@ -2256,6 +2273,23 @@ fn generated_pack_carries_pack_level_provenance() {
             .expect("read MERGE_GATE.json"),
     )
     .expect("parse MERGE_GATE.json");
+    // The gate names the same contradictions the provenance record does, so a
+    // reader of either file sees one truth about the substrate.
+    assert_eq!(
+        merge_gate["provenance_contradictions"],
+        *consistency.get("contradictions").expect("contradictions"),
+        "gate and PROVENANCE.json must agree on the substrate contradictions"
+    );
+    let consistency_check: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output_dir.join("00_summary/CONSISTENCY_CHECK.json"))
+            .expect("read CONSISTENCY_CHECK.json"),
+    )
+    .expect("parse CONSISTENCY_CHECK.json");
+    assert_eq!(
+        consistency_check["consistent"].as_bool(),
+        Some(true),
+        "a run with no contradiction stays consistent: {consistency_check}"
+    );
     let checks_status: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(output_dir.join("checks-status.json"))
             .expect("read checks-status.json"),
@@ -2616,4 +2650,92 @@ fn an_unchanged_update_run_still_honors_fail_on_warnings() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// A substrate contradiction must be readable in BOTH forms: the typed row and
+/// the review signal. The validator refuses a gate that carries one without the
+/// other, and refuses a row that is not spelled in the canonical vocabulary —
+/// an unrecognised code or kind is a contradiction no reader can act on.
+#[test]
+fn provenance_contradiction_validator_contract() {
+    let temp = create_fixture_repo();
+    let repo = temp.path();
+
+    let payload = run_json_quiet(repo, &["feature/json-contract", "main"]);
+    let output_dir = Path::new(
+        payload["output_dir"]
+            .as_str()
+            .expect("output_dir should be a string"),
+    );
+    let merge_gate = output_dir.join("00_summary/MERGE_GATE.json");
+    let validator = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/validate_merge_gate.py");
+    let original: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&merge_gate).expect("read generated merge gate"))
+            .expect("parse merge gate");
+    assert_eq!(original["schema_version"], "3.0");
+    assert!(
+        original["provenance_contradictions"]
+            .as_array()
+            .expect("a 3.0 gate always carries the array")
+            .is_empty(),
+        "the fixture run reads one substrate"
+    );
+
+    let validate = |gate: &serde_json::Value, must_validate: bool| {
+        fs::write(
+            &merge_gate,
+            serde_json::to_vec_pretty(gate).expect("serialize gate"),
+        )
+        .expect("write merge gate vector");
+        let assertion = Command::new("python3")
+            .arg(&validator)
+            .arg(&merge_gate)
+            .assert()
+            .stderr(predicate::str::contains("Traceback").not());
+        if must_validate {
+            assertion.success();
+        } else {
+            assertion.failure();
+        }
+    };
+
+    validate(&original, true);
+
+    let mut unsignalled = original.clone();
+    unsignalled["provenance_contradictions"] = serde_json::json!([{
+        "code": "PROVENANCE_CONTRADICTION",
+        "kind": "operator-worktree-state",
+        "check_id": "cargo_fmt",
+        "field": "operator_worktree.clean",
+        "run_value": "clean",
+        "check_value": "local-dirty",
+        "explanation": "The run froze the operator working tree as clean, but check `cargo_fmt` recorded `local-dirty` for that same tree."
+    }]);
+    validate(&unsignalled, false);
+
+    let mut signalled = unsignalled.clone();
+    signalled["decision"]["review_caveats"]
+        .as_array_mut()
+        .expect("review caveats array")
+        .push(serde_json::json!(
+            "PROVENANCE_CONTRADICTION: the run froze the operator working tree as clean, but check `cargo_fmt` recorded `local-dirty`."
+        ));
+    validate(&signalled, true);
+
+    for (key, value) in [
+        ("kind", serde_json::json!("something-else")),
+        ("code", serde_json::json!("SOMETHING_ELSE")),
+        ("explanation", serde_json::json!("")),
+    ] {
+        let mut broken = signalled.clone();
+        broken["provenance_contradictions"][0][key] = value;
+        validate(&broken, false);
+    }
+
+    let mut missing_field = signalled.clone();
+    missing_field["provenance_contradictions"][0]
+        .as_object_mut()
+        .expect("contradiction row")
+        .remove("check_id");
+    validate(&missing_field, false);
 }

@@ -927,6 +927,28 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   archive` extraction of the target commit in snapshot mode,
   or `repo_root` when no snapshot could be made — and a gating signal whose
   substrate is unstated is unauditable.
+- `consistency` — the file's own cross-check: `{comparisons, contradictions[]}`.
+  Stating the substrate twice (once for the run, once per check) is only worth
+  anything if the two are held against each other, so every comparable row is,
+  and a disagreement is named rather than left for a reader to spot. Each
+  contradiction carries `{code: "PROVENANCE_CONTRADICTION", kind, check_id,
+  field, run_value, check_value, explanation}` with `kind` one of
+  `operator-worktree-state` (the tree frozen clean before the run, read
+  `local-dirty` by a check, or the reverse), `check-target-sha` (a check scanned
+  a commit other than the reviewed target) or `foreign-substrate` (a check ran in
+  a checkout that is not this repository). Commit ids are compared allowing a
+  git-style abbreviation on either side; an abbreviation is not a disagreement.
+  Cache replays are excluded — their provenance describes the ORIGINAL
+  execution's tree, and they are dated by the gate's `stale_cache_caveats`
+  instead — as are rows with no provenance at all, which are an evidence gap, not
+  a contradiction. `comparisons` counts what was actually compared, so "checked
+  and consistent" stays distinguishable from "nothing could be checked". The
+  identical list is published as `MERGE_GATE.json.provenance_contradictions`,
+  once per row as a `PROVENANCE_CONTRADICTION` review signal, and as a warning in
+  `00_summary/CONSISTENCY_CHECK.json`, whose `consistent` is `false` while any
+  contradiction stands. It is a confidence problem about the evidence, not a
+  verified failure: no quality failure, blocking issue or verdict axis is derived
+  from it.
 
 The human Markdown gate and AI index render the complete canonical
 `decision.review_caveats` list with a matching count. Both use the shared

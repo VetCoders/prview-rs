@@ -21,6 +21,7 @@ document disagree, the code is the contract and this document is the bug.
 | `checks` | object[] | Per-check evaluation records (see below) |
 | `inline_findings` | object | Inline SARIF summary (see below) |
 | `stale_cache_caveats` | object[] | Advisory, additive: gate rows replayed from an old or age-unverifiable cache (see below) |
+| `provenance_contradictions` | object[] | Advisory, additive: substrate statements the run and a check make that cannot both be true (see below) |
 | `decision` | object | The merge decision (see below) |
 | `files` | object | Artifact-root-relative paths (see below) |
 | `rust_api_delta` | object \| null | Additive lossless Rust API delta; `null` on non-Rust runs (see below) |
@@ -272,6 +273,53 @@ verdict, `allow_merge`, `enforcement_disposition`, the exit codes and every othe
 field are byte-identical to the same run with a fresh cache. Readers that ignore
 the field lose nothing but the date on the evidence, and `tools/validate_merge_gate.py`
 neither requires nor rejects it.
+
+## `provenance_contradictions`
+
+An additive, advisory list naming every disagreement between the substrate the
+run recorded and the substrate a check recorded for itself. Present from schema
+3.0 and empty on a run whose statements agree. The identical list is published
+as `consistency.contradictions` in `00_summary/PROVENANCE.json`; both are derived
+from one function over one set of inputs, so the two files cannot name different
+contradictions.
+
+| Field | Type | Notes |
+|---|---|---|
+| `code` | string | Always `PROVENANCE_CONTRADICTION` — one token to grep across the pack |
+| `kind` | string | `operator-worktree-state` \| `check-target-sha` \| `foreign-substrate` |
+| `check_id` | string | Policy check id, the same value as `checks[].id` |
+| `field` | string | The run-level field the check row contradicts |
+| `run_value` | string | What the run says about the substrate |
+| `check_value` | string | What the check says about the tree it read |
+| `explanation` | string | One sentence naming the disagreement |
+
+The three kinds are the disagreements provable from the rows alone:
+
+- `operator-worktree-state` — the operator working tree was frozen clean (or
+  dirty) before the checks ran, and a check that read THAT live tree recorded the
+  opposite state;
+- `check-target-sha` — a check scanned a commit that is not the reviewed target,
+  so its result does not describe the tree the pack judges;
+- `foreign-substrate` — a check ran in a checkout that is not this repository, so
+  its evidence belongs to a substrate the pack never declared.
+
+Rows replayed from cache are excluded from all three: their provenance describes
+the ORIGINAL execution's tree, and holding it against this run's substrate would
+claim a contradiction where there is only a cache hit (those replays are dated by
+`stale_cache_caveats` instead). A check with no provenance at all is not compared
+either — an evidence gap, already visible as nulls in `PROVENANCE.json`, is not a
+contradiction.
+
+A contradiction is a **provenance/confidence** problem, never a verified failure:
+it says the evidence may not describe the reviewed commit, not that the reviewed
+product is defective. Nothing in `decision` is derived from it — no quality
+failure, no blocking issue, no axis movement — and it sits outside that object
+for the same reason `stale_cache_caveats` does. It is never silent either: every
+row is also rendered as a `decision.review_caveats` entry prefixed with
+`PROVENANCE_CONTRADICTION`, `MERGE_GATE.md` explains the class in words, and
+`tools/validate_merge_gate.py` rejects a 3.0 gate whose typed rows and review
+signals do not correspond one-to-one. A pack carrying a contradiction is also
+reported as `consistent: false` in `00_summary/CONSISTENCY_CHECK.json`.
 
 ## `decision`
 
