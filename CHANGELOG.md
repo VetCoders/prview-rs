@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `outside changed files`, and `origin unknown` — the canonical `in_diff`
   tri-state — rather than `new` and `legacy (pre-existing)`, and a lint check
   that was skipped or errored is reported as not executed instead of clean.
+- Summary labels state the evidence behind them: `Breaking: 0` is now
+  `Public API structural changes: 0` with a note that semantic compatibility
+  was not assessed, `Sanity OK` is `Artifact pack integrity: OK` (in the
+  dashboard and on stdout), `Heuristics OK` is `Loctree structural signals: 0`,
+  and `Checks OK (x/y)` is `Checks passed: x/y`. The PR comment export uses the
+  same wording.
 
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.

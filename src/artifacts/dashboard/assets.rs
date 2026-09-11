@@ -1794,6 +1794,7 @@ body.author-mode .section-noise  { display: none; }
 .action-chip:hover { opacity: 0.8; }
 .action-chip.chip-ok   { background: transparent; color: var(--muted); border-color: rgba(var(--veil),0.12); }
 .action-chip.chip-ok .chip-ok-check { color: var(--pass); }
+.action-chip .chip-note { color: var(--faint); font-size: 11px; font-weight: 400; }
 .action-chip.chip-warn { background: transparent; color: var(--warn); border-color: var(--warn); }
 .action-chip.chip-error{ background: transparent; color: var(--block); border-color: var(--block); }
 
@@ -2659,7 +2660,7 @@ const JS_SUFFIX: &str = r##"
             comment += '**Checks:** ' + passed + ' passed, ' + failed + ' failed\n\n';
 
             if (quality.breaking_changes && quality.breaking_changes.has_breaking) {
-                comment += '**Breaking:** ' + (quality.breaking_changes.summary || 'Yes') + '\n\n';
+                comment += '**Public API structural changes:** ' + (quality.breaking_changes.summary || 'Yes') + ' (structural scan; semantic compatibility not assessed)\n\n';
             }
 
             if (quality.coverage) {

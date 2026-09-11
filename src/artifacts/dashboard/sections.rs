@@ -1001,7 +1001,7 @@ pub(super) fn build_action_center(
                     r#"<span class="chip-ok-check">&#x2713;</span> {}"#,
                     i18n_template(
                         "chip.checksOk",
-                        "Checks OK ({passed}/{total})",
+                        "Checks passed: {passed}/{total}",
                         &[
                             ("passed", passed_count.to_string()),
                             ("total", checks.len().to_string()),
@@ -1047,13 +1047,19 @@ pub(super) fn build_action_center(
             },
         );
     } else {
+        // A structural scanner can only speak about structure: the chip says
+        // what was counted, and the note says what was not assessed.
         push_chip(
             &mut chips,
             "#section-breaking",
             "chip-ok",
             format!(
-                r#"<span class="chip-ok-check">&#x2713;</span> {}"#,
-                i18n_template("chip.breakingClear", "Breaking: 0", &[])
+                r#"<span class="chip-ok-check">&#x2713;</span> {} <span class="chip-note" data-i18n="message.structuralScanScope">structural scan; semantic compatibility not assessed</span>"#,
+                i18n_template(
+                    "chip.publicApiStructuralChangesClear",
+                    "Public API structural changes: 0",
+                    &[],
+                )
             ),
         );
     }
@@ -1132,7 +1138,11 @@ pub(super) fn build_action_center(
                 "chip-ok",
                 format!(
                     r#"<span class="chip-ok-check">&#x2713;</span> {}"#,
-                    i18n_template("chip.heuristicsOk", "Heuristics OK", &[])
+                    i18n_template(
+                        "chip.loctreeSignalsClear",
+                        "Loctree structural signals: 0",
+                        &[],
+                    )
                 ),
             );
         }
@@ -1162,7 +1172,7 @@ pub(super) fn build_action_center(
             "chip-ok",
             format!(
                 r#"<span class="chip-ok-check">&#x2713;</span> {}"#,
-                i18n_template("chip.findingsClear", "Findings: 0", &[])
+                i18n_template("chip.findingsClear", "Tool observations: 0", &[])
             ),
         );
     }
@@ -1175,7 +1185,11 @@ pub(super) fn build_action_center(
                 "chip-ok",
                 format!(
                     r#"<span class="chip-ok-check">&#x2713;</span> {}"#,
-                    i18n_template("chip.sanityOk", "Sanity OK", &[])
+                    i18n_template(
+                        "chip.artifactPackIntegrityOk",
+                        "Artifact pack integrity: OK",
+                        &[],
+                    )
                 ),
             );
         } else {
@@ -2734,7 +2748,7 @@ pub(super) fn build_loctree_section(heuristics: Option<&HeuristicsResult>) -> St
         && loctree.twins.dead_parrots.is_empty()
         && loctree.twins.exact_twins.is_empty()
     {
-        issues_html.push_str(r#"<p data-i18n="label.noIssuesDetected">No signals detected</p>"#);
+        issues_html.push_str(r#"<p data-i18n="label.noSignalsDetected">No signals detected</p>"#);
     }
 
     format!(

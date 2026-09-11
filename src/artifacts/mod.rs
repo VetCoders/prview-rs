@@ -1058,14 +1058,14 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         use colored::Colorize;
         if sanity.valid {
             println!(
-                "  {} Sanity: {}/{} checks passed",
+                "  {} Artifact pack integrity: {}/{} checks passed",
                 "✓".green(),
                 sanity.checks_passed,
                 sanity.checks_run,
             );
         } else {
             println!(
-                "  {} Sanity: INVALID ({}/{} passed)",
+                "  {} Artifact pack integrity: INVALID ({}/{} passed)",
                 "✗".red(),
                 sanity.checks_passed,
                 sanity.checks_run,

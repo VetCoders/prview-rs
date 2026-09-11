@@ -695,14 +695,23 @@ fn test_action_center_traffic_light_chips() {
         html.contains(r#"data-i18n-template="count.warnings""#),
         "Checks warning card should be localizable"
     );
-    // Should have Breaking chip
+    // The public API chip names the structural scan it actually ran and says
+    // what it did not assess.
     assert!(
-        html.contains("Breaking"),
-        "Action center should contain Breaking chip"
+        html.contains(r#"data-i18n-template="chip.publicApiStructuralChangesClear""#),
+        "Action center should contain the public API structural chip"
+    );
+    assert!(
+        html.contains(r#"data-i18n="message.structuralScanScope""#),
+        "The structural chip must carry its scope note"
+    );
+    assert!(
+        !html.contains("Breaking: 0"),
+        "A structural scan cannot claim there are no breaking changes"
     );
     // Should have Findings chip
     assert!(
-        html.contains("Findings"),
+        html.contains(r#"data-i18n-template="chip.findingsClear""#),
         "Action center should contain Findings chip"
     );
 }
