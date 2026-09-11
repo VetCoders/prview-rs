@@ -7183,7 +7183,7 @@ fn informational_notes_keep_current_and_historical_counts_comparable() {
     };
 
     // Run one: the note is not an operator finding anywhere.
-    let previous_ctx = context_for(&previous_dir);
+    let previous_ctx = context_for(previous_dir.as_path());
     assert!(
         previous_ctx.findings.is_empty(),
         "an informational note is not an operator finding"
@@ -7217,7 +7217,7 @@ fn informational_notes_keep_current_and_historical_counts_comparable() {
         .expect("latest symlink");
 
     // Run two: identical evidence, so every comparable number stays at zero.
-    let current_ctx = context_for(&current_dir);
+    let current_ctx = context_for(current_dir.as_path());
     let current_row = current_ctx
         .run_history
         .first()
