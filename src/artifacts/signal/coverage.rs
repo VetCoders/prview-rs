@@ -107,11 +107,21 @@ pub struct CoverageFile {
     pub path: String,
 }
 
+/// Synthetic `CoveragePair::test_path` for a Rust source file that is
+/// self-tested through an inline `#[cfg(test)]` module.
+///
+/// It is a marker, not a repository path: no blob exists under it. Any
+/// projection that turns `test_path` into a link or a file lookup must render
+/// this value as plain text instead.
+pub const INLINE_TEST_MARKER: &str = "(inline #[cfg(test)])";
+
 #[derive(Debug, Clone)]
 pub struct CoveragePair {
     pub src_status: char,
     pub src_path: String,
     pub test_status: char,
+    /// A repository path, or [`INLINE_TEST_MARKER`] when the source file is
+    /// self-tested rather than paired with a test file.
     pub test_path: String,
     // Never read after pairing: the match tier is computed in pair_sources_with_tests
     // but no runtime consumer weighs it yet. Kept because tier-weighted coverage
@@ -348,7 +358,7 @@ pub fn compute_coverage_signal(
     for path in &inline_tested_paths {
         covered_files.push((
             path.clone(),
-            "(inline #[cfg(test)])".to_string(),
+            INLINE_TEST_MARKER.to_string(),
             CoverageMatchTier::High,
         ));
     }

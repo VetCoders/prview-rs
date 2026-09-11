@@ -109,6 +109,45 @@ fn test_matching_is_a_file_ratio_not_executed_code_coverage() {
 }
 
 #[test]
+fn inline_test_marker_is_rendered_as_text_not_as_a_source_link() {
+    use crate::artifacts::signal::{CoverageMatchTier, CoveragePair, INLINE_TEST_MARKER};
+
+    let mut ctx = super::tests::mock_ctx();
+    ctx.coverage.covered_count = 2;
+    ctx.coverage.total_source = 2;
+    ctx.coverage.covered = vec![
+        CoveragePair {
+            src_status: 'M',
+            src_path: "src/self_tested.rs".into(),
+            test_status: 'M',
+            test_path: INLINE_TEST_MARKER.into(),
+            tier: CoverageMatchTier::High,
+        },
+        CoveragePair {
+            src_status: 'M',
+            src_path: "src/paired.rs".into(),
+            test_status: 'M',
+            test_path: "tests/paired.rs".into(),
+            tier: CoverageMatchTier::High,
+        },
+    ];
+
+    let html = build_coverage_section(&ctx);
+
+    // A real test file stays navigable; the synthetic marker never reaches the
+    // reader as a path, because no blob can be embedded under it.
+    assert!(html.contains("data-source-path=\"tests/paired.rs\""));
+    assert!(html.contains(&escape_html(INLINE_TEST_MARKER)));
+    assert!(
+        !html.contains(&format!(
+            "data-source-path=\"{}\"",
+            escape_html(INLINE_TEST_MARKER)
+        )),
+        "the inline-test marker must not be handed to the source reader"
+    );
+}
+
+#[test]
 fn pytest_check_preview_shows_failure_and_keeps_complete_log_on_demand() {
     let ctx = super::tests::mock_ctx();
     let checks = vec![CheckResult {

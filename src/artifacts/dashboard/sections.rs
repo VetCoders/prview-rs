@@ -2108,13 +2108,22 @@ pub(super) fn build_coverage_section(ctx: &DashboardContext) -> String {
         covered_html.push_str(":</summary>");
         covered_html.push_str(r#"<div class="coverage-file-list" style="margin-top:8px">"#);
         for p in &cov.covered {
+            // A self-tested source file has no paired test file: its
+            // `test_path` is a marker, and the reader can never embed a blob
+            // under it. Linking it produced a clickable "source unavailable"
+            // dialog, so the marker is rendered as text.
+            let test_cell = if p.test_path == crate::artifacts::signal::INLINE_TEST_MARKER {
+                format!("<code>{}</code>", escape_html(&p.test_path))
+            } else {
+                source_evidence_link(&p.test_path, None)
+            };
             let _ = write!(
                 covered_html,
                 r#"<div class="coverage-file"><span>{} {}</span> <span style="color:var(--faint)">&#x2194;</span> <span>{} {}</span></div>"#,
                 escape_html(&p.src_status.to_string()),
                 source_evidence_link(&p.src_path, None),
                 escape_html(&p.test_status.to_string()),
-                source_evidence_link(&p.test_path, None),
+                test_cell,
             );
         }
         covered_html.push_str("</div></details>");

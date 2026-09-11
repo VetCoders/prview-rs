@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Rust source file counted as covered through an inline `#[cfg(test)]` module
+  shows the marker as text. It was rendered as a source link, and clicking it
+  opened a "source unavailable" dialog because no blob exists under a synthetic
+  marker.
+
 - The dashboard lint section counts no findings for a check it reports as not
   executed. A lint check in `Error` status still produces a canonical row for
   its runner diagnostic, and counting it showed `origin unknown / 1 total` above
