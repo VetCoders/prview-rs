@@ -3716,9 +3716,16 @@ pub(super) fn build_security_section(checks: &[CheckResult], ctx: &DashboardCont
 }
 
 // ---------------------------------------------------------------------------
-// PRV-205: Diff-aware Lint Metrics
+// PRV-205: Lint findings, projected from the canonical model
 // ---------------------------------------------------------------------------
 
+/// Render the lint section as a pure projection of `ctx.lint_metrics`.
+///
+/// The counters below come from the canonical findings model; this renderer
+/// adds no classification of its own. In particular it never turns the
+/// canonical "finding is located in a changed file" signal into the words
+/// "new" or "introduced", and it never renders a check that did not execute as
+/// clean.
 pub(super) fn build_lint_metrics_section(ctx: &DashboardContext, diffs: &[Diff]) -> String {
     let metrics = &ctx.lint_metrics;
 
@@ -3729,9 +3736,6 @@ pub(super) fn build_lint_metrics_section(ctx: &DashboardContext, diffs: &[Diff])
 
     // Check if we have diff data
     let has_diff_data = !diffs.is_empty() && diffs.iter().any(|d| !d.files.is_empty());
-
-    // All lint checks are clean (zero issues everywhere)
-    let all_clean = metrics.iter().all(|m| m.total_issues == 0);
 
     if !has_diff_data {
         return r#"<div class="section" id="section-lint">
@@ -3744,121 +3748,131 @@ pub(super) fn build_lint_metrics_section(ctx: &DashboardContext, diffs: &[Diff])
             .to_string();
     }
 
-    if all_clean {
-        return format!(
-            r#"<div class="section" id="section-lint">
-    <div class="section-header">
-        <span class="section-title" data-i18n="section.lint">Lint</span>
-        <span class="badge badge-success" data-i18n="label.clean">CLEAN</span>
-    </div>
-    <div class="lint-clean-msg">&#x2713; {clean_msg}</div>
-</div>"#,
-            clean_msg = i18n_template(
-                "message.cleanLintAcrossChecks",
-                &format!(
-                    "Clean lint — no issues found across {} checks",
-                    metrics.len()
-                ),
-                &[("count", metrics.len().to_string())],
-            ),
-        );
-    }
+    let executed = |status: CheckStatus| {
+        matches!(
+            status,
+            CheckStatus::Passed | CheckStatus::Failed | CheckStatus::Warnings
+        )
+    };
 
-    // Build cards for each lint check with issues
-    let total_new: usize = metrics.iter().map(|m| m.new_issues).sum();
-    let total_legacy: usize = metrics.iter().map(|m| m.legacy_issues).sum();
-    let total_all: usize = metrics.iter().map(|m| m.total_issues).sum();
+    let total_in_changed: usize = metrics.iter().map(|m| m.findings_in_changed_files).sum();
+    let total_outside: usize = metrics
+        .iter()
+        .map(|m| m.findings_outside_changed_files)
+        .sum();
+    let total_unknown: usize = metrics.iter().map(|m| m.findings_origin_unknown).sum();
+    let total_all: usize = metrics.iter().map(|m| m.total_findings).sum();
+    let not_executed = metrics.iter().filter(|m| !executed(m.status)).count();
 
-    let overall_badge = if total_new > 0 {
-        r#"<span class="badge badge-warning" data-i18n="label.newIssues">NEW ISSUES</span>"#
-    } else if total_legacy > 0 {
-        r#"<span class="badge badge-muted" data-i18n="label.legacyOnly">LEGACY ONLY</span>"#
+    // The badge states what the evidence supports, never a blanket "clean".
+    let overall_badge = if not_executed > 0 {
+        r#"<span class="badge badge-muted" data-i18n="label.lintIncomplete">ANALYSIS INCOMPLETE</span>"#
+    } else if total_all == 0 {
+        r#"<span class="badge badge-success" data-i18n="label.noFindingsReported">NO FINDINGS REPORTED</span>"#
+    } else if total_in_changed > 0 {
+        r#"<span class="badge badge-warning" data-i18n="label.findingsInChangedFiles">FINDINGS IN CHANGED FILES</span>"#
+    } else if total_unknown > 0 {
+        r#"<span class="badge badge-muted" data-i18n="label.findingsOriginUnknown">ORIGIN UNKNOWN</span>"#
     } else {
-        r#"<span class="badge badge-success" data-i18n="label.clean">CLEAN</span>"#
+        r#"<span class="badge badge-muted" data-i18n="label.findingsOutsideChangedFiles">FINDINGS OUTSIDE CHANGED FILES</span>"#
     };
 
     let mut cards_html = String::new();
     for m in metrics {
-        let card_class = if m.total_issues == 0 {
-            "lint-card lint-clean"
-        } else if m.new_issues > 0 {
-            "lint-card lint-new"
+        let card_class = if !executed(m.status) {
+            "lint-card lint-not-executed"
+        } else if m.total_findings == 0 {
+            "lint-card lint-none"
+        } else if m.findings_in_changed_files > 0 {
+            "lint-card lint-in-changed"
         } else {
-            "lint-card lint-mixed"
-        };
-
-        let icon = if m.total_issues == 0 {
-            "&#x2713;"
-        } else if m.new_issues > 0 {
-            "&#x26A0;"
-        } else {
-            "&#x2139;"
+            "lint-card lint-out-of-diff"
         };
 
         let mut card = String::new();
         let _ = write!(
             card,
-            r#"<div class="{card_class}"><div class="lint-card-header">{icon} {name}"#,
+            r#"<div class="{card_class}"><div class="lint-card-header">{icon} {name} <span class="badge {bc}" data-i18n="status.{skey}">{status}</span>"#,
             card_class = card_class,
-            icon = icon,
+            icon = check_icon(m.status),
             name = escape_html(&m.check_name),
+            bc = check_badge_class(m.status),
+            skey = m.status.as_str(),
+            status = escape_html(m.status.as_str()),
         );
-
-        if m.total_issues == 0 {
-            let _ = write!(
-                card,
-                r#" <span class="badge badge-success" data-i18n="label.clean">CLEAN</span>"#
-            );
-        } else if m.new_issues > 0 {
-            let _ = write!(
-                card,
-                r#" <span class="badge badge-warning">{}</span>"#,
-                i18n_template(
-                    "summary.newCount",
-                    &format!("{} new", m.new_issues),
-                    &[("count", m.new_issues.to_string())],
-                )
-            );
-        }
         card.push_str("</div>");
 
-        if m.total_issues > 0 {
+        if !executed(m.status) {
+            let _ = write!(
+                card,
+                r#"<div class="lint-card-stats"><span class="lint-stat-unknown">{}</span></div>"#,
+                i18n_template(
+                    "message.lintNotExecuted",
+                    "Not executed by this PrView run — no findings were produced",
+                    &[],
+                ),
+            );
+        } else if m.total_findings == 0 {
+            let _ = write!(
+                card,
+                r#"<div class="lint-card-stats"><span class="lint-stat-outside">{}</span></div>"#,
+                i18n_template(
+                    "message.lintNoFindingsReported",
+                    "No findings reported by this check",
+                    &[],
+                ),
+            );
+        } else {
             let _ = write!(card, r#"<div class="lint-card-stats">"#);
-            if m.new_issues > 0 {
+            if m.findings_in_changed_files > 0 {
                 let _ = write!(
                     card,
-                    r#"<span class="lint-stat-new">{}</span>"#,
+                    r#"<span class="lint-stat-in-changed">{}</span>"#,
                     i18n_template(
-                        "message.lintNewInChangedFiles",
-                        &format!("{} new in changed files", m.new_issues),
-                        &[("count", m.new_issues.to_string())],
+                        "message.lintInChangedFiles",
+                        &format!("{} in changed files", m.findings_in_changed_files),
+                        &[("count", m.findings_in_changed_files.to_string())],
                     ),
                 );
             }
-            if m.legacy_issues > 0 {
+            if m.findings_outside_changed_files > 0 {
                 let _ = write!(
                     card,
-                    r#"<span class="lint-stat-legacy">{}</span>"#,
+                    r#"<span class="lint-stat-outside">{}</span>"#,
                     i18n_template(
-                        "message.lintLegacyPreExisting",
-                        &format!("{} legacy (pre-existing)", m.legacy_issues),
-                        &[("count", m.legacy_issues.to_string())],
+                        "message.lintOutsideChangedFiles",
+                        &format!("{} outside changed files", m.findings_outside_changed_files),
+                        &[("count", m.findings_outside_changed_files.to_string())],
+                    ),
+                );
+            }
+            if m.findings_origin_unknown > 0 {
+                let _ = write!(
+                    card,
+                    r#"<span class="lint-stat-unknown">{}</span>"#,
+                    i18n_template(
+                        "message.lintOriginUnknown",
+                        &format!("{} origin unknown", m.findings_origin_unknown),
+                        &[("count", m.findings_origin_unknown.to_string())],
                     ),
                 );
             }
             card.push_str("</div>");
 
-            if !m.changed_files_with_issues.is_empty() {
+            if !m.changed_files_with_findings.is_empty() {
                 let _ = write!(
                     card,
                     r#"<div class="lint-card-files"><details><summary>{}</summary><ul>"#,
                     i18n_template(
-                        "message.lintChangedFilesWithIssues",
-                        &format!("Files with issues: {}", m.changed_files_with_issues.len()),
-                        &[("count", m.changed_files_with_issues.len().to_string())],
+                        "message.lintChangedFilesWithFindings",
+                        &format!(
+                            "Changed files with findings: {}",
+                            m.changed_files_with_findings.len()
+                        ),
+                        &[("count", m.changed_files_with_findings.len().to_string())],
                     ),
                 );
-                for file in &m.changed_files_with_issues {
+                for file in &m.changed_files_with_findings {
                     let _ = write!(card, "<li>{}</li>", escape_html(file));
                 }
                 card.push_str("</ul></details></div>");
@@ -3877,14 +3891,18 @@ pub(super) fn build_lint_metrics_section(ctx: &DashboardContext, diffs: &[Diff])
         <span class="section-count">{count_summary}</span>
     </div>
     <div class="lint-grid">{cards}</div>
+    <div class="lint-scope-note" data-i18n="message.lintScopeNote">Counts regroup the locations the tools reported. A finding in a changed file is a location signal, not proof that this change created it.</div>
 </div>"#,
         badge = overall_badge,
         count_summary = i18n_template(
             "summary.lintTotals",
-            &format!("{total_new} new / {total_legacy} legacy / {total_all} total"),
+            &format!(
+                "{total_in_changed} in changed files / {total_outside} outside changed files / {total_unknown} origin unknown / {total_all} total"
+            ),
             &[
-                ("new", total_new.to_string()),
-                ("legacy", total_legacy.to_string()),
+                ("changed", total_in_changed.to_string()),
+                ("outside", total_outside.to_string()),
+                ("unknown", total_unknown.to_string()),
                 ("total", total_all.to_string()),
             ],
         ),

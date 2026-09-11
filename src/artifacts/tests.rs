@@ -5484,64 +5484,6 @@ fn test_flaky_scores_sorted_by_score_descending() {
     );
 }
 
-// -----------------------------------------------------------------------
-// PRV-205: Lint metrics tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_parse_lint_issues_clippy_output() {
-    let output = r#"warning: unused variable `x`
-  --> src/foo.rs:42:9
-   |
-42 |     let x = 5;
-   |         ^ help: if this is intentional, prefix it with an underscore
-
-warning: unused import: `std::io`
-  --> src/bar.rs:3:5
-   |
-3  | use std::io;
-   |     ^^^^^^^
-"#;
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 2);
-    assert!(issues.contains(&"src/foo.rs".to_string()));
-    assert!(issues.contains(&"src/bar.rs".to_string()));
-}
-
-#[test]
-fn test_parse_lint_issues_eslint_output() {
-    let output = r#"/home/user/project/src/app.js:10:5: warning 'foo' is defined but never used
-/home/user/project/src/utils.ts:25:1: error Missing semicolon
-src/index.tsx:3:8: warning Unexpected console statement
-"#;
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 3);
-    // Full paths get normalized but keep structure
-    assert!(issues.iter().any(|p| p.contains("app.js")));
-    assert!(issues.iter().any(|p| p.contains("utils.ts")));
-    assert!(issues.iter().any(|p| p.contains("index.tsx")));
-}
-
-#[test]
-fn test_parse_lint_issues_ruff_output() {
-    let output = r#"src/foo.py:15:1: E501 Line too long (120 > 79)
-src/bar.py:8:1: F401 `os` imported but unused
-"#;
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 2);
-    assert!(issues.contains(&"src/foo.py".to_string()));
-    assert!(issues.contains(&"src/bar.py".to_string()));
-}
-
-#[test]
-fn test_parse_lint_issues_empty_output() {
-    let issues = parse_lint_issues("");
-    assert!(issues.is_empty());
-
-    let issues2 = parse_lint_issues("All checks passed!\n");
-    assert!(issues2.is_empty());
-}
-
 #[test]
 fn test_build_regression_patch_text_is_none_when_empty() {
     assert_eq!(build_regression_patch_text(&[]), None);
@@ -5560,145 +5502,9 @@ fn test_build_regression_patch_text_truncates_on_char_boundary_and_appends_note(
     assert!(built.is_char_boundary(prefix.len()));
 }
 
-#[test]
-fn test_compute_lint_metrics_all_new() {
-    use crate::git::{Diff, DiffStats, FileChange, FileStatus};
-
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Warnings,
-        duration: Duration::from_secs(5),
-        output: "warning: unused\n  --> src/main.rs:10:5\nwarning: unused\n  --> src/lib.rs:20:1\n"
-            .into(),
-        cached: false,
-        provenance: None,
-    }];
-    let diffs = vec![Diff {
-        base: "main".into(),
-        target: "feature/x".into(),
-        base_commit_id: "aaa".into(),
-        target_commit_id: "bbb".into(),
-        files: vec![
-            FileChange {
-                path: "src/main.rs".into(),
-                status: FileStatus::Modified,
-                additions: 10,
-                deletions: 2,
-            },
-            FileChange {
-                path: "src/lib.rs".into(),
-                status: FileStatus::Modified,
-                additions: 5,
-                deletions: 1,
-            },
-        ],
-        stats: DiffStats {
-            files_changed: 2,
-            additions: 15,
-            deletions: 3,
-            copied: 0,
-        },
-        commits: vec![],
-    }];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].check_name, "cargo clippy");
-    assert_eq!(metrics[0].new_issues, 2);
-    assert_eq!(metrics[0].legacy_issues, 0);
-    assert_eq!(metrics[0].total_issues, 2);
-    assert_eq!(metrics[0].changed_files_with_issues.len(), 2);
-}
-
-#[test]
-fn test_compute_lint_metrics_mixed_new_and_legacy() {
-    use crate::git::{Diff, DiffStats, FileChange, FileStatus};
-
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Warnings,
-        duration: Duration::from_secs(5),
-        output:
-            "warning: unused\n  --> src/main.rs:10:5\nwarning: unused\n  --> src/legacy.rs:20:1\n"
-                .into(),
-        cached: false,
-        provenance: None,
-    }];
-    let diffs = vec![Diff {
-        base: "main".into(),
-        target: "feature/x".into(),
-        base_commit_id: "aaa".into(),
-        target_commit_id: "bbb".into(),
-        files: vec![FileChange {
-            path: "src/main.rs".into(),
-            status: FileStatus::Modified,
-            additions: 10,
-            deletions: 2,
-        }],
-        stats: DiffStats {
-            files_changed: 1,
-            additions: 10,
-            deletions: 2,
-            copied: 0,
-        },
-        commits: vec![],
-    }];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].new_issues, 1, "src/main.rs is in the diff");
-    assert_eq!(
-        metrics[0].legacy_issues, 1,
-        "src/legacy.rs is NOT in the diff"
-    );
-    assert_eq!(metrics[0].total_issues, 2);
-    assert_eq!(metrics[0].changed_files_with_issues, vec!["src/main.rs"]);
-}
-
-#[test]
-fn test_compute_lint_metrics_skips_error_checks() {
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Error,
-        duration: Duration::from_secs(1),
-        output: "INTERNAL ERROR: some garbage\n  --> src/main.rs:1:1\n".into(),
-        cached: false,
-        provenance: None,
-    }];
-    let diffs: Vec<Diff> = vec![];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert!(metrics.is_empty(), "Error-status checks should be skipped");
-}
-
-#[test]
-fn test_compute_lint_metrics_non_lint_checks_ignored() {
-    let checks = vec![
-        CheckResult {
-            name: "cargo check".into(),
-            status: CheckStatus::Passed,
-            duration: Duration::from_secs(2),
-            output: "Compiling project\n".into(),
-            cached: false,
-            provenance: None,
-        },
-        CheckResult {
-            name: "cargo test".into(),
-            status: CheckStatus::Passed,
-            duration: Duration::from_secs(10),
-            output: "test result: ok. 42 passed\n".into(),
-            cached: false,
-            provenance: None,
-        },
-    ];
-    let diffs: Vec<Diff> = vec![];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert!(
-        metrics.is_empty(),
-        "Non-lint checks should not produce metrics"
-    );
-}
+// -----------------------------------------------------------------------
+// PRV-205: Lint findings projection tests
+// -----------------------------------------------------------------------
 
 #[test]
 fn test_is_lint_check_identification() {
@@ -5715,178 +5521,109 @@ fn test_is_lint_check_identification() {
     assert!(!is_lint_check("vitest"));
 }
 
-#[test]
-fn test_normalize_lint_path() {
-    assert_eq!(normalize_lint_path("./src/foo.rs"), "src/foo.rs");
-    assert_eq!(normalize_lint_path("/src/foo.rs"), "src/foo.rs");
-    assert_eq!(normalize_lint_path("src/foo.rs"), "src/foo.rs");
-    assert_eq!(normalize_lint_path("  src/foo.rs  "), "src/foo.rs");
+fn lint_finding(check_id: &str, file: &str, in_diff: Option<bool>) -> DashboardFinding {
+    DashboardFinding {
+        level: "warning",
+        check_name: "Clippy".into(),
+        check_id: check_id.into(),
+        message: "unused variable".into(),
+        in_diff,
+        file: Some(file.into()),
+        line: Some(1),
+    }
 }
 
-#[test]
-fn test_normalize_lint_path_absolute_unix() {
-    // P1 fix: absolute paths must be relativized to repo-relative form
-    assert_eq!(
-        normalize_lint_path("/Users/dev/Git/myapp/src/app.ts"),
-        "src/app.ts"
-    );
-    assert_eq!(
-        normalize_lint_path("/home/ci/project/src/utils/helpers.rs"),
-        "src/utils/helpers.rs"
-    );
-    // Prefix depth >= 2 slashes → cut
-    assert_eq!(
-        normalize_lint_path("/opt/ci/build/lib/parser.py"),
-        "lib/parser.py"
-    );
-    // Prefix depth < 2 slashes → stay as-is
-    assert_eq!(
-        normalize_lint_path("/opt/build/lib/parser.py"),
-        "opt/build/lib/parser.py"
-    );
-    // No known marker — returns as-is (minus leading /)
-    assert_eq!(
-        normalize_lint_path("/weird/path/foo.rs"),
-        "weird/path/foo.rs"
-    );
-}
-
-#[test]
-fn test_normalize_lint_path_windows() {
-    // P2 fix: Windows backslash paths and drive letters
-    assert_eq!(
-        normalize_lint_path(r"C:\Users\dev\project\src\foo.rs"),
-        "src/foo.rs"
-    );
-    assert_eq!(normalize_lint_path(r"src\bar\baz.ts"), "src/bar/baz.ts");
-    assert_eq!(normalize_lint_path(r".\src\foo.rs"), "src/foo.rs");
-    // Shallow depth after drive strip — stays as-is
-    assert_eq!(
-        normalize_lint_path(r"D:\builds\app\lib\utils.py"),
-        "builds/app/lib/utils.py"
-    );
-    // Deep Windows path (prefix depth >= 2) gets relativized
-    assert_eq!(
-        normalize_lint_path(r"C:\Users\dev\project\src\foo.rs"),
-        "src/foo.rs"
-    );
-}
-
-#[test]
-fn test_parse_lint_issues_windows_paths() {
-    // Windows clippy-like output with backslashes
-    let output = r"warning: unused variable
-  --> src\foo.rs:42:9
-
-error: mismatched types
-  --> src\bar\baz.rs:10:5
-";
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 2);
-    assert!(issues.contains(&"src/foo.rs".to_string()));
-    assert!(issues.contains(&"src/bar/baz.rs".to_string()));
-}
-
-#[test]
-fn test_parse_lint_issues_eslint_block_format() {
-    // ESLint/Stylelint default formatter: path on own line, indented issues below
-    let output = r#"
-/Users/dev/project/src/components/App.tsx
-  10:5  warning  Unexpected console statement  no-console
-  25:1  error    Missing semicolon             semi
-
-/Users/dev/project/src/utils/helpers.ts
-  3:8   warning  'foo' is defined but never used  no-unused-vars
-
-src/index.tsx
-  42:10  error   'bar' is not defined  no-undef
-  50:3   warning  Unexpected var       no-var
-"#;
-    let issues = parse_lint_issues(output);
-    // 2 issues from App.tsx + 1 from helpers.ts + 2 from index.tsx = 5
-    assert_eq!(issues.len(), 5);
-    let app_count = issues.iter().filter(|p| p.contains("App.tsx")).count();
-    assert_eq!(app_count, 2, "App.tsx should have 2 issues");
-    let helpers_count = issues.iter().filter(|p| p.contains("helpers.ts")).count();
-    assert_eq!(helpers_count, 1, "helpers.ts should have 1 issue");
-    let index_count = issues.iter().filter(|p| p.contains("index.tsx")).count();
-    assert_eq!(index_count, 2, "index.tsx should have 2 issues");
-}
-
-#[test]
-fn test_parse_lint_issues_ignores_false_positive_block_paths_without_issue_lines() {
-    let output = r#"
-/Users/dev/project/src/components/App.tsx
-This is just a heading, not a lint issue
-
-src/index.tsx
-  42:10  error   'bar' is not defined  no-undef
-"#;
-
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues, vec!["src/index.tsx".to_string()]);
-}
-
-#[test]
-fn test_normalize_lint_path_src_tauri_collision() {
-    // P2: relative paths with nested markers must NOT be truncated
-    assert_eq!(
-        normalize_lint_path("src-tauri/src/lib.rs"),
-        "src-tauri/src/lib.rs"
-    );
-    assert_eq!(
-        normalize_lint_path("packages/app/src/main.ts"),
-        "packages/app/src/main.ts"
-    );
-    // Deep absolute paths (>=3 segments prefix) still get relativized
-    assert_eq!(
-        normalize_lint_path("/Users/dev/Git/myapp/src/app.ts"),
-        "src/app.ts"
-    );
-    assert_eq!(
-        normalize_lint_path("/home/ci/project/lib/parser.py"),
-        "lib/parser.py"
-    );
-}
-
-#[test]
-fn test_compute_lint_metrics_clean_lint() {
-    use crate::git::{Diff, DiffStats, FileChange, FileStatus};
-
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Passed,
-        duration: Duration::from_secs(5),
-        output: "Checking project v0.1.0\n    Finished `dev` profile [unoptimized + debuginfo]\n"
-            .into(),
+fn lint_check(name: &str, status: CheckStatus) -> CheckResult {
+    CheckResult {
+        name: name.into(),
+        status,
+        duration: Duration::from_secs(1),
+        output: String::new(),
         cached: false,
         provenance: None,
-    }];
-    let diffs = vec![Diff {
-        base: "main".into(),
-        target: "feature/x".into(),
-        base_commit_id: "aaa".into(),
-        target_commit_id: "bbb".into(),
-        files: vec![FileChange {
-            path: "src/main.rs".into(),
-            status: FileStatus::Modified,
-            additions: 10,
-            deletions: 2,
-        }],
-        stats: DiffStats {
-            files_changed: 1,
-            additions: 10,
-            deletions: 2,
-            copied: 0,
-        },
-        commits: vec![],
-    }];
+    }
+}
 
-    let metrics = compute_lint_metrics(&checks, &diffs);
+#[test]
+fn lint_projection_regroups_canonical_in_diff_states() {
+    let checks = vec![lint_check("cargo clippy", CheckStatus::Warnings)];
+    let findings = vec![
+        lint_finding("cargo_clippy", "src/main.rs", Some(true)),
+        lint_finding("cargo_clippy", "src/lib.rs", Some(true)),
+        lint_finding("cargo_clippy", "src/legacy.rs", Some(false)),
+        lint_finding("cargo_clippy", "src/unknown.rs", None),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &findings);
+
     assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].total_issues, 0);
-    assert_eq!(metrics[0].new_issues, 0);
-    assert_eq!(metrics[0].legacy_issues, 0);
+    assert_eq!(metrics[0].check_name, "cargo clippy");
+    assert_eq!(metrics[0].findings_in_changed_files, 2);
+    assert_eq!(metrics[0].findings_outside_changed_files, 1);
+    assert_eq!(metrics[0].findings_origin_unknown, 1);
+    assert_eq!(metrics[0].total_findings, 4);
+    assert_eq!(
+        metrics[0].changed_files_with_findings,
+        vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+        "only findings the canonical model located in changed files are listed"
+    );
+}
+
+#[test]
+fn lint_projection_never_reparses_check_output() {
+    // The check output is full of file:line noise; without canonical findings
+    // the projection must report nothing rather than inventing counts.
+    let mut check = lint_check("cargo clippy", CheckStatus::Warnings);
+    check.output =
+        "warning: unused\n  --> src/main.rs:10:5\nwarning: unused\n  --> src/lib.rs:20:1\n".into();
+
+    let metrics = project_lint_metrics(&[check], &[]);
+
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].total_findings, 0);
+    assert_eq!(metrics[0].findings_in_changed_files, 0);
+}
+
+#[test]
+fn lint_projection_keeps_the_canonical_status_of_checks_that_did_not_run() {
+    let checks = vec![
+        lint_check("cargo clippy", CheckStatus::Skipped),
+        lint_check("eslint", CheckStatus::Error),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &[]);
+
+    assert_eq!(
+        metrics.len(),
+        2,
+        "a check that did not run is still reported"
+    );
+    assert_eq!(metrics[0].status, CheckStatus::Skipped);
+    assert_eq!(metrics[1].status, CheckStatus::Error);
+    assert!(metrics.iter().all(|m| m.total_findings == 0));
+}
+
+#[test]
+fn lint_projection_ignores_findings_from_other_checks() {
+    let checks = vec![lint_check("cargo clippy", CheckStatus::Warnings)];
+    let findings = vec![
+        lint_finding("cargo_clippy", "src/main.rs", Some(true)),
+        lint_finding("pytest", "tests/test_x.py", None),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &findings);
+
+    assert_eq!(metrics[0].total_findings, 1);
+}
+
+#[test]
+fn lint_projection_ignores_non_lint_checks() {
+    let checks = vec![
+        lint_check("cargo check", CheckStatus::Passed),
+        lint_check("cargo test", CheckStatus::Passed),
+    ];
+
+    assert!(project_lint_metrics(&checks, &[]).is_empty());
 }
 
 #[test]

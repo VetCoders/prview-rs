@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from changes introduced by a PR. Commit subjects remain complete, check
   duration includes execution status, and declared owners come from the
   target revision's CODEOWNERS. English and Polish descriptions are aligned.
+- The dashboard lint section projects the canonical findings model instead of
+  re-parsing check output. Counts are reported as `in changed files`,
+  `outside changed files`, and `origin unknown` — the canonical `in_diff`
+  tri-state — rather than `new` and `legacy (pre-existing)`, and a lint check
+  that was skipped or errored is reported as not executed instead of clean.
 
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.

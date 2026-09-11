@@ -39,16 +39,24 @@ pub(crate) struct FlakyCheckScore {
     pub confidence: &'static str,
 }
 
-/// PRV-205: Diff-aware lint metrics for a single lint check.
+/// PRV-205: Lint view over the canonical findings of a single lint check.
 ///
-/// Issues are classified as "new" (in changed files) vs "legacy" (pre-existing)
-/// based on cross-referencing lint output file paths with the diff file list.
+/// Every field here is a regrouping of rows the canonical model already
+/// produced — the dashboard neither re-parses check output nor decides the
+/// origin of a finding. `in_diff` is the canonical tri-state: `Some(true)` =
+/// the tool reported the finding in a file this diff touches (a location
+/// signal, not proof the PR introduced it), `Some(false)` = outside the changed
+/// files, `None` = the canonical model left the origin unknown.
 pub(crate) struct LintMetrics {
     pub check_name: String,
-    pub new_issues: usize,
-    pub legacy_issues: usize,
-    pub total_issues: usize,
-    pub changed_files_with_issues: Vec<String>,
+    /// Canonical check status, rendered 1:1 — a skipped or errored check is
+    /// never folded into a "no findings" statement.
+    pub status: crate::checks::CheckStatus,
+    pub findings_in_changed_files: usize,
+    pub findings_outside_changed_files: usize,
+    pub findings_origin_unknown: usize,
+    pub total_findings: usize,
+    pub changed_files_with_findings: Vec<String>,
 }
 
 /// All extra data the dashboard needs beyond Config/Diff/CheckResult/Heuristics.
@@ -281,8 +289,9 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
     // PRV-204: Compute flaky scores from historical per-check data
     let flaky_scores = compute_flaky_scores(out_dir, 20);
 
-    // PRV-205: Compute diff-aware lint metrics
-    let lint_metrics = compute_lint_metrics(checks, diffs);
+    // PRV-205: Project the canonical findings onto the lint checks that
+    // produced them. No counting or classification happens in this layer.
+    let lint_metrics = project_lint_metrics(checks, &findings);
 
     // B4: Compute file risk scores
     let risk_scores = signal::compute_file_risk_scores_with_api(

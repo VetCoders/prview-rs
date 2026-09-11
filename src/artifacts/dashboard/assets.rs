@@ -1433,9 +1433,10 @@ body.author-mode .section-noise  { display: none; }
     box-shadow: var(--glass-shadow), var(--glass-inset);
     border-left: 4px solid var(--line);
 }
-.lint-card.lint-clean { border-left-color: var(--pass); }
-.lint-card.lint-new   { border-left-color: var(--warn); }
-.lint-card.lint-mixed  { border-left-color: var(--block); }
+.lint-card.lint-none { border-left-color: var(--pass); }
+.lint-card.lint-in-changed { border-left-color: var(--warn); }
+.lint-card.lint-out-of-diff { border-left-color: var(--block); }
+.lint-card.lint-not-executed { border-left-color: var(--muted); }
 .lint-card-header {
     display: flex;
     align-items: center;
@@ -1452,8 +1453,9 @@ body.author-mode .section-noise  { display: none; }
     color: var(--muted);
     margin-bottom: 6px;
 }
-.lint-stat-new { color: var(--warn); font-weight: 600; }
-.lint-stat-legacy { color: var(--faint); }
+.lint-stat-in-changed { color: var(--warn); font-weight: 600; }
+.lint-stat-outside { color: var(--faint); }
+.lint-stat-unknown { color: var(--muted); font-style: italic; }
 .lint-card-files {
     margin-top: 8px;
     padding-top: 8px;
@@ -1481,14 +1483,10 @@ body.author-mode .section-noise  { display: none; }
     content: "\2022 ";
     color: var(--faint);
 }
-.lint-clean-msg {
-    background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
-    border-radius: var(--radius);
-    padding: 16px 20px;
-    color: var(--pass);
-    font-size: 13px;
-    border-left: 4px solid var(--pass);
+.lint-scope-note {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--faint);
 }
 .lint-nodata-msg {
     background: var(--glass-bg);
