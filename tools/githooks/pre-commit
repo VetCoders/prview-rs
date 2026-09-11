@@ -6,7 +6,7 @@ cd "$REPO_ROOT"
 
 echo "=== Pre-commit (fast guard) ==="
 
-STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
 
 if [ -n "$STAGED_RS" ]; then
   # Fast guard only: this hook never compiles and never runs a heavy gate.
@@ -23,10 +23,11 @@ if [ -n "$STAGED_RS" ]; then
     [ -n "$EDITION" ] || EDITION=2024
 
     echo "Checking formatting (rustfmt --check --edition $EDITION)..."
-    # Word-splitting is intentional: STAGED_RS is a newline-separated file list
-    # and each path is passed to rustfmt as a separate --check target.
-    # shellcheck disable=SC2086
-    rustfmt --check --edition "$EDITION" $STAGED_RS || {
+    # NUL-delimited: paths with spaces or other odd characters must survive
+    # as single arguments. $STAGED_RS is only used above to test for an
+    # empty result, so xargs never runs rustfmt on an empty file list here.
+    git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
+      | xargs -0 rustfmt --check --edition "$EDITION" || {
       echo "Formatting issues found. Run: cargo fmt --all, then re-stage the changes before committing."
       exit 1
     }
