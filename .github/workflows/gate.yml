@@ -23,7 +23,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -109,7 +109,7 @@ jobs:
           cp -- "$SARIF_SOURCE" "$RUNNER_TEMP/prview-sarif/INLINE_FINDINGS.sarif"
       - name: Upload constrained SARIF artifact
         if: ${{ steps.gate.outputs.sarif_path != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: prview-inline-sarif-${{ github.run_id }}
           path: ${{ runner.temp }}/prview-sarif/INLINE_FINDINGS.sarif
@@ -128,7 +128,7 @@ jobs:
       security-events: write
     steps:
       - name: Download constrained SARIF artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: prview-inline-sarif-${{ github.run_id }}
           path: ${{ runner.temp }}/prview-sarif
