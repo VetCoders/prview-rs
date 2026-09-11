@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP process-ownership tests wait for a *complete* published pid instead of the
+  bare existence of the pid file. A shell's `>` redirection creates the file
+  before `printf`/`echo` writes the digits, so under parallel test load the
+  fixtures read an empty file and failed containment assertions that production
+  code had satisfied.
+
 - MCP contract tests bound response waits and pagination, and clean the owned
   server tree before reaping it on timeout or drop, including detached reviews.
 
