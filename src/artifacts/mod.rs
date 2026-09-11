@@ -577,14 +577,24 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
             // operator's files while the pack claims the target. That is the
             // `PRV-CONTEXT-SNAPSHOT-PROVENANCE` failure itself, and no missing
             // observation may license it.
-            if let Some(head) = worktree_head_sha.as_deref() {
-                anyhow::ensure!(
-                    head == resolved_target.commit_id,
-                    "shared snapshot missing for an off-HEAD review: reviewed target {}, operator checkout {}; the reviewed tree was never materialised, so no pack describes the target",
+            // An unknown checkout is not a known-good one. `--quick`/`--watch`
+            // publish with an empty ledger, and a HEAD that moved during capture
+            // (or an unborn one) leaves the operator identity `None` by design —
+            // the capture discards a raced reading rather than certify it. With
+            // no snapshot and no identity, nothing proves the local tree is the
+            // target, so the same refusal applies.
+            let Some(head) = worktree_head_sha.as_deref() else {
+                anyhow::bail!(
+                    "shared snapshot missing for a review with an unknown operator checkout: reviewed target {}; the checkout identity could not be captured and the reviewed tree was never materialised, so nothing proves this pack describes the target",
                     resolved_target.commit_id,
-                    head,
                 );
-            }
+            };
+            anyhow::ensure!(
+                head == resolved_target.commit_id,
+                "shared snapshot missing for an off-HEAD review: reviewed target {}, operator checkout {}; the reviewed tree was never materialised, so no pack describes the target",
+                resolved_target.commit_id,
+                head,
+            );
             None
         }
     };

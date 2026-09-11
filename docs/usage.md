@@ -935,7 +935,12 @@ A new watch iteration resolves
 the target again. As a final consistency check, `shared snapshot target mismatch`
 aborts publication if the snapshot creation SHA differs from the diff target, and
 `shared snapshot missing for an off-HEAD review` aborts it when a review of a
-commit other than your checkout produced no reviewed tree at all.
+commit other than your checkout produced no reviewed tree at all, and
+`shared snapshot missing for a review with an unknown operator checkout` aborts
+it when no reviewed tree was materialised and your checkout could not be
+identified — an unborn `HEAD`, or a checkout switched while prview was reading
+provenance, which is discarded rather than certified. Rerun once the tree is
+settled.
 Changes made inside an already created snapshot still follow the integrity rule
 above.
 

@@ -37,7 +37,19 @@ fn generate_fixture_pack_with_ledger(
 #[derive(Default)]
 struct FixturePackOptions<'a> {
     diffs: &'a [Diff],
-    worktree_head_sha: Option<&'a str>,
+    worktree_head: FixtureWorktreeHead<'a>,
+}
+
+/// What a fixture pack captured about the operator checkout. The default is the
+/// local-review shape — the operator checkout IS the reviewed target — because a
+/// pack that can neither name its checkout nor show a materialised reviewed tree
+/// is refused at publication.
+#[derive(Default, Clone, Copy)]
+enum FixtureWorktreeHead<'a> {
+    #[default]
+    IsTarget,
+    Sha(&'a str),
+    Unknown,
 }
 
 fn generate_fixture_pack_with_ledger_and_diffs(
@@ -91,7 +103,11 @@ fn generate_fixture_pack_with_ledger_and_diffs(
         skipped_checks: Vec::new(),
         worktree_clean: Some(true),
         worktree_status_digest: None,
-        worktree_head_sha: options.worktree_head_sha.map(str::to_owned),
+        worktree_head_sha: match options.worktree_head {
+            FixtureWorktreeHead::IsTarget => Some(target_sha.to_owned()),
+            FixtureWorktreeHead::Sha(sha) => Some(sha.to_owned()),
+            FixtureWorktreeHead::Unknown => None,
+        },
         governor,
     })
 }
@@ -172,7 +188,7 @@ fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
         &governor,
         &TaskLedger::new(),
         FixturePackOptions {
-            worktree_head_sha: Some(&base),
+            worktree_head: FixtureWorktreeHead::Sha(&base),
             ..Default::default()
         },
     )
@@ -191,6 +207,35 @@ fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
         "an unobserved reviewed tree must fail before output allocation"
     );
 
+    // An unknown operator checkout is not permission either. `--quick`/`--watch`
+    // publish with an empty ledger, and a HEAD that moved during capture leaves
+    // the identity unknown by design; unknown must fail the same way a mismatch
+    // does, never fall through to the local files.
+    let unknown = publication_home.path().join("unknown-head-pack");
+    let error = generate_fixture_pack_with_ledger_and_diffs(
+        repo.path(),
+        &unknown,
+        &target,
+        &base,
+        &governor,
+        &TaskLedger::new(),
+        FixturePackOptions {
+            worktree_head: FixtureWorktreeHead::Unknown,
+            ..Default::default()
+        },
+    )
+    .expect_err("an unknown operator checkout must not be published");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("shared snapshot missing for a review with an unknown operator checkout"),
+        "{message}"
+    );
+    assert!(message.contains(&target), "{message}");
+    assert!(
+        !unknown.exists(),
+        "an unknown operator checkout must fail before output allocation"
+    );
+
     // The local review keeps its snapshot-free path: the repo root IS the target.
     let local = publication_home.path().join("local-pack");
     generate_fixture_pack_with_ledger_and_diffs(
@@ -201,7 +246,7 @@ fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
         &governor,
         &TaskLedger::new(),
         FixturePackOptions {
-            worktree_head_sha: Some(&target),
+            worktree_head: FixtureWorktreeHead::Sha(&target),
             ..Default::default()
         },
     )

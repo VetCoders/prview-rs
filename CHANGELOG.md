@@ -73,7 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reviews of a commit other than the operator checkout fail publication when no
   shared snapshot was materialised, instead of silently skipping the snapshot
-  integrity validation and describing the target with local files.
+  integrity validation and describing the target with local files. An operator
+  checkout that could not be captured at all — an unborn `HEAD`, or one that moved
+  while provenance was being read, which the capture deliberately discards — now
+  fails the same way instead of skipping the guard: `--quick` and `--watch`
+  publish with an empty ledger, so an unknown checkout identity was the one way a
+  snapshot-free pack could still claim a target it never read.
 
 - Pinned targets use exact commit lookup even when a branch has the SHA as its
   name; Semgrep cannot fall back to the operator checkout for an unavailable pin.

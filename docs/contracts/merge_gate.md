@@ -871,4 +871,8 @@ mixed review identities; rerun against a stable target. A later commit made
 inside the snapshot remains an integrity signal, not a creation-target mismatch.
 A run that reviews a commit other than the captured operator `HEAD` and holds no
 shared snapshot at all fails the same way, before allocating the output
-directory: a missing observation is never permission to publish.
+directory: a missing observation is never permission to publish. A run that holds
+no shared snapshot and could not capture the operator checkout at all — an unborn
+`HEAD`, or a checkout that moved while provenance was being read, which the
+capture discards rather than certify — fails there too: an unknown checkout
+identity is not a known-matching one.
