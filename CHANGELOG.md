@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as required by the new library, using the same scan options in tests.
 - CI and the prview gate run on every pull request, not only those targeting
   `main`.
+- The repo's git hooks are fast guards only: the pre-commit hook runs
+  `rustfmt --check` on staged Rust files instead of `cargo check`, and the
+  `prview gate` pre-push hook is gone. Quality proof lives in required CI, where
+  clippy now covers `--all-targets`, and in an explicitly invoked `make check`.
 
 ### Fixed
 
