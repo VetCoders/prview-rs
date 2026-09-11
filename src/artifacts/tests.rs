@@ -28,9 +28,16 @@ fn generate_fixture_pack_with_ledger(
         base_sha,
         governor,
         ledger,
-        &[],
-        None,
+        FixturePackOptions::default(),
     )
+}
+
+/// Rarely-varied, review-shaped inputs to [`generate_fixture_pack_with_ledger_and_diffs`],
+/// grouped so the function stays under clippy's `too_many_arguments` threshold.
+#[derive(Default)]
+struct FixturePackOptions<'a> {
+    diffs: &'a [Diff],
+    worktree_head_sha: Option<&'a str>,
 }
 
 fn generate_fixture_pack_with_ledger_and_diffs(
@@ -40,8 +47,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
     base_sha: &str,
     governor: &crate::governor::ResourceGovernor,
     ledger: &crate::ledger::TaskLedger,
-    diffs: &[Diff],
-    worktree_head_sha: Option<&str>,
+    options: FixturePackOptions<'_>,
 ) -> Result<PathBuf> {
     let mut config = test_config_builder()
         .repo_root(repo_root)
@@ -76,7 +82,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
     generate(GenerateInput {
         config: &config,
         ledger,
-        diffs,
+        diffs: options.diffs,
         checks: &[],
         heuristics: None,
         resolved_target: &resolved_target,
@@ -85,7 +91,7 @@ fn generate_fixture_pack_with_ledger_and_diffs(
         skipped_checks: Vec::new(),
         worktree_clean: Some(true),
         worktree_status_digest: None,
-        worktree_head_sha: worktree_head_sha.map(str::to_owned),
+        worktree_head_sha: options.worktree_head_sha.map(str::to_owned),
         governor,
     })
 }
@@ -165,8 +171,10 @@ fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
         &base,
         &governor,
         &TaskLedger::new(),
-        &[],
-        Some(&base),
+        FixturePackOptions {
+            worktree_head_sha: Some(&base),
+            ..Default::default()
+        },
     )
     .expect_err("an unmaterialised reviewed tree must not be published");
     let message = format!("{error:#}");
@@ -192,8 +200,10 @@ fn off_head_review_without_a_shared_snapshot_aborts_before_pack_publication() {
         &base,
         &governor,
         &TaskLedger::new(),
-        &[],
-        Some(&target),
+        FixturePackOptions {
+            worktree_head_sha: Some(&target),
+            ..Default::default()
+        },
     )
     .expect("a review of the operator checkout needs no snapshot");
 }
@@ -5236,8 +5246,10 @@ fn static_tauri_commands_follow_the_shared_reviewed_tree() {
         &base_sha,
         &crate::governor::ResourceGovernor::new(),
         &ledger,
-        &diffs,
-        None,
+        FixturePackOptions {
+            diffs: &diffs,
+            ..Default::default()
+        },
     )
     .expect("reviewed-tree pack");
 
