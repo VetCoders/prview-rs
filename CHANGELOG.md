@@ -65,6 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Provenance contradictions are published as review signals by every artifact,
+  not only `MERGE_GATE.json`. The signal strings now come from one renderer
+  (`ProvenanceConsistency::review_caveats`) that the merge gate and the
+  dashboard context share, and the dashboard context is built with the run's
+  substrate cross-check — so `report.json`'s `gate.review_caveats`, the
+  dashboard, and the dashboard's "Copy PR comment" carry the identical
+  `PROVENANCE_CONTRADICTION` entry instead of staying silent about a
+  disagreement the gate names. `quality.consistency` already folded the
+  contradictions in and is unchanged.
+
 - Pre-existing failure classification uses the operator HEAD captured before
   checks. A later checkout can invalidate stability but cannot grant a new
   downgrade; unknown captured HEAD no longer takes a permissive local fallback.
