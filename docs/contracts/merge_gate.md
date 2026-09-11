@@ -273,9 +273,10 @@ neither requires nor rejects it.
 An additive, advisory list naming every disagreement between the substrate the
 run recorded and the substrate a check recorded for itself. Present from schema
 3.0 and empty on a run whose statements agree. The identical list is published
-as `consistency.contradictions` in `00_summary/PROVENANCE.json`; both are derived
-from one function over one set of inputs, so the two files cannot name different
-contradictions.
+as `consistency.contradictions` in `00_summary/PROVENANCE.json` and as
+`quality.consistency.provenance_contradictions` in `report.json`; all three are
+derived from one function over one set of inputs, so the files cannot name
+different contradictions.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -313,7 +314,9 @@ row is also rendered as a `decision.review_caveats` entry prefixed with
 `PROVENANCE_CONTRADICTION`, `MERGE_GATE.md` explains the class in words, and
 `tools/validate_merge_gate.py` rejects a 3.0 gate whose typed rows and review
 signals do not correspond one-to-one. A pack carrying a contradiction is also
-reported as `consistent: false` in `00_summary/CONSISTENCY_CHECK.json`.
+reported as `consistent: false` in `00_summary/CONSISTENCY_CHECK.json` **and** in
+`report.json`'s `quality.consistency`: the two sections check different counters,
+but neither may call a run consistent while a substrate contradiction stands.
 
 ## `decision`
 

@@ -37,9 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the identical rows as an additive `provenance_contradictions` array and one
   `PROVENANCE_CONTRADICTION` review signal each, MERGE_GATE.md explains the
   class, and `CONSISTENCY_CHECK.json` reports `consistent: false` while one
-  stands. A contradiction is a provenance/confidence problem, not a verified
-  failure: no quality failure, blocking issue or verdict axis is derived from it,
-  and a run without contradictions keeps a byte-identical decision.
+  stands. `report.json` publishes the same fact rather than a narrower one: its
+  `quality.consistency` gains `provenance_contradictions` (the identical rows)
+  and `provenance_comparisons` (the identical count), and folds them into its own
+  `consistent` flag through the same `merge_provenance` reduction the summary
+  checker uses — so `report.json` can no longer read `consistent: true` for a run
+  `CONSISTENCY_CHECK.json` calls inconsistent. A contradiction is a
+  provenance/confidence problem, not a verified failure: no quality failure,
+  blocking issue or verdict axis is derived from it, and a run without
+  contradictions keeps a byte-identical decision.
 
 - `PROVENANCE.json` schema 2.0 separates review identity (`target_sha`) from
   operator state (`worktree_head_sha`, `operator_worktree`). The ambiguous 1.0

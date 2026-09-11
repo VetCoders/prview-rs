@@ -851,10 +851,15 @@ The per-check rows answer "what did *this gate* read". `PROVENANCE.json` answers
   instead — as are rows with no provenance at all, which are an evidence gap, not
   a contradiction. `comparisons` counts what was actually compared, so "checked
   and consistent" stays distinguishable from "nothing could be checked". The
-  identical list is published as `MERGE_GATE.json.provenance_contradictions`,
-  once per row as a `PROVENANCE_CONTRADICTION` review signal, and as a warning in
-  `00_summary/CONSISTENCY_CHECK.json`, whose `consistent` is `false` while any
-  contradiction stands. It is a confidence problem about the evidence, not a
+  identical list is published as `MERGE_GATE.json.provenance_contradictions`, as
+  `report.json`'s `quality.consistency.provenance_contradictions`, once per row as
+  a `PROVENANCE_CONTRADICTION` review signal, and as a warning in
+  `00_summary/CONSISTENCY_CHECK.json`. Both consistency sections — the summary
+  checker's and `report.json`'s narrower counter view — fold the same rows in
+  through `ConsistencyReport::merge_provenance`, so `consistent` is `false` on
+  both while any contradiction stands, and `provenance_comparisons` carries the
+  same count `PROVENANCE.json` reports as `comparisons`. It is a confidence
+  problem about the evidence, not a
   verified failure: no quality failure, blocking issue or verdict axis is derived
   from it.
 
