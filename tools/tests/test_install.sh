@@ -34,7 +34,11 @@ FAIL=0
 SKIP=0
 CASE_N=0
 
-# shellcheck disable=SC2329  # invoked by trap
+# The body runs only from the EXIT/INT/TERM trap below. Linter versions report
+# that differently — 0.9.x flags every command in here as SC2317 (unreachable),
+# 0.10+ flags the function itself as SC2329 (never invoked) — so both codes are
+# disabled and the lint gate agrees across versions.
+# shellcheck disable=SC2317,SC2329  # invoked by trap
 cleanup() {
 	if [ -n "${SERVER_PID}" ]; then
 		kill "${SERVER_PID}" 2>/dev/null || true
@@ -442,7 +446,7 @@ PY
 	port=""
 	i=0
 	while [ "${i}" -lt 50 ]; do
-		port=$(cat "${WORK}/port.txt" 2>/dev/null | head -1)
+		port=$(head -1 "${WORK}/port.txt" 2>/dev/null)
 		[ -n "${port}" ] && break
 		i=$((i + 1))
 		sleep 0.1
