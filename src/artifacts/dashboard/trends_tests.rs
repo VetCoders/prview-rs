@@ -374,10 +374,8 @@ fn test_ownership_section_empty() {
     let mut ctx = mock_ctx();
     ctx.ownership_map = vec![];
     let html = build_ownership_section(&ctx);
-    assert!(
-        html.is_empty(),
-        "Empty ownership map should produce empty HTML"
-    );
+    assert!(html.contains("message.noConfirmedOwners"));
+    assert!(html.contains("No responsible people or teams were established"));
 }
 
 #[test]
@@ -623,8 +621,27 @@ fn test_flaky_nav_link_conditional() {
 }
 
 // -----------------------------------------------------------------------
-// PRV-205: Lint metrics dashboard tests
+// PRV-205: Lint findings dashboard tests
 // -----------------------------------------------------------------------
+
+fn lint_metrics(
+    check_name: &str,
+    status: CheckStatus,
+    in_changed: usize,
+    outside: usize,
+    unknown: usize,
+    changed_files: Vec<String>,
+) -> LintMetrics {
+    LintMetrics {
+        check_name: check_name.into(),
+        status,
+        findings_in_changed_files: in_changed,
+        findings_outside_changed_files: outside,
+        findings_origin_unknown: unknown,
+        total_findings: in_changed + outside + unknown,
+        changed_files_with_findings: changed_files,
+    }
+}
 
 #[test]
 fn test_lint_section_hidden_when_no_lint_checks() {
@@ -635,38 +652,44 @@ fn test_lint_section_hidden_when_no_lint_checks() {
 }
 
 #[test]
-fn test_lint_section_clean() {
+fn test_lint_section_reports_no_findings_without_claiming_clean() {
     let mut ctx = mock_ctx();
-    ctx.lint_metrics = vec![LintMetrics {
-        check_name: "cargo clippy".into(),
-        new_issues: 0,
-        legacy_issues: 0,
-        total_issues: 0,
-        changed_files_with_issues: vec![],
-    }];
+    ctx.lint_metrics = vec![lint_metrics(
+        "cargo clippy",
+        CheckStatus::Passed,
+        0,
+        0,
+        0,
+        vec![],
+    )];
     let diffs = vec![mock_diff()];
     let html = build_lint_metrics_section(&ctx, &diffs);
     assert!(html.contains("section-lint"), "Section should exist");
     assert!(
-        html.contains(r#"data-i18n="label.clean""#),
-        "Should localize clean badge"
+        html.contains(r#"data-i18n="label.noFindingsReported""#),
+        "Badge must state what was reported, not a blanket CLEAN"
     );
     assert!(
-        html.contains(r#"data-i18n-template="message.cleanLintAcrossChecks""#),
-        "Should localize clean helper copy"
+        html.contains(r#"data-i18n-template="message.lintNoFindingsReported""#),
+        "Card must state that no findings were reported"
+    );
+    assert!(
+        !html.contains("CLEAN"),
+        "A reported-nothing run is not a clean verdict"
     );
 }
 
 #[test]
 fn test_lint_section_no_diff_data() {
     let mut ctx = mock_ctx();
-    ctx.lint_metrics = vec![LintMetrics {
-        check_name: "cargo clippy".into(),
-        new_issues: 0,
-        legacy_issues: 0,
-        total_issues: 0,
-        changed_files_with_issues: vec![],
-    }];
+    ctx.lint_metrics = vec![lint_metrics(
+        "cargo clippy",
+        CheckStatus::Passed,
+        0,
+        0,
+        0,
+        vec![],
+    )];
     let diffs: Vec<Diff> = vec![];
     let html = build_lint_metrics_section(&ctx, &diffs);
     assert!(html.contains("section-lint"), "Section should exist");
@@ -677,61 +700,132 @@ fn test_lint_section_no_diff_data() {
 }
 
 #[test]
-fn test_lint_section_new_issues() {
+fn test_lint_section_labels_changed_file_findings_by_location_only() {
     let mut ctx = mock_ctx();
-    ctx.lint_metrics = vec![LintMetrics {
-        check_name: "cargo clippy".into(),
-        new_issues: 3,
-        legacy_issues: 1,
-        total_issues: 4,
-        changed_files_with_issues: vec!["src/main.rs".into(), "src/lib.rs".into()],
-    }];
+    ctx.lint_metrics = vec![lint_metrics(
+        "cargo clippy",
+        CheckStatus::Warnings,
+        3,
+        1,
+        0,
+        vec!["src/main.rs".into(), "src/lib.rs".into()],
+    )];
     let diffs = vec![mock_diff()];
     let html = build_lint_metrics_section(&ctx, &diffs);
     assert!(html.contains("section-lint"), "Section should exist");
     assert!(
-        html.contains(r#"data-i18n="label.newIssues""#),
-        "Should localize NEW ISSUES badge"
+        html.contains(r#"data-i18n="label.findingsInChangedFiles""#),
+        "Badge names the location signal, not authorship"
     );
     assert!(
-        html.contains(r#"data-i18n-template="message.lintNewInChangedFiles""#),
-        "Should localize new issue count"
+        html.contains(r#"data-i18n-template="message.lintInChangedFiles""#),
+        "Should count findings in changed files"
     );
     assert!(
-        html.contains(r#"data-i18n-template="message.lintLegacyPreExisting""#),
-        "Should localize legacy issue count"
+        html.contains(r#"data-i18n-template="message.lintOutsideChangedFiles""#),
+        "Should count findings outside changed files"
     );
     assert!(
-        html.contains(r#"data-i18n-template="message.lintChangedFilesWithIssues""#),
+        html.contains(r#"data-i18n-template="message.lintChangedFilesWithFindings""#),
         "Should localize changed-files helper copy"
+    );
+    assert!(
+        html.contains(r#"data-i18n="message.lintScopeNote""#),
+        "Section must carry the scope note for the location signal"
     );
     assert!(html.contains("src/main.rs"), "Should list affected files");
     assert!(html.contains("src/lib.rs"), "Should list affected files");
+    for banned in [
+        "new in changed files",
+        "introduced",
+        "legacy",
+        "pre-existing",
+    ] {
+        assert!(
+            !html.to_lowercase().contains(banned),
+            "lint section must not claim `{banned}` from a location signal"
+        );
+    }
 }
 
 #[test]
-fn test_lint_section_legacy_only() {
+fn test_lint_section_reports_origin_unknown_as_unknown() {
     let mut ctx = mock_ctx();
-    ctx.lint_metrics = vec![LintMetrics {
-        check_name: "ESLint".into(),
-        new_issues: 0,
-        legacy_issues: 5,
-        total_issues: 5,
-        changed_files_with_issues: vec![],
-    }];
+    ctx.lint_metrics = vec![lint_metrics(
+        "cargo clippy",
+        CheckStatus::Warnings,
+        0,
+        0,
+        4,
+        vec![],
+    )];
     let diffs = vec![mock_diff()];
     let html = build_lint_metrics_section(&ctx, &diffs);
     assert!(
-        html.contains(r#"data-i18n="label.legacyOnly""#),
-        "Should localize LEGACY ONLY badge"
+        html.contains(r#"data-i18n="label.findingsOriginUnknown""#),
+        "Unknown origin must render as unknown"
     );
     assert!(
-        html.contains(r#"data-i18n-template="message.lintLegacyPreExisting""#),
-        "Should localize legacy count"
+        html.contains(r#"data-i18n-template="message.lintOriginUnknown""#),
+        "Should count findings with unknown origin"
     );
     assert!(
-        !html.contains(r#"data-i18n-template="message.lintNewInChangedFiles""#),
-        "Should NOT show new count"
+        !html.contains(r#"data-i18n="label.noFindingsReported""#),
+        "Unknown origin is not the same as nothing reported"
+    );
+}
+
+#[test]
+fn test_lint_section_findings_outside_changed_files_only() {
+    let mut ctx = mock_ctx();
+    ctx.lint_metrics = vec![lint_metrics(
+        "ESLint",
+        CheckStatus::Warnings,
+        0,
+        5,
+        0,
+        vec![],
+    )];
+    let diffs = vec![mock_diff()];
+    let html = build_lint_metrics_section(&ctx, &diffs);
+    assert!(
+        html.contains(r#"data-i18n="label.findingsOutsideChangedFiles""#),
+        "Badge should name the location, not call them legacy"
+    );
+    assert!(
+        html.contains(r#"data-i18n-template="message.lintOutsideChangedFiles""#),
+        "Should localize the out-of-diff count"
+    );
+    assert!(
+        !html.contains(r#"data-i18n-template="message.lintInChangedFiles""#),
+        "Should NOT show an in-changed-files count"
+    );
+}
+
+#[test]
+fn test_lint_section_marks_checks_that_did_not_run_as_incomplete() {
+    let mut ctx = mock_ctx();
+    ctx.lint_metrics = vec![
+        lint_metrics("cargo clippy", CheckStatus::Skipped, 0, 0, 0, vec![]),
+        lint_metrics("ESLint", CheckStatus::Passed, 0, 0, 0, vec![]),
+    ];
+    let diffs = vec![mock_diff()];
+    let html = build_lint_metrics_section(&ctx, &diffs);
+    assert!(
+        html.contains(r#"data-i18n="label.lintIncomplete""#),
+        "A skipped lint check makes the section incomplete, not clean"
+    );
+    assert!(
+        html.contains(r#"data-i18n-template="message.lintNotExecuted""#),
+        "The skipped card must say it did not execute"
+    );
+    assert!(
+        !html.contains(r#"data-i18n="label.noFindingsReported""#),
+        "A run with a skipped check cannot claim nothing was found"
+    );
+    assert!(
+        html.contains(r#"data-i18n="status.skipped""#),
+        "The canonical status is rendered 1:1"
     );
 }
 
@@ -783,13 +877,14 @@ fn test_lint_nav_link_conditional() {
 
     // With lint metrics — statistics stays the single sidebar entry
     let mut ctx2 = mock_ctx();
-    ctx2.lint_metrics = vec![LintMetrics {
-        check_name: "cargo clippy".into(),
-        new_issues: 1,
-        legacy_issues: 0,
-        total_issues: 1,
-        changed_files_with_issues: vec!["src/main.rs".into()],
-    }];
+    ctx2.lint_metrics = vec![lint_metrics(
+        "cargo clippy",
+        CheckStatus::Warnings,
+        1,
+        0,
+        0,
+        vec!["src/main.rs".into()],
+    )];
     let html2 = build_html_test!(&config, &diffs, &checks, None, &ctx2, "", &dir, "", None);
     assert!(
         !html2.contains(r##"href="#section-lint""##),

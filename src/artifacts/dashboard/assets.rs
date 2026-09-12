@@ -71,7 +71,8 @@ const STATIC_CSS: &str = r#"
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-family: var(--mono);
+    font-size: 14px;
     background:
         radial-gradient(circle at 50% 40%, rgba(var(--veil),0.08), transparent 40%),
         radial-gradient(circle at 50% 80%, rgba(var(--veil),0.04), transparent 50%),
@@ -127,11 +128,18 @@ body::before {
     gap: 10px;
     flex-wrap: wrap;
 }
-h1, h2, h3, h4 { font-family: var(--font-heading); letter-spacing: -0.02em; }
-code, pre { font-family: var(--mono); }
-/* Brand wordmark: shared lockup with review.html (Space Grotesk + signal dot). */
+h1, h2, h3, h4, h5, h6 { font-family: var(--mono); letter-spacing: -0.02em; line-height: 1.35; }
+h1 { font-size: 24px; }
+h2 { font-size: 18px; }
+h3 { font-size: 16px; }
+h4, h5, h6 { font-size: 14px; }
+button, input, select, textarea, code, pre { font-family: var(--mono); }
+a, a:visited { color: var(--fg); text-decoration-color: var(--muted); text-underline-offset: 3px; }
+a:hover { color: var(--fg); text-decoration: underline; }
+a:focus-visible { outline: 2px solid var(--muted); outline-offset: 3px; text-decoration: underline; }
+/* The report uses the same monospace family for wordmark and content. */
 .wordmark {
-    font-family: var(--font-heading);
+    font-family: var(--mono);
     font-weight: 700;
     font-size: 19px;
     letter-spacing: -0.03em;
@@ -186,6 +194,7 @@ code, pre { font-family: var(--mono); }
     align-items: center;
     gap: 8px;
     min-width: 0;
+    max-width: 100%;
     padding: 6px 10px;
     border-radius: 999px;
     background: rgba(var(--veil),0.04);
@@ -201,6 +210,8 @@ code, pre { font-family: var(--mono); }
 }
 .context-pill code,
 .context-pill a {
+    min-width: 0;
+    overflow-wrap: anywhere;
     color: var(--fg);
     font-family: var(--mono);
     font-size: 12px;
@@ -336,6 +347,7 @@ code, pre { font-family: var(--mono); }
 .merge-allow { background: transparent; color: var(--pass); border-color: var(--pass); }
 .merge-block { background: transparent; color: var(--block); border-color: var(--block); }
 .merge-na { background: rgba(var(--veil),0.06); color: var(--muted); }
+.merge-review { background: transparent; color: var(--warn); border-color: var(--warn); }
 .merge-policy {
     font-size: 12px;
     color: var(--muted);
@@ -572,14 +584,21 @@ code, pre { font-family: var(--mono); }
     border-bottom: 1px solid var(--line);
 }
 .check-output-inner {
-    background: var(--bg);
-    padding: 12px 16px;
+    padding: 8px 16px 16px;
+    min-width: 0;
+}
+.check-output-inner.check-output-long {
+    background: var(--hover);
+    padding: 14px;
     max-height: 360px;
     overflow: auto;
-    border-left: 3px solid var(--line-strong);
-    margin: 0 12px 12px 12px;
-    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    border: 1px solid var(--line);
+    margin: 12px 16px 16px;
+    border-radius: var(--radius-sm);
 }
+.check-output-inner details { margin-top: 12px; }
+.check-output-inner details > pre { margin-top: 10px; }
+.check-output-inner summary { cursor: pointer; color: var(--fg); }
 .check-output-inner pre {
     font-family: var(--mono);
     font-size: 12px;
@@ -804,7 +823,7 @@ code, pre { font-family: var(--mono); }
 }
 .commit-item {
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 10px;
     padding: 10px 14px;
     position: relative;
@@ -820,8 +839,8 @@ code, pre { font-family: var(--mono); }
     margin-top: 6px;
     margin-left: -7px;
 }
-.commit-body { display: flex; flex-direction: column; gap: 2px; }
-.commit-msg { font-size: 14px; }
+.commit-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.commit-msg { font-size: 14px; overflow-wrap: anywhere; }
 .commit-meta {
     font-size: 12px;
     color: var(--muted);
@@ -1002,97 +1021,6 @@ code, pre { font-family: var(--mono); }
 .file-row.highlight-flash { animation: flash-highlight 1.5s ease-out; }
 @keyframes flash-highlight { 0% { background: color-mix(in srgb, var(--accent) 30%, transparent); outline: 2px solid var(--accent); } 100% { background: transparent; outline-color: transparent; } }
 
-/* ---- DIFF MODAL ---- */
-.diff-modal-overlay {
-    display: none;
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.75);
-    z-index: 1000;
-    justify-content: center;
-    align-items: center;
-    padding: 24px;
-}
-.diff-modal-overlay.open { display: flex; }
-.diff-modal {
-    background: rgba(15,15,15,0.95);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
-    border: 1px solid var(--glass-border);
-    border-radius: var(--radius);
-    box-shadow: 0 20px 60px rgba(0,0,0,0.8);
-    width: 90vw;
-    max-width: 1200px;
-    max-height: 85vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-.diff-modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--line);
-    gap: 12px;
-    flex-wrap: wrap;
-}
-.diff-modal-title {
-    font-family: var(--mono);
-    font-size: 13px;
-    color: var(--accent);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-}
-.diff-modal-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-}
-.diff-modal-search {
-    padding: 4px 8px;
-    background: var(--bg);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-    color: var(--fg);
-    font-size: 12px;
-    font-family: var(--mono);
-    outline: none;
-    width: 200px;
-}
-.diff-modal-search:focus { border-color: var(--accent); }
-.diff-modal-close {
-    background: var(--surface-2);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 4px 10px;
-    font-size: 13px;
-}
-.diff-modal-close:hover { border-color: var(--accent); }
-.diff-modal-body {
-    overflow: auto;
-    flex: 1;
-    padding: 0;
-}
-.diff-modal-body pre {
-    font-family: var(--mono);
-    font-size: 12px;
-    line-height: 1.5;
-    margin: 0;
-    padding: 12px 16px;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
-    word-break: break-word;
-}
-.diff-line-add { background: rgba(46,160,67,0.15); color: var(--pass); }
-.diff-line-del { background: rgba(248,81,73,0.15); color: var(--block); }
-.diff-line-hunk { color: var(--accent); font-weight: 600; }
-.diff-line-match { background: rgba(210,153,34,0.25); }
-
 /* ---- BATCH LINKS ---- */
 .batch-links {
     display: flex;
@@ -1198,10 +1126,11 @@ code, pre { font-family: var(--mono); }
 /* ---- BLOCKERS SECTION ---- */
 .blockers-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
     gap: 16px;
 }
 .blocker-card {
+    min-width: 0;
     background: var(--glass-bg);
     backdrop-filter: blur(var(--glass-blur));
     -webkit-backdrop-filter: blur(var(--glass-blur));
@@ -1227,6 +1156,12 @@ code, pre { font-family: var(--mono); }
     color: var(--muted);
     line-height: 1.5;
     margin-bottom: 8px;
+    max-width: 100%;
+    max-height: 18rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overscroll-behavior: contain;
 }
 .blocker-card-body code {
     font-family: var(--mono);
@@ -1266,20 +1201,21 @@ code, pre { font-family: var(--mono); }
 }
 .time-budget-row {
     display: grid;
-    grid-template-columns: 180px 1fr 80px;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 3fr) minmax(0, 1fr);
     align-items: center;
     gap: 12px;
     font-size: 13px;
 }
 .time-budget-name {
     font-family: var(--mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 6px;
 }
+.time-budget-name .badge { flex-shrink: 0; }
 .time-budget-bar-wrap {
     height: 18px;
     background: var(--bg);
@@ -1287,16 +1223,17 @@ code, pre { font-family: var(--mono); }
     overflow: hidden;
 }
 .time-budget-bar {
+    display: block;
     height: 100%;
     border-radius: 4px;
     transition: width 0.4s ease;
-    background: var(--accent-dim);
+    background: var(--muted);
 }
 .time-budget-bar.tb-slowest {
-    background: rgba(var(--veil),0.30);
+    background: var(--accent);
 }
 .time-budget-bar.tb-cached {
-    background: var(--surface-2);
+    background: var(--faint);
 }
 .time-budget-duration {
     text-align: right;
@@ -1304,6 +1241,8 @@ code, pre { font-family: var(--mono); }
     font-family: var(--mono);
     font-size: 12px;
     display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: flex-end;
     gap: 6px;
@@ -1494,9 +1433,10 @@ body.author-mode .section-noise  { display: none; }
     box-shadow: var(--glass-shadow), var(--glass-inset);
     border-left: 4px solid var(--line);
 }
-.lint-card.lint-clean { border-left-color: var(--pass); }
-.lint-card.lint-new   { border-left-color: var(--warn); }
-.lint-card.lint-mixed  { border-left-color: var(--block); }
+.lint-card.lint-none { border-left-color: var(--pass); }
+.lint-card.lint-in-changed { border-left-color: var(--warn); }
+.lint-card.lint-out-of-diff { border-left-color: var(--block); }
+.lint-card.lint-not-executed { border-left-color: var(--muted); }
 .lint-card-header {
     display: flex;
     align-items: center;
@@ -1513,8 +1453,9 @@ body.author-mode .section-noise  { display: none; }
     color: var(--muted);
     margin-bottom: 6px;
 }
-.lint-stat-new { color: var(--warn); font-weight: 600; }
-.lint-stat-legacy { color: var(--faint); }
+.lint-stat-in-changed { color: var(--warn); font-weight: 600; }
+.lint-stat-outside { color: var(--faint); }
+.lint-stat-unknown { color: var(--muted); font-style: italic; }
 .lint-card-files {
     margin-top: 8px;
     padding-top: 8px;
@@ -1542,14 +1483,10 @@ body.author-mode .section-noise  { display: none; }
     content: "\2022 ";
     color: var(--faint);
 }
-.lint-clean-msg {
-    background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
-    border-radius: var(--radius);
-    padding: 16px 20px;
-    color: var(--pass);
-    font-size: 13px;
-    border-left: 4px solid var(--pass);
+.lint-scope-note {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--faint);
 }
 .lint-nodata-msg {
     background: var(--glass-bg);
@@ -1704,7 +1641,13 @@ body.author-mode .section-noise  { display: none; }
 .flaky-confidence-low { background: var(--surface-2); color: var(--faint); }
 
 /* === Dashboard v2: Collapsible sections === */
-.section-collapsible { margin-bottom: 12px; }
+.section-collapsible {
+    margin-bottom: 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--glass-bg);
+    min-width: 0;
+}
 .section-collapsible > .section-header {
     cursor: pointer;
     display: flex;
@@ -1714,13 +1657,16 @@ body.author-mode .section-noise  { display: none; }
     flex-wrap: wrap;
     min-width: 0;
     padding: 12px 16px;
-    border-radius: var(--radius);
-    background: rgba(var(--veil),0.03);
-    border: 1px solid var(--line);
+    margin: 0;
+    border-radius: inherit;
+    background: transparent;
+    border: 0;
     transition: background 0.15s;
     user-select: none;
 }
 .section-collapsible > .section-header:hover { background: var(--hover); }
+.section-collapsible > .section-header:focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
+.section-collapsible.expanded > .section-header { border-radius: var(--radius) var(--radius) 0 0; border-bottom: 1px solid var(--line); }
 .section-collapsible > .section-header .toggle-indicator {
     color: var(--faint);
     font-size: 11px;
@@ -1734,12 +1680,13 @@ body.author-mode .section-noise  { display: none; }
     align-items: center;
     min-width: 0;
 }
-.section-collapsible .section-body {
+.section-collapsible > .section-body {
     display: none;
-    padding: 12px 0 0;
+    padding: 16px;
+    border-radius: 0 0 var(--radius) var(--radius);
     min-width: 0;
 }
-.section-collapsible.expanded .section-body { display: block; }
+.section-collapsible.expanded > .section-body { display: block; }
 .section-collapsible .section-body > .section {
     margin-bottom: 0;
     min-width: 0;
@@ -1759,10 +1706,21 @@ body.author-mode .section-noise  { display: none; }
 .section-collapsible .section-body > .section > .merge-decision-card {
     min-width: 0;
 }
+.section-collapsible > .section-body > .section > .card,
+.section-collapsible > .section-body > .section > .merge-decision-card {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.section-collapsible > .section-body > .section > .tab-container { margin-top: 0; }
 .section-summary {
     color: var(--muted);
     font-size: 12px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     flex: 1 1 280px;
     min-width: 0;
     max-width: none;
@@ -1779,7 +1737,7 @@ body.author-mode .section-noise  { display: none; }
     border-radius: 12px;
     font-weight: 600;
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     letter-spacing: 0.5px;
 }
 .severity-ok   { background: rgba(var(--veil),0.06); color: var(--muted); border: 1px solid rgba(var(--veil),0.14); }
@@ -1836,6 +1794,7 @@ body.author-mode .section-noise  { display: none; }
 .action-chip:hover { opacity: 0.8; }
 .action-chip.chip-ok   { background: transparent; color: var(--muted); border-color: rgba(var(--veil),0.12); }
 .action-chip.chip-ok .chip-ok-check { color: var(--pass); }
+.action-chip .chip-note { color: var(--faint); font-size: 11px; font-weight: 400; }
 .action-chip.chip-warn { background: transparent; color: var(--warn); border-color: var(--warn); }
 .action-chip.chip-error{ background: transparent; color: var(--block); border-color: var(--block); }
 
@@ -1907,7 +1866,7 @@ body.author-mode .section-noise  { display: none; }
     padding: 0;
     margin: 0 0 12px;
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     color: var(--muted);
 }
 .regression-reasons li { padding: 2px 0; }
@@ -1915,7 +1874,7 @@ body.author-mode .section-noise  { display: none; }
 .risk-files { margin-top: 8px; }
 .risk-table { width: 100%; font-size: 13px; }
 .risk-table td { padding: 4px 8px; }
-.risk-table td:first-child { font-family: 'JetBrains Mono', monospace; }
+.risk-table td:first-child { font-family: var(--mono); }
 .risk-table a { color: var(--fg); text-decoration: none; }
 .risk-table a:hover { text-decoration: underline; }
 
@@ -1941,7 +1900,7 @@ body.author-mode .section-noise  { display: none; }
     color: var(--muted);
     cursor: pointer;
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     border-bottom: 2px solid transparent;
     transition: color 0.15s;
 }
@@ -1976,10 +1935,51 @@ body.author-mode .section-noise  { display: none; }
     margin: 16px 0;
 }
 
+/* Evidence navigation and long diagnostic text stay inside the viewport. */
+.reading-path h2 { font-size: 17px; margin: 0 0 6px; }
+.reading-path p { color: var(--muted); margin: 0 0 12px; }
+.reading-steps, .evidence-shortcuts { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+.reading-path a { color: var(--accent); }
+.evidence-shortcuts { margin-top: 12px; font-size: 12px; }
+.evidence-dialog { position: fixed; inset: 0; margin: auto; width: min(1100px, calc(100vw - 32px)); height: min(820px, calc(100dvh - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: hidden; padding: 20px; border: 1px solid var(--line-strong); border-radius: 14px; color: var(--fg); background: var(--bg); box-shadow: var(--glass-shadow); }
+.evidence-dialog[open] { display: flex; flex-direction: column; gap: 12px; }
+.evidence-dialog::backdrop { background: #000a; }
+.evidence-dialog header, .evidence-tools { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.evidence-dialog header > div { min-width: 0; flex: 1; }
+.evidence-dialog header button { flex-shrink: 0; }
+.evidence-dialog h2 { font-size: 16px; overflow-wrap: anywhere; }
+.evidence-dialog p { color: var(--muted); overflow-wrap: anywhere; }
+.evidence-tools { justify-content: flex-start; margin-bottom: 14px; }
+.evidence-tools input { flex: 1 1 180px; min-width: 0; max-width: 100%; }
+.evidence-dialog button, .evidence-tools input { color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.evidence-dialog a { color: var(--accent); }
+#evidence-body { overflow: auto; flex: 1; min-height: 0; min-width: 0; overscroll-behavior: contain; }
+#evidence-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.evidence-line { display: block; counter-increment: evidence-line; }
+.evidence-line::before { content: attr(data-line); display: inline-block; width: 5ch; margin-right: 12px; color: var(--muted); user-select: none; }
+.evidence-match, .evidence-selected { background: rgba(220,180,50,.2); }
+mark.evidence-match { color: inherit; padding: 0; outline: 1px solid var(--warn); }
+#evidence-match-count { color: var(--muted); font-size: 12px; }
+.card, .section, .main-content, .check-detail { min-width: 0; }
+.card pre, .narrative-rendered pre, .check-output, .check-command, .blocker-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+.narrative-rendered, .checks-table td, .header-stats { overflow-wrap: anywhere; }
+.narrative-rendered table { display: block; max-width: 100%; overflow-x: auto; }
+.narrative-toolbar, .artifact-integrity { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; }
+.narrative-toolbar { justify-content: flex-end; }
+.artifact-integrity { font-size: 12px; color: var(--muted); }
+.evidence-note { font-size: 12px; color: var(--muted); line-height: 1.6; }
+.narrative-rendered .mdr pre, #evidence-body .mdr pre { background: var(--surface-2); color: var(--fg); padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+@media (max-width: 700px) {
+    .time-budget-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; }
+    .time-budget-bar-wrap { grid-column: 1 / -1; grid-row: 2; }
+    .time-budget-duration { grid-column: 2; grid-row: 1; }
+    .evidence-dialog { padding: 12px; }
+}
+
 /* === Dashboard v2: Hero stats row === */
 .header-stats {
     font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--mono);
     color: var(--muted);
     margin-top: 4px;
 }
@@ -2005,6 +2005,7 @@ pub(super) fn js() -> &'static str {
                 JS_BETWEEN_LOCALES,
                 pl_json.as_str(),
                 JS_SUFFIX,
+                include_str!("evidence.js"),
             ]
             .concat()
         })
@@ -2042,6 +2043,17 @@ const JS_SUFFIX: &str = r##"
         return many;
     }
 
+    function translateSkipReason(reason) {
+        if (currentLang !== 'pl') return reason;
+        var reasons = {
+            'lint disabled': 'lint wyłączony',
+            'tests disabled': 'testy wyłączone',
+            'security disabled': 'analiza bezpieczeństwa wyłączona',
+            'heuristics disabled': 'analiza strukturalna wyłączona'
+        };
+        return reasons[(reason || '').trim()] || reason;
+    }
+
     function translateReviewSignalPart(part) {
         if (currentLang !== 'pl') return part;
         var trimmed = (part || '').trim();
@@ -2052,27 +2064,27 @@ const JS_SUFFIX: &str = r##"
             return match[1] + ' ' + polishPlural(breakingCount, 'zmiana łamiąca', 'zmiany łamiące', 'zmian łamiących');
         }
         match = trimmed.match(/^(\d+)%\s+coverage heuristic$/);
-        if (match) return 'heurystyka pokrycia ' + match[1] + '%';
+        if (match) return match[1] + '% plików z dopasowanymi zmianami w testach';
         match = trimmed.match(/^(\d+)\s+inline finding(?:s)?$/);
         if (match) {
             var inlineCount = Number(match[1]);
-            return match[1] + ' ' + polishPlural(inlineCount, 'znalezisko inline', 'znaleziska inline', 'znalezisk inline');
+            return match[1] + ' ' + polishPlural(inlineCount, 'uwaga do kodu', 'uwagi do kodu', 'uwag do kodu');
         }
         // MERGE_GATE runtime caveats. Tool names (Semgrep, Clippy,
         // heuristics_loctree, ...) stay original; only the formulaic wrapper
         // is localized. Unknown shapes fall through to EN below.
         match = trimmed.match(/^(.+) returned warnings$/);
         if (match) return match[1] + ': ostrzeżenia';
-        match = trimmed.match(/^(.+) skipped: (.+)$/);
+        match = trimmed.match(/^(.+) skipped: ([\s\S]+)$/);
         if (match) {
-            var skipReasonMap = {
-                'lint disabled': 'lint wyłączony',
-                'tests disabled': 'testy wyłączone',
-                'security disabled': 'security wyłączone'
-            };
-            var skipReason = skipReasonMap[match[2].trim()] || match[2];
-            return match[1] + ' pominięty: ' + skipReason;
+            return match[1] + ' — pominięto: ' + translateSkipReason(match[2]);
         }
+        match = trimmed.match(/^Semgrep analysis was partial; incompletely parsed files: (.+)$/);
+        if (match) return 'Analiza Semgrep była częściowa; pliki sparsowane nie w pełni: ' + match[1];
+        match = trimmed.match(/^Rust API delta: (\d+) unknown finding(?:s)?$/);
+        if (match) return 'Zmiany API Rust: ' + match[1] + ' ' + polishPlural(Number(match[1]), 'obserwacja o nieustalonym znaczeniu', 'obserwacje o nieustalonym znaczeniu', 'obserwacji o nieustalonym znaczeniu');
+        match = trimmed.match(/^(.+) returned failed$/);
+        if (match) return match[1] + ': niepowodzenie';
         match = trimmed.match(/^(.+) needs manual review$/);
         if (match) return match[1] + ' wymaga ręcznego przeglądu';
         return trimmed;
@@ -2090,18 +2102,26 @@ const JS_SUFFIX: &str = r##"
         if (currentLang !== 'pl') return reason;
         var text = (reason || '').trim();
         var match;
-        if (text === 'All quality gates passed') return 'Wszystkie bramki jakości przeszły';
+        if (text.includes('; ')) return text.split('; ').map(translateDecisionReason).join('; ');
+        if (text === 'All quality gates passed') return 'Wszystkie wymagane kontrole zakończyły się powodzeniem';
         match = text.match(/^Quality gates passed, but (\d+) review signal(?:s)? need attention$/);
         if (match) {
             var reviewCount = Number(match[1]);
-            return 'Bramki jakości przeszły, ale ' + match[1] + ' ' + polishPlural(reviewCount, 'sygnał wymaga uwagi', 'sygnały wymagają uwagi', 'sygnałów wymaga uwagi');
+            return 'Kontrole zakończyły się powodzeniem, ale ' + match[1] + ' ' + polishPlural(reviewCount, 'sygnał wymaga uwagi', 'sygnały wymagają uwagi', 'sygnałów wymaga uwagi');
         }
-        match = text.match(/^(\d+) quality check(?:s)? failed$/);
+        match = text.match(/^(\d+) quality check(?:s)? failed([\s\S]*)$/);
         if (match) {
-            var checkCount = Number(match[1]);
-            return 'Nie przeszły ' + match[1] + ' ' + polishPlural(checkCount, 'check jakości', 'checki jakości', 'checków jakości');
+            var detail = match[2].replace(/pre-existing/g, 'wcześniej istniejących').replace(/introduced/g, 'wprowadzonych').replace(/unclassified/g, 'bez ustalonego pochodzenia').replace(/warning signals?/g, 'sygnałów ostrzegawczych');
+            return 'Niepowodzenie kontroli jakości: ' + match[1] + detail;
         }
-        if (text === 'Merge not recommended') return 'Merge nie jest rekomendowany';
+        match = text.match(/^(\d+) warning signal(?:s)?: (.+)$/);
+        if (match) {
+            var warningDetail = match[2].replace(/pre-existing/g, 'wcześniej istniejących').replace(/introduced/g, 'wprowadzonych').replace(/unclassified/g, 'bez ustalonego pochodzenia').replace(/mixed/g, 'o mieszanym pochodzeniu');
+            return match[1] + ' ' + polishPlural(Number(match[1]), 'sygnał ostrzegawczy', 'sygnały ostrzegawcze', 'sygnałów ostrzegawczych') + ': ' + warningDetail;
+        }
+        match = text.match(/^(\d+) review signal(?:s)? need attention$/);
+        if (match) return match[1] + ' ' + polishPlural(Number(match[1]), 'sygnał wymaga uwagi', 'sygnały wymagają uwagi', 'sygnałów wymaga uwagi');
+        if (text === 'Merge not recommended') return 'Scalenie nie jest zalecane';
         match = text.match(/^(\d+) blocking issue(?:s)? found: (.+)$/);
         if (match) {
             var blockDetailCount = Number(match[1]);
@@ -2116,10 +2136,10 @@ const JS_SUFFIX: &str = r##"
     }
 
     function translateSeverityValue(value) {
-        if (currentLang !== 'pl') return value;
         var normalized = (value || '').trim().toUpperCase();
+        if (normalized === 'OK') return t('label.minimalStructural');
+        if (currentLang !== 'pl') return value;
         var map = {
-            'OK': 'OK',
             'LOW': 'NISKIE',
             'MED': 'ŚREDNIE',
             'HIGH': 'WYSOKIE',
@@ -2136,21 +2156,21 @@ const JS_SUFFIX: &str = r##"
         if (match) return 'maks. churn kodu ' + match[1] + ' (+' + match[2] + ')';
         match = text.match(/^(\d+) code churn \(\+(\d+)\)$/);
         if (match) return 'churn kodu: ' + match[1] + ' (+' + match[2] + ')';
-        match = text.match(/^(\d+) untested code files \(\+(\d+)\): (.+)$/);
+        match = text.match(/^(\d+) untested code files \(\+(\d+)\)(?:: (.+))?$/);
         if (match) {
             var untestedCount = Number(match[1]);
-            return match[1] + ' ' + polishPlural(untestedCount, 'plik kodu bez testów', 'pliki kodu bez testów', 'plików kodu bez testów') + ' (+' + match[2] + '): ' + match[3];
+            return match[1] + ' ' + polishPlural(untestedCount, 'plik bez dopasowanych zmian w testach', 'pliki bez dopasowanych zmian w testach', 'plików bez dopasowanych zmian w testach') + ' (+' + match[2] + ')' + (match[3] ? ': ' + match[3] : '');
         }
         match = text.match(/^(\d+) query-in-loop files \(\+(\d+)\): (.+)$/);
         if (match) return match[1] + ' plików z query-in-loop (+' + match[2] + '): ' + match[3];
         match = text.match(/^(\d+) clone\/collect-in-loop files \(\+(\d+)\): (.+)$/);
         if (match) return match[1] + ' plików z clone/collect-in-loop (+' + match[2] + '): ' + match[3];
         match = text.match(/^(\d+) exact twins \(\+(\d+)\): (.+)$/);
-        if (match) return match[1] + ' dokładne duplikaty (+' + match[2] + '): ' + match[3];
-        match = text.match(/^(\d+) dead exports \(\+(\d+)\): (.+)$/);
-        if (match) return match[1] + ' martwe eksporty (+' + match[2] + '): ' + match[3];
-        match = text.match(/^(\d+) cycles \(\+(\d+)\): (.+)$/);
-        if (match) return match[1] + ' cykle (+' + match[2] + '): ' + match[3];
+        if (match) return match[1] + ' par symboli o tej samej nazwie (+' + match[2] + '): ' + match[3];
+        match = text.match(/^(\+?\d+) dead exports \(\+(\d+)\)(?:: (.+))?$/);
+        if (match) return match[1] + ' kandydatów na nieużywane eksporty (+' + match[2] + ')' + (match[3] ? ': ' + match[3] : '');
+        match = text.match(/^(\+?\d+) cycles \(\+(\d+)\)(?:: (.+))?$/);
+        if (match) return match[1] + ' cykli (+' + match[2] + ')' + (match[3] ? ': ' + match[3] : '');
         return text;
     }
 
@@ -2198,6 +2218,9 @@ const JS_SUFFIX: &str = r##"
             var rendered = t('summary.severityValue');
             rendered = rendered.split('{value}').join(translateSeverityValue(el.dataset.value || ''));
             el.textContent = rendered;
+        });
+        document.querySelectorAll('[data-i18n-template="message.skippedCheckDetail"]').forEach(function(el) {
+            el.textContent = t('message.skippedCheckDetail').split('{reason}').join(translateSkipReason(el.dataset.reason || ''));
         });
         document.querySelectorAll('[data-review-signals]').forEach(function(el) {
             var source = el.getAttribute('data-review-signals') || '';
@@ -2324,8 +2347,8 @@ const JS_SUFFIX: &str = r##"
         });
     });
 
-    // -- Filter chips --
-    document.querySelectorAll('.filter-chip').forEach(function(chip) {
+    // -- File filter chips (artifact filters have their own listener) --
+    document.querySelectorAll('.filter-chip:not(.artifact-kind-chip)').forEach(function(chip) {
         chip.addEventListener('click', function() {
             this.classList.toggle('active');
             applyFileFilters();
@@ -2460,15 +2483,34 @@ const JS_SUFFIX: &str = r##"
 
     function updateActiveNav() {
         if (!sections.length) return;
-        var scrollY = window.scrollY + 120;
-        var current = sections[0];
-        for (var i = 0; i < sections.length; i++) {
-            if (sections[i].el.offsetTop <= scrollY) {
-                current = sections[i];
-            }
-        }
-        navLinks.forEach(function(l) { l.classList.remove('active'); });
-        if (current) current.link.classList.add('active');
+        var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        var readingLine = Math.min(120, viewportHeight / 3);
+        // offsetTop belongs to an offsetParent, not the document. Measure all
+        // sections in the same viewport coordinate system; menu order may differ
+        // from document order. A collapsed section is represented by its header.
+        var visible = sections.map(function(section) {
+            var surface = section.el.closest('.section-collapsible') || section.el;
+            var rect = surface.getBoundingClientRect();
+            return {section: section, top: rect.top, bottom: rect.bottom, height: rect.height};
+        }).filter(function(item) {
+            return item.height > 0 && item.bottom > 0 && item.top < viewportHeight;
+        }).sort(function(a, b) { return a.top - b.top; });
+        var current = visible[0];
+        visible.forEach(function(item) {
+            if (item.top <= readingLine) current = item;
+        });
+        navLinks.forEach(function(link) {
+            var active = Boolean(current && current.section.link === link);
+            link.classList.toggle('active', active);
+            if (active) link.setAttribute('aria-current', 'location');
+            else link.removeAttribute('aria-current');
+        });
+    }
+
+    function updateSectionAddress(id) {
+        // Offline reports navigate the current DOM without asking a file-origin
+        // frame to load or replace a local URL. HTTP reports retain shareable hashes.
+        if (window.location.protocol !== 'file:') history.replaceState(null, '', '#' + id);
     }
 
     function scrollToSection(id, behavior) {
@@ -2476,12 +2518,14 @@ const JS_SUFFIX: &str = r##"
         if (!target) return;
         expandForTarget(target);
         target.scrollIntoView({ behavior: behavior || 'smooth', block: 'start' });
-        history.replaceState(null, '', '#' + id);
+        updateSectionAddress(id);
         updateActiveNav();
     }
 
     if (sections.length > 0) {
         window.addEventListener('scroll', updateActiveNav, { passive: true });
+        window.addEventListener('resize', updateActiveNav, { passive: true });
+        document.addEventListener('toggle', updateActiveNav, true);
         updateActiveNav();
     }
 
@@ -2497,7 +2541,7 @@ const JS_SUFFIX: &str = r##"
         }
     }
 
-    navLinks.forEach(function(link) {
+    document.querySelectorAll('a[href^="#"]:not([href^="#file-"])').forEach(function(link) {
         link.addEventListener('click', function(e) {
             e.preventDefault();
             scrollToSection(this.getAttribute('href').slice(1), 'smooth');
@@ -2520,154 +2564,13 @@ const JS_SUFFIX: &str = r##"
                     if (chevron) chevron.classList.add('open');
                 }
                 el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                history.replaceState(null, '', '#' + id);
+                updateSectionAddress(id);
                 // Flash highlight animation
                 el.classList.add('highlight-flash');
                 setTimeout(function() { el.classList.remove('highlight-flash'); }, 1500);
             }
         });
     });
-
-    // -- Diff modal --
-    var diffOverlay = document.getElementById('diff-modal-overlay');
-    var diffTitle = document.getElementById('diff-modal-title');
-    var diffBody = document.getElementById('diff-modal-body');
-    var diffSearch = document.getElementById('diff-modal-search');
-    var diffCopyPath = document.getElementById('diff-copy-path');
-
-    function closeDiffModal() {
-        if (diffOverlay) diffOverlay.classList.remove('open');
-    }
-
-    function highlightDiffLines(text) {
-        var lines = text.split('\n');
-        var html = '';
-        for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            // Escape HTML entities
-            var escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            if (line.indexOf('@@') === 0) {
-                html += '<span class="diff-line-hunk">' + escaped + '</span>\n';
-            } else if (line.indexOf('+') === 0 && line.indexOf('+++') !== 0) {
-                html += '<span class="diff-line-add">' + escaped + '</span>\n';
-            } else if (line.indexOf('-') === 0 && line.indexOf('---') !== 0) {
-                html += '<span class="diff-line-del">' + escaped + '</span>\n';
-            } else {
-                html += escaped + '\n';
-            }
-        }
-        return html;
-    }
-
-    function openDiffModal(path, patchPath) {
-        if (!diffOverlay || !diffBody || !diffTitle) return;
-        diffTitle.textContent = path;
-        diffBody.innerHTML = '<pre style="color:var(--faint);padding:24px;text-align:center">' + t('misc.loading') + '</pre>';
-        diffOverlay.classList.add('open');
-
-        if (patchPath) {
-            // Progressive enhancement: try fetch for modal, fallback to direct link (file:// CORS safe)
-            fetch(patchPath).then(function(r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.text();
-            }).then(function(text) {
-                diffBody.innerHTML = '<pre>' + highlightDiffLines(text) + '</pre>';
-            }).catch(function() {
-                // fetch failed (file:// CORS, network error) — fallback to direct navigation
-                closeDiffModal();
-                window.open(patchPath, '_blank');
-            });
-        } else {
-            diffBody.innerHTML = '<pre style="color:var(--faint);padding:24px">' + t('message.noPerFilePatch') + ' <a href="10_diff/full.patch" style="color:var(--accent)">' + t('button.viewFullPatch') + '</a></pre>';
-        }
-    }
-
-    // File row click -> open diff (modal if fetch works, direct link otherwise)
-    document.querySelectorAll('.file-row').forEach(function(row) {
-        row.style.cursor = 'pointer';
-        row.addEventListener('click', function(e) {
-            // Don't trigger if user clicked an anchor link
-            if (e.target.tagName === 'A') return;
-            var path = this.dataset.path || '';
-            var patchPath = this.dataset.patchPath || '';
-            if (patchPath) {
-                openDiffModal(path, patchPath);
-            } else {
-                // No per-file patch — open full.patch directly
-                window.open('10_diff/full.patch', '_blank');
-            }
-        });
-    });
-
-    if (diffOverlay) {
-        diffOverlay.addEventListener('click', function(e) {
-            if (e.target === this) closeDiffModal();
-        });
-    }
-
-    var closeBtn = document.getElementById('diff-modal-close');
-    if (closeBtn) closeBtn.addEventListener('click', closeDiffModal);
-
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') closeDiffModal();
-    });
-
-    // Diff modal: copy path button
-    if (diffCopyPath) {
-        diffCopyPath.addEventListener('click', function() {
-            var path = diffTitle ? diffTitle.textContent : '';
-            if (navigator.clipboard && path) {
-                navigator.clipboard.writeText(path).then(function() {
-                    diffCopyPath.textContent = t('button.copied');
-                    setTimeout(function() { diffCopyPath.textContent = t('button.copyPath'); }, 1500);
-                }).catch(function() {});
-            }
-        });
-    }
-
-    // Diff modal: search in diff (uses TreeWalker on text nodes to avoid
-    // corrupting HTML entities like &amp; when the search term overlaps them)
-    if (diffSearch) {
-        var diffSearchTimeout;
-        diffSearch.addEventListener('input', function() {
-            clearTimeout(diffSearchTimeout);
-            var q = this.value;
-            diffSearchTimeout = setTimeout(function() {
-                if (!diffBody) return;
-                var pre = diffBody.querySelector('pre');
-                if (!pre) return;
-                // Remove existing highlights (unwrap <span class="diff-line-match">)
-                pre.querySelectorAll('.diff-line-match').forEach(function(el) {
-                    var parent = el.parentNode;
-                    while (el.firstChild) parent.insertBefore(el.firstChild, el);
-                    parent.removeChild(el);
-                    parent.normalize();
-                });
-                if (!q) return;
-                var escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                var regex = new RegExp(escaped, 'gi');
-                // Walk only text nodes — never touch innerHTML
-                var walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT, null, false);
-                var textNodes = [];
-                while (walker.nextNode()) textNodes.push(walker.currentNode);
-                textNodes.forEach(function(node) {
-                    var match, last = 0, frag = document.createDocumentFragment(), txt = node.nodeValue;
-                    regex.lastIndex = 0;
-                    while ((match = regex.exec(txt)) !== null) {
-                        if (match.index > last) frag.appendChild(document.createTextNode(txt.slice(last, match.index)));
-                        var mark = document.createElement('span');
-                        mark.className = 'diff-line-match';
-                        mark.textContent = match[0];
-                        frag.appendChild(mark);
-                        last = regex.lastIndex;
-                    }
-                    if (last === 0) return; // no matches in this node
-                    if (last < txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
-                    node.parentNode.replaceChild(frag, node);
-                });
-            }, 200);
-        });
-    }
 
     // -- Narrative copy button --
     var narrativeCopyBtn = document.getElementById('copy-narrative-btn');
@@ -2682,6 +2585,8 @@ const JS_SUFFIX: &str = r##"
             }
         });
     }
+
+    installEvidenceReader(t);
 
     // -- Artifacts Explorer: copy path button --
     document.querySelectorAll('.artifact-copy-btn').forEach(function(btn) {
@@ -2755,7 +2660,7 @@ const JS_SUFFIX: &str = r##"
             comment += '**Checks:** ' + passed + ' passed, ' + failed + ' failed\n\n';
 
             if (quality.breaking_changes && quality.breaking_changes.has_breaking) {
-                comment += '**Breaking:** ' + (quality.breaking_changes.summary || 'Yes') + '\n\n';
+                comment += '**Public API structural changes:** ' + (quality.breaking_changes.summary || 'Yes') + ' (structural scan; semantic compatibility not assessed)\n\n';
             }
 
             if (quality.coverage) {
@@ -2765,7 +2670,7 @@ const JS_SUFFIX: &str = r##"
                 var covLabel = (ratio === null || ratio === undefined)
                     ? 'not measured'
                     : Math.round(ratio * 100) + '%';
-                comment += '**Coverage heuristic:** ' + covLabel + ' (' + quality.coverage.matched + '/' + quality.coverage.total + ')\n\n';
+                comment += '**Source/test file matching:** ' + covLabel + ' (' + quality.coverage.matched + '/' + quality.coverage.total + ')\n\n';
             }
 
             var hotspots = (diff.files || [])
@@ -2824,12 +2729,14 @@ const JS_SUFFIX: &str = r##"
         header.addEventListener('click', function() {
             var collapsible = this.closest('.section-collapsible');
             setCollapsibleExpanded(collapsible, !collapsible.classList.contains('expanded'));
+            updateActiveNav();
         });
         header.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 var collapsible = this.closest('.section-collapsible');
                 setCollapsibleExpanded(collapsible, !collapsible.classList.contains('expanded'));
+                updateActiveNav();
             }
         });
     });
@@ -2877,6 +2784,65 @@ mod tests {
             .expect("generated JS should contain I18N block terminator");
 
         (&js[en_start..pl_start], &js[pl_value_start..end])
+    }
+
+    /// Every key/value pair in source order, duplicates included.
+    ///
+    /// `serde_json::from_str` into a map silently keeps the last value for a
+    /// repeated key, so a duplicate is invisible to every other locale test
+    /// while the earlier translation is unreachable and the file is ambiguous
+    /// for a strict validator.
+    fn locale_entries(json: &str) -> Vec<(String, String)> {
+        struct Entries(Vec<(String, String)>);
+
+        impl<'de> serde::Deserialize<'de> for Entries {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct EntriesVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for EntriesVisitor {
+                    type Value = Entries;
+
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("a locale object of string values")
+                    }
+
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Entries, A::Error> {
+                        let mut entries = Vec::new();
+                        while let Some(entry) = map.next_entry::<String, String>()? {
+                            entries.push(entry);
+                        }
+                        Ok(Entries(entries))
+                    }
+                }
+
+                deserializer.deserialize_map(EntriesVisitor)
+            }
+        }
+
+        serde_json::from_str::<Entries>(json)
+            .expect("locale JSON should parse as string map")
+            .0
+    }
+
+    #[test]
+    fn locale_files_declare_each_key_once() {
+        for (name, json) in [("en", I18N_EN_JSON), ("pl", I18N_PL_JSON)] {
+            let entries = locale_entries(json);
+            let mut seen = BTreeMap::new();
+            let mut duplicates = Vec::new();
+            for (key, _) in entries {
+                if seen.insert(key.clone(), ()).is_some() {
+                    duplicates.push(key);
+                }
+            }
+            assert!(
+                duplicates.is_empty(),
+                "locales/{name}.json declares duplicate keys: {duplicates:?}"
+            );
+        }
     }
 
     #[test]

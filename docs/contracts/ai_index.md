@@ -31,7 +31,7 @@ loctree twin counts.
 
 The following sections must be present:
 
-- `## Recommended reading order (agent-friendly)`
+- `## Recommended reading order (human-first)`
 - `## Layout`
 - `## If you need deeper context`
 - `## Packs`
@@ -40,10 +40,24 @@ The following sections must be present:
 
 The reading order must always include references to:
 
+- `dashboard.html` by default, or `review.html` with `--no-dashboard`
 - `00_summary/MERGE_GATE.md`
 - `00_summary/MERGE_GATE.json`
 - `00_summary/PROVENANCE.json`
 - `PR_REVIEW.md`
+
+Exactly one HTML entry point is generated for a run. It is the first reading
+step, and the layout section names the same file. `dashboard.html` is the
+default guided human report and offline evidence reader; `review.html` is the
+static fallback selected by `--no-dashboard`. The reference follows the output
+configuration even though the HTML may be generated after the index itself.
+
+This reading order is a minimum navigation path, not a complete inventory. The
+dashboard also exposes the full diff, check evidence, source locations and
+other available artifacts without requiring a reader to find them manually in
+the extracted pack. Full text is embedded within bounded size limits; the
+original files remain the source of truth. See the
+[browser reading guide](../usage.md#read-a-pack-in-the-browser).
 
 `PROVENANCE.json` follows the gate data directly: a verdict is only as good as
 the substrate it was computed on, so the reading order places what was judged

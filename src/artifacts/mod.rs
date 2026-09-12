@@ -409,10 +409,11 @@ artifact_generation_seams! {
     ContextTools => "context tools",
     MergeGate => "merge gate",
     PrReview => "PR review",
-    ReportAndDashboard => "report and dashboard",
+    ReportJson => "report.json",
     ReviewHandoffSurfaces => "review handoff surfaces",
     Provenance => "provenance",
     RunJson => "RUN.json",
+    Dashboard => "dashboard",
     ManifestJson => "MANIFEST.json",
     SanityChecks => "SANITY checks",
     SharedSnapshotCleanup => "shared snapshot cleanup",
@@ -1012,7 +1013,8 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         .iter()
         .flat_map(|d| d.files.iter().map(|f| f.path.clone()))
         .collect();
-    let ownership_map = build_ownership_map(&config.repo_root, &file_paths);
+    let ownership_map =
+        build_ownership_map_at_revision(&repo, &resolved_target.commit_id, &file_paths);
     let dash_ctx = build_dashboard_context(DashboardContextInput {
         config,
         checks: &all_checks,
@@ -1049,44 +1051,18 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         provenance: &provenance_consistency,
     })?;
     generate_consistency_check(&summary_dir, &out_dir, diffs, &provenance_consistency)?;
-    if config.create_dashboard {
-        // Dashboard reads report.json for embedding
-        dashboard::generate(
-            &out_dir,
-            config,
-            diffs,
-            &all_checks,
-            heuristics,
-            &dash_ctx,
-            Some(&regression_report),
-        )?;
-        stage_timings.push(finish_timing(
-            emit_human_stdout,
-            "report.json + dashboard",
-            t,
-        ));
-    } else {
-        stage_timings.push(finish_timing(emit_human_stdout, "report.json", t));
-    }
-    ensure_generation_active(
-        governor,
-        &out_dir,
-        ArtifactGenerationSeam::ReportAndDashboard,
-    )?;
+    stage_timings.push(finish_timing(emit_human_stdout, "report.json", t));
+    ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::ReportJson)?;
 
-    // REVIEW_SUMMARY.md + review.html + AI_INDEX.md — consolidated human
-    // review, the always-present browser handoff, and the reading-order map
-    // (all run after primary artifacts exist so existence checks are accurate).
+    // One browser entry: dashboard by default, static review only when the
+    // dashboard is explicitly disabled. Both consume the same review evidence.
     let t = Instant::now();
     generate_review_summary(&out_dir)?;
-    generate_standard_review_html(&out_dir)?;
     generate_ai_index(&out_dir, config, diffs, &all_checks, &coverage_delta)?;
-    generate_standard_review_html(&out_dir)?;
-    stage_timings.push(finish_timing(
-        emit_human_stdout,
-        "REVIEW_SUMMARY + review.html + AI_INDEX",
-        t,
-    ));
+    if !config.create_dashboard {
+        generate_standard_review_html(&out_dir)?;
+    }
+    stage_timings.push(finish_timing(emit_human_stdout, "review handoff", t));
     ensure_generation_active(
         governor,
         &out_dir,
@@ -1111,7 +1087,7 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     stage_timings.push(finish_timing(emit_human_stdout, "PROVENANCE.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::Provenance)?;
 
-    // 00_summary/RUN.json — after all generators complete for accurate timing
+    // 00_summary/RUN.json — completed evidence stages; dashboard/publication follow
     let t = Instant::now();
     generate_run_json(RunJsonInput {
         dir: &summary_dir,
@@ -1133,6 +1109,22 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
     stage_timings.push(finish_timing(emit_human_stdout, "RUN.json", t));
     ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::RunJson)?;
 
+    // Render only after the evidence it embeds is finalized, including the
+    // provenance and execution record. Manifest/sanity remain downloadable
+    // originals because embedding their own HTML hash would be self-referential.
+    if config.create_dashboard {
+        dashboard::generate(
+            &out_dir,
+            config,
+            diffs,
+            &all_checks,
+            heuristics,
+            &dash_ctx,
+            Some(&regression_report),
+        )?;
+    }
+    ensure_generation_active(governor, &out_dir, ArtifactGenerationSeam::Dashboard)?;
+
     // 00_summary/MANIFEST.json — runs LAST (hashes all files)
     let t = Instant::now();
     generate_manifest(&out_dir)?;
@@ -1148,14 +1140,14 @@ pub fn generate(input: GenerateInput<'_>) -> Result<PathBuf> {
         use colored::Colorize;
         if sanity.valid {
             println!(
-                "  {} Sanity: {}/{} checks passed",
+                "  {} Artifact pack integrity: {}/{} checks passed",
                 "✓".green(),
                 sanity.checks_passed,
                 sanity.checks_run,
             );
         } else {
             println!(
-                "  {} Sanity: INVALID ({}/{} passed)",
+                "  {} Artifact pack integrity: INVALID ({}/{} passed)",
                 "✗".red(),
                 sanity.checks_passed,
                 sanity.checks_run,
@@ -2378,7 +2370,7 @@ fn governed_optional_output(command: Command, label: &str) -> Result<Option<std:
     }
 }
 
-fn collect_quick_wins(config: &Config, checks: &[CheckResult], exact_twins: usize) -> Vec<String> {
+fn collect_quick_wins(config: &Config, checks: &[CheckResult]) -> Vec<String> {
     use std::collections::HashSet;
 
     let mut wins = Vec::new();
@@ -2446,13 +2438,6 @@ fn collect_quick_wins(config: &Config, checks: &[CheckResult], exact_twins: usiz
         }
     }
 
-    if exact_twins > 0 {
-        wins.push(format!(
-            "Inspect {} loctree exact twin pair(s) for low-risk extraction or dedup wins.",
-            exact_twins
-        ));
-    }
-
     wins
 }
 
@@ -2486,7 +2471,11 @@ fn generate_failures_summary(dir: &Path, checks: &[CheckResult]) -> Result<()> {
 
         if let Some(ref prov) = check.provenance {
             md.push_str(&format!("- **Command:** `{}`\n", prov.command));
-            md.push_str(&format!("- **Exit code:** {:?}\n", prov.exit_code));
+            let exit_code = prov
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "Not recorded".to_string());
+            md.push_str(&format!("- **Exit code:** {exit_code}\n"));
             if !prov.hard_fail_signatures.is_empty() {
                 md.push_str(&format!(
                     "- **Hard fail signatures:** {}\n",
@@ -2500,10 +2489,10 @@ fn generate_failures_summary(dir: &Path, checks: &[CheckResult]) -> Result<()> {
             check_id_from_name(&check.name)
         ));
 
-        // Root cause analysis
+        // Diagnostic evidence does not by itself establish a root cause.
         if let Some(rc) = extract_root_cause(check) {
-            md.push_str("\n### Root Cause\n\n");
-            md.push_str(&format!("- **Cause:** {}\n", rc.cause));
+            md.push_str("\n### Failure details\n\n");
+            md.push_str(&format!("- **Summary:** {}\n", rc.cause));
             if !rc.evidence.is_empty() {
                 md.push_str(&format!("- **Evidence:** `{}`\n", rc.evidence));
             }
@@ -2543,15 +2532,15 @@ fn generate_failures_summary(dir: &Path, checks: &[CheckResult]) -> Result<()> {
                 }
             }
             md.push('\n');
-        } else {
-            // First 12 lines of output as preview for non-structured failures
-            let preview: Vec<&str> = check.output.lines().take(12).collect();
+        } else if !check.name.to_ascii_lowercase().contains("pytest") {
+            // Use the same evidence as the dashboard and machine report;
+            // startup and successful test progress are not failure details.
+            // Pytest's structured evidence (or missing-diagnostic explanation)
+            // is already included above, so it needs no second output preview.
+            let preview = findings::check_failure_excerpt(check);
             if !preview.is_empty() {
                 md.push_str("\n```\n");
-                md.push_str(&preview.join("\n"));
-                if check.output.lines().count() > 12 {
-                    md.push_str("\n... (truncated, see full log)");
-                }
+                md.push_str(&preview);
                 md.push_str("\n```\n");
             }
         }

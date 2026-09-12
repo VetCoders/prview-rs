@@ -31,8 +31,8 @@ Generates Artifact Pack v1 with structured, verifiable PR review artifacts:\n\n\
     20_quality/   <gate>.result.json + <gate>.log per check,\n\
                   full-checks.log, breaking changes, coverage delta\n\
     30_context/   changed-tests.txt, optional INLINE_FINDINGS.sarif, tooling\n\
-    review.html   Standard portable human review export\n\
-    dashboard.html  Interactive HTML report (optional via --no-dashboard)\n\n\
+    dashboard.html  Default human report with offline evidence reader\n\
+    review.html   Static export instead of dashboard with --no-dashboard\n\n\
   Trustworthiness:\n\
     - CheckProvenance: command, exit_code, cwd, scanned tree\n\
       (target_sha + tree_state), timestamps per gate\n\
@@ -47,7 +47,7 @@ Generates Artifact Pack v1 with structured, verifiable PR review artifacts:\n\n\
   prview --quick                      Quick review (skip tests/lint/heuristics)
   prview --deep feature/x dev         Full review with all checks
   prview --skip-tests feature/x dev   Review without tests
-  prview --no-dashboard               Skip HTML dashboard generation
+  prview --no-dashboard               Generate static review.html instead of dashboard.html
   prview --pr 42                      Analyze GitHub PR #42
   prview --pr 42 --gh-repo owner/repo PR from specific repository
   prview --update feat/x main         Incremental update after new commits
@@ -209,7 +209,7 @@ pub struct Cli {
     #[arg(long = "no-zip")]
     pub no_zip: bool,
 
-    /// Skip interactive HTML dashboard generation
+    /// Generate static review.html instead of the interactive dashboard.html
     #[arg(long = "no-dashboard")]
     pub no_dashboard: bool,
 

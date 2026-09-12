@@ -12076,15 +12076,14 @@ fn collect_derive_name_ambiguity(items: &[Item], ambiguity: &mut DeriveNameAmbig
                 ambiguity.macro_use = true;
                 ambiguity.all_unqualified = true;
             }
-            Item::Mod(module) => {
+            Item::Mod(module)
                 if module
                     .attrs
                     .iter()
-                    .any(|attr| meta_contains_macro_use(&attr.meta))
-                {
-                    ambiguity.macro_use = true;
-                    ambiguity.all_unqualified = true;
-                }
+                    .any(|attr| meta_contains_macro_use(&attr.meta)) =>
+            {
+                ambiguity.macro_use = true;
+                ambiguity.all_unqualified = true;
             }
             _ => {}
         }

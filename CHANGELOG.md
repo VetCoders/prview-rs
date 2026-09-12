@@ -20,12 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gate.status`, matching `gate.verdict` instead of projecting merge permission
   as ALLOW/BLOCK. MERGE_GATE.md explains non-blocking quality failures beside
   the policy and merge-permission axes.
-
 - `MERGE_GATE.json` schema 3.0 records actual policy provenance captured at
   load: `origin: file` with a source path, or `origin: builtin-default` with
   `source: null`. CLI/MCP readers and the validator accept 3.0 while retaining
   older schema contracts and the typed enforcement requirements from 2.3.
-
 - `PROVENANCE.json` schema 2.0 also cross-checks its own two statements about
   the substrate. A new `consistency` object reports how many run/check
   comparisons were made and every `PROVENANCE_CONTRADICTION` found between them:
@@ -46,7 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provenance/confidence problem, not a verified failure: no quality failure,
   blocking issue or verdict axis is derived from it, and a run without
   contradictions keeps a byte-identical decision.
-
 - `PROVENANCE.json` schema 2.0 separates review identity (`target_sha`) from
   operator state (`worktree_head_sha`, `operator_worktree`). The ambiguous 1.0
   field names are removed from new records. Operator HEAD is now captured
@@ -54,6 +51,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A HEAD change detected during status fingerprinting invalidates all operator
   fields instead of combining different checkouts; this is not a worktree lock.
   The architecture documentation includes the 1.0-to-2.0 reader migration.
+- The default human handoff is a single `dashboard.html` with an offline reader
+  for Markdown, JSON, logs, patches, and target-commit source. `--no-dashboard`
+  selects the static `review.html` instead. Large text has bounded embedding
+  and paging; the pack retains original downloads.
+- Dashboard labels distinguish file/test matching from execution coverage,
+  structural scores from test outcomes, and repository-wide Loctree candidates
+  from changes introduced by a PR. Commit subjects remain complete, check
+  duration includes execution status, and declared owners come from the
+  target revision's CODEOWNERS. English and Polish descriptions are aligned.
+- The dashboard lint section projects the canonical findings model instead of
+  re-parsing check output. Counts are reported as `in changed files`,
+  `outside changed files`, and `origin unknown` — the canonical `in_diff`
+  tri-state — rather than `new` and `legacy (pre-existing)`, and a lint check
+  that was skipped or errored is reported as not executed instead of clean.
+- Summary labels state the evidence behind them: `Breaking: 0` is now
+  `Public API structural changes: 0` with a note that semantic compatibility
+  was not assessed, `Sanity OK` is `Artifact pack integrity: OK` (in the
+  dashboard and on stdout), `Heuristics OK` is `Loctree structural signals: 0`,
+  and `Checks OK (x/y)` is `Checks passed: x/y`. The PR comment export uses the
+  same wording.
+- Security cards report "not executed" for a scanner that was skipped or
+  errored instead of scraping a metric out of its skip reason.
+- `30_context/INLINE_FINDINGS.sarif` emits `properties.in_diff: null` and
+  `properties.classification: "unclassified"` for a finding whose origin was not
+  established. `in_diff` was previously always a boolean, so a consumer that
+  assumes that type — or that matches `classification` without a default branch
+  — needs updating. `docs/contracts/merge_gate.md` documents the tri-state.
+  Every result carries both properties, including Cargo audit advisories and
+  rows from checks that have no dedicated parser.
 
 - Updated the bundled Loctree library from 0.13.0 to 0.14.4, together with
   its `loctree-ast` and `report-leptos` dependencies. Structural analysis uses
@@ -153,6 +179,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixtures read an empty file and failed containment assertions that production
   code had satisfied.
 
+- `locales/en.json` and `locales/pl.json` declare `summary.lintTotals` once.
+  The obsolete `{new}/{legacy}` template was a duplicate key that JSON parsers
+  silently discarded; a locale test now rejects duplicate keys outright.
+
+- A Rust source file counted as covered through an inline `#[cfg(test)]` module
+  shows the marker as text. It was rendered as a source link, and clicking it
+  opened a "source unavailable" dialog because no blob exists under a synthetic
+  marker.
+
+- The dashboard lint section counts no findings for a check it reports as not
+  executed. A lint check in `Error` status still produces a canonical row for
+  its runner diagnostic, and counting it showed `origin unknown / 1 total` above
+  a card stating that no result was produced.
+
+- The dashboard evidence inventory excludes the `prview mcp` launcher control
+  files (`RUNNING.json`, `run.log`, `run.stderr.log`) that the manifest and the
+  archive already exclude. They are mutable launcher state, not pack payload,
+  and the reader no longer presents them as immutable evidence.
+
+- Pytest locations are recognized in repository paths containing spaces and in
+  non-Python files reported by doctest or plugin collectors (`.rst`, `.txt`,
+  `.md`). Both were previously dropped, so `INLINE_FINDINGS.sarif` and
+  `report.json` lost a source location Pytest had supplied.
+
+- `report.json`'s `quality.sarif.findings_count`, the dashboard run history and
+  the previous-run delta all count the same operator-finding list, so
+  informational notes (the Cargo audit baseline row, the Loctree repository
+  summary) cannot report a worsening trend for a run whose diagnostics did not
+  change.
+
+- `MERGE_GATE.json` `files.dashboard` names the HTML entry point the run
+  actually generated: `review.html` under `--no-dashboard`, `dashboard.html`
+  otherwise. It previously always named `dashboard.html`, so every
+  static-report run pointed the canonical merge decision at a file the pack
+  did not contain.
+
 - MCP contract tests bound response waits and pagination, and clean the owned
   server tree before reaping it on timeout or drop, including detached reviews.
 
@@ -164,6 +226,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with their environment requests and refuse nested launches. A library test
   runner can no longer re-enter the full test suite through `current_exe()`.
   MCP probes also reject test runners rather than treating `mcp` as a test filter.
+
+- Pytest failure excerpts preserve diagnostic locations without treating startup
+  text or passed test names as an error, or a traceback location as proof of
+  causation. Process noncompletion without a diagnostic records an unknown
+  cause consistently across the dashboard, failure summary and report JSON. General
+  structural notes no longer inflate SARIF, merge-gate, or report counters.
+- CODEOWNERS patterns respect root anchoring and directory depth, and cached
+  check labels render as translated text rather than escaped HTML.
+- Evidence dialogs use an opaque centered surface, long logs stay within their
+  cards, check duration labels remain readable, and failed quality badges keep
+  the same color regardless of merge policy. The shared reader searches each
+  occurrence and downloads preserved complete originals through Blob URLs;
+  unavailable originals are explicitly separate file links. Offline navigation
+  no longer rewrites local file URLs or falls back to a second diff reader.
 
 - A signal arriving after durable pack publication no longer relabels the
   completed run as exit 130, while an unchanged `--update` remains

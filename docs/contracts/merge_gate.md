@@ -56,7 +56,14 @@ Paths are relative to the artifact root, using the subdirectory pack layout:
 | `inline_findings` | `"30_context/INLINE_FINDINGS.sarif"` when emitted, otherwise `null` |
 | `full_patch` | `"10_diff/full.patch"` |
 | `checks_log` | `"20_quality/full-checks.log"` |
-| `dashboard` | `"dashboard.html"` |
+| `dashboard` | `"dashboard.html"`, or `"review.html"` when the run was started with `--no-dashboard` |
+
+`files.dashboard` names the pack's single browser entry point, not a fixed
+filename: a `--no-dashboard` run writes `review.html` instead of
+`dashboard.html`, and the field follows it. Every value in `files` points at a
+file that exists in the pack (`inline_findings` is `null` rather than naming an
+absent SARIF). A consumer that hard-codes `"dashboard.html"` was already
+following a dead link on static-report runs.
 
 `MERGE_GATE.md` is also written beside the JSON, but it is a human-readable
 companion and is not listed in `files`.
@@ -135,6 +142,42 @@ the harmless warnings-only exception.
 | `findings_count` | integer | Total inline findings |
 | `introduced_count` | integer | Findings this diff introduced (`in_diff == true`) |
 | `preexisting_count` | integer | Pre-existing whole-repo findings (`in_diff == false`) |
+
+Repository-wide Loctree summaries are general context, not source-line findings.
+They remain available with the check results and as dashboard notes, but do not
+create a SARIF result or increase `findings_count`. Likewise, a Pytest failure
+without a parsed traceback location stays a general check signal; PRView does
+not borrow a path from test progress or startup output to manufacture a location.
+These exclusions do not remove the original check's failed/warning status or
+its policy evaluation.
+
+Located Pytest findings preserve the error excerpt and the file and line
+reported by the traceback. This is the location where failure was reported,
+not proof of its cause or that the PR introduced it. Their `in_diff` is `null`
+and their SARIF `properties.classification` is `unclassified`, even when the
+reported test file changed. The complete Pytest log remains the evidence source;
+the dashboard and narrative use a compact diagnostic excerpt instead of test
+startup/progress output.
+
+### SARIF result properties
+
+`30_context/INLINE_FINDINGS.sarif` carries the same tri-state on every result:
+
+| Property | Type | Notes |
+|---|---|---|
+| `properties.in_diff` | boolean \| null | `true` when the reported location is in a file this diff touches, `false` when it is outside, `null` when the origin was not established |
+| `properties.classification` | string | `introduced` (`in_diff == true`), `preexisting` (`in_diff == false`), `unclassified` (`in_diff == null`) |
+
+Outside Pytest, `introduced` is derived from the diff intersection alone: the
+tool reported the finding in a file this diff touches. That is a location
+signal, not a base-versus-target comparison, so it does not prove the change
+created the finding.
+
+`in_diff` was previously always a boolean; readers that assume that type must be
+updated. `classification` gained the `unclassified` value, so a consumer that
+matches on it needs a default branch. Neither `null` nor `unclassified` is a
+pass: they mean the origin of the finding is unknown, and the gate treats them
+like introduced findings rather than trusted pre-existing ones.
 
 `introduced_count + preexisting_count` may be less than `findings_count`: the
 split counts only operator findings with a known `in_diff` value, so the

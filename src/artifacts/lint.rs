@@ -1,10 +1,29 @@
-//! Diff-aware lint metrics (PRV-205).
+//! Lint view over the canonical findings model (PRV-205).
+//!
+//! This module owns no truth of its own. It regroups the rows the canonical
+//! findings model already emitted so the dashboard can show them per lint
+//! check; it never re-parses check output and never decides whether a finding
+//! was introduced by the reviewed change.
 
 use super::*;
 
 // ---------------------------------------------------------------------------
-// PRV-205: Diff-aware Lint Metrics
+// PRV-205: Lint findings projection
 // ---------------------------------------------------------------------------
+
+/// Did this lint check actually run?
+///
+/// `Skipped` and `Error` both mean no lint result was produced: an errored
+/// check failed to launch or crashed, so whatever it wrote is a runner
+/// diagnostic, not a verdict about the code. The renderer and this projection
+/// share the predicate so a card cannot say "not executed" while the section
+/// header counts a row from the same check.
+pub(crate) fn lint_check_executed(status: CheckStatus) -> bool {
+    matches!(
+        status,
+        CheckStatus::Passed | CheckStatus::Failed | CheckStatus::Warnings
+    )
+}
 
 /// Check if a check result is lint-related based on its name.
 pub(crate) fn is_lint_check(name: &str) -> bool {
@@ -19,143 +38,24 @@ pub(crate) fn is_lint_check(name: &str) -> bool {
         || lower.contains("stylelint")
 }
 
-/// Normalize a path extracted from lint output for comparison with diff file paths.
+/// Project canonical findings onto the lint checks that produced them.
 ///
-/// Handles:
-/// - Leading `./` and `/`
-/// - Absolute Unix paths (`/home/user/project/src/foo.rs` → `src/foo.rs`)
-/// - Windows paths (`C:\Users\...\src\foo.rs` → `src/foo.rs`)
-/// - Backslash → forward slash conversion
-pub(crate) fn normalize_lint_path(path: &str) -> String {
-    let mut p = path.trim().replace('\\', "/");
-
-    // Strip Windows drive letter prefix (e.g. `C:/`)
-    if p.len() >= 3
-        && p.as_bytes()[0].is_ascii_alphabetic()
-        && p.as_bytes()[1] == b':'
-        && p.as_bytes()[2] == b'/'
-    {
-        p = p[3..].to_string();
-    }
-
-    // Strip leading `./`
-    if let Some(rest) = p.strip_prefix("./") {
-        p = rest.to_string();
-    }
-
-    // Strip leading `/`
-    if let Some(rest) = p.strip_prefix('/') {
-        p = rest.to_string();
-    }
-
-    // Try to relativize deep absolute paths by stripping a long prefix up to
-    // a known project-root boundary.
-    // e.g. `/Users/dev/Git/myapp/src/app.ts` → `src/app.ts`
-    //
-    // We require the prefix before the marker to contain at least 2 path segments
-    // (i.e. at least 1 `/` in prefix) to avoid false positives on shallow relative paths
-    // like `src-tauri/src/lib.rs` (prefix "src-tauri" has 0 slashes → don't cut).
-    // Paths like `Users/dev/project/src/...` (prefix has 2+ slashes) get cut.
-    if p.contains('/') {
-        let markers = ["src/", "lib/", "app/", "pkg/", "crates/", "tests/", "test/"];
-        for marker in markers {
-            let needle = format!("/{marker}");
-            if let Some(idx) = p.find(&needle) {
-                let prefix = &p[..idx];
-                let prefix_depth = prefix.chars().filter(|&c| c == '/').count();
-                if prefix_depth >= 2 {
-                    return p[idx + 1..].to_string();
-                }
-            }
-        }
-    }
-
-    p
-}
-
-/// Parse lint output for file references (file:line patterns).
-/// Returns a list of normalized file paths found in the output.
-/// Each occurrence is counted separately (i.e. duplicates = multiple issues in same file).
+/// The only operation performed here is grouping and counting canonical rows by
+/// their canonical `in_diff` tri-state:
 ///
-/// Handles two output formats:
-/// 1. **Inline** (`file:line`): clippy, ruff, mypy, eslint --format=compact
-/// 2. **Block** (path on its own line, indented `line:col` below): eslint/stylelint default
-pub(crate) fn parse_lint_issues(output: &str) -> Vec<String> {
-    let mut results = Vec::new();
-
-    // Strategy 1: inline file:line pattern
-    // Handles clippy (`--> src/foo.rs:42:9`), ruff, mypy, eslint compact, Windows paths
-    let re_inline =
-        regex::Regex::new(r"(?m)(?:-->\s*)?([a-zA-Z0-9_.][a-zA-Z0-9_./\\\-]*\.[a-zA-Z0-9]+):(\d+)")
-            .expect("lint inline regex must compile");
-
-    for cap in re_inline.captures_iter(output) {
-        if let Some(file) = cap.get(1) {
-            let f = file.as_str();
-            // Skip version strings like `1.2.3:4`
-            if f.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                continue;
-            }
-            results.push(normalize_lint_path(f));
-        }
-    }
-
-    // Strategy 2: block format (eslint/stylelint default formatter)
-    // Path alone on a line, followed by indented `line:col  severity  message` lines
-    //
-    //   /Users/dev/project/src/app.tsx
-    //     10:5  warning  Unexpected console statement  no-console
-    //     25:1  error    Missing semicolon             semi
-    //
-    let re_block_path =
-        regex::Regex::new(r"(?m)^([a-zA-Z0-9_./\\\-][a-zA-Z0-9_./\\\- ]*\.[a-zA-Z0-9]+)\s*$")
-            .expect("lint block path regex must compile");
-    let re_block_issue =
-        regex::Regex::new(r"(?m)^\s+\d+:\d+\s+").expect("lint block issue regex must compile");
-
-    let lines: Vec<&str> = output.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if let Some(cap) = re_block_path.captures(line) {
-            let Some(path) = cap.get(1).map(|m| m.as_str()) else {
-                debug_assert!(false, "re_block_path must capture group 1");
-                continue;
-            };
-            // Verify next line(s) have indented line:col pattern (not a false positive)
-            let has_issues = lines
-                .get(i + 1)
-                .is_some_and(|next| re_block_issue.is_match(next));
-            if has_issues {
-                // Count each indented issue line under this path
-                for subsequent in &lines[i + 1..] {
-                    if re_block_issue.is_match(subsequent) {
-                        results.push(normalize_lint_path(path));
-                    } else if subsequent.trim().is_empty() {
-                        // Blank line ends this file's block
-                        break;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    results
-}
-
-/// Compute diff-aware lint metrics for all lint checks.
+/// - `Some(true)`  — the tool located the finding in a file this diff touches.
+///   That is a location signal, not evidence the change introduced it.
+/// - `Some(false)` — the tool located it outside the changed files.
+/// - `None`        — the canonical model could not establish the origin.
 ///
-/// For each lint check, parses its output for file references and classifies
-/// issues as "new" (file is in the diff) or "legacy" (file is not in the diff).
-pub(crate) fn compute_lint_metrics(checks: &[CheckResult], diffs: &[Diff]) -> Vec<LintMetrics> {
-    use crate::checks::CheckStatus;
-    use std::collections::{BTreeSet, HashSet};
-
-    // Collect all changed file paths from the diff
-    let changed_files: HashSet<String> = diffs
-        .iter()
-        .flat_map(|d| d.files.iter().map(|f| normalize_lint_path(&f.path)))
-        .collect();
+/// A lint check that did not execute (`Skipped`/`Error`) contributes no
+/// findings; its canonical status travels with the entry so the renderer can
+/// say "not executed" instead of "no findings".
+pub(crate) fn project_lint_metrics(
+    checks: &[CheckResult],
+    findings: &[DashboardFinding],
+) -> Vec<LintMetrics> {
+    use std::collections::BTreeSet;
 
     let mut metrics = Vec::new();
 
@@ -163,45 +63,47 @@ pub(crate) fn compute_lint_metrics(checks: &[CheckResult], diffs: &[Diff]) -> Ve
         if !is_lint_check(&check.name) {
             continue;
         }
-        // Skip checks in Error state — output may be garbage
-        if check.status == CheckStatus::Error {
-            continue;
-        }
 
-        let issue_files = parse_lint_issues(&check.output);
-        let total_issues = issue_files.len();
+        let check_id = crate::check_id::check_id_from_name(&check.name);
+        let mut findings_in_changed_files = 0usize;
+        let mut findings_outside_changed_files = 0usize;
+        let mut findings_origin_unknown = 0usize;
+        let mut total_findings = 0usize;
+        let mut changed_files: BTreeSet<String> = BTreeSet::new();
 
-        if total_issues == 0 {
-            // Lint check ran but found no issues — include as clean
-            metrics.push(LintMetrics {
-                check_name: check.name.clone(),
-                new_issues: 0,
-                legacy_issues: 0,
-                total_issues: 0,
-                changed_files_with_issues: Vec::new(),
-            });
-            continue;
-        }
+        // A check that did not execute contributes nothing to count. The
+        // canonical model still emits a generic row for an errored check —
+        // its runner or setup diagnostic — and counting that row produced an
+        // "origin unknown / 1 total" header above a card stating that no
+        // result was produced.
+        let countable: &[DashboardFinding] = if lint_check_executed(check.status) {
+            findings
+        } else {
+            &[]
+        };
 
-        let mut new_issues = 0usize;
-        let mut legacy_issues = 0usize;
-        let mut changed_with_issues: BTreeSet<String> = BTreeSet::new();
-
-        for file in &issue_files {
-            if changed_files.contains(file.as_str()) {
-                new_issues += 1;
-                changed_with_issues.insert(file.clone());
-            } else {
-                legacy_issues += 1;
+        for finding in countable.iter().filter(|f| f.check_id == check_id) {
+            total_findings += 1;
+            match finding.in_diff {
+                Some(true) => {
+                    findings_in_changed_files += 1;
+                    if let Some(file) = &finding.file {
+                        changed_files.insert(file.clone());
+                    }
+                }
+                Some(false) => findings_outside_changed_files += 1,
+                None => findings_origin_unknown += 1,
             }
         }
 
         metrics.push(LintMetrics {
             check_name: check.name.clone(),
-            new_issues,
-            legacy_issues,
-            total_issues,
-            changed_files_with_issues: changed_with_issues.into_iter().collect(),
+            status: check.status,
+            findings_in_changed_files,
+            findings_outside_changed_files,
+            findings_origin_unknown,
+            total_findings,
+            changed_files_with_findings: changed_files.into_iter().collect(),
         });
     }
 

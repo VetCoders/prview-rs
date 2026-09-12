@@ -363,6 +363,35 @@ fn finding_stats_from_output(output: &str) -> Option<FindingStats> {
     }
 }
 
+/// Count the same located diagnostics that feed Pytest SARIF. Progress paths,
+/// parameter values and an interrupted runner are not source findings.
+fn pytest_finding_stats_from_output(output: &str) -> Option<FindingStats> {
+    let findings = super::findings::parse_pytest_failures(output);
+    if findings.is_empty() {
+        return None;
+    }
+    let mut generated_paths_matched = BTreeSet::new();
+    let generated_path_findings = findings
+        .iter()
+        .filter(|finding| {
+            GENERATED_PATH_PREFIXES.iter().any(|prefix| {
+                if finding.file.contains(prefix) {
+                    generated_paths_matched.insert((*prefix).to_string());
+                    true
+                } else {
+                    false
+                }
+            })
+        })
+        .count();
+    Some(FindingStats {
+        total_findings: findings.len(),
+        real_findings: findings.len() - generated_path_findings,
+        generated_path_findings,
+        generated_paths_matched: generated_paths_matched.into_iter().collect(),
+    })
+}
+
 /// Compute finding stats for the semgrep check directly from its JSON output.
 ///
 /// The generic line-based [`finding_stats_from_output`] heuristic mis-counts
@@ -649,6 +678,13 @@ fn build_report(input: &ReportInput<'_>) -> Report {
         ..
     } = input;
 
+    // `ctx.findings` is already the operator-only list (see
+    // `DashboardContext::findings`): informational notes retain general check
+    // context but are not SARIF results. Counting it here — rather than
+    // re-deriving the set — is what keeps this number comparable with the run
+    // history and the previous-run delta, which count the same list.
+    let sarif_findings_count = ctx.findings.len();
+
     let diff_merge_base = diffs
         .first()
         .map(|diff| diff.base_commit_id.clone())
@@ -677,7 +713,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
 
     // -- gate --
     let review_caveats = if ctx.review_caveats.is_empty() {
-        let mut generated = build_review_caveats(&ctx.breaking, &ctx.coverage, ctx.findings.len());
+        let mut generated =
+            build_review_caveats(&ctx.breaking, &ctx.coverage, sarif_findings_count);
         generated.extend(cargo_audit_review_caveats(input.checks));
         generated
     } else {
@@ -772,10 +809,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
             };
 
             let error_excerpt = if matches!(c.status, CheckStatus::Failed | CheckStatus::Error) {
-                c.output.lines().find(|l| !l.trim().is_empty()).map(|l| {
-                    let end = l.floor_char_boundary(200);
-                    l[..end].to_string()
-                })
+                let excerpt = super::findings::check_failure_excerpt(c);
+                (!excerpt.is_empty()).then_some(excerpt)
             } else {
                 None
             };
@@ -822,6 +857,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                     // Semgrep emits JSON; count the `results` array directly so
                     // report.json cannot disagree with the scan log it links to.
                     semgrep_finding_stats_from_output(&c.output)
+                } else if id == "pytest" {
+                    pytest_finding_stats_from_output(&c.output)
                 } else {
                     finding_stats_from_output(&c.output)
                 },
@@ -1025,8 +1062,8 @@ fn build_report(input: &ReportInput<'_>) -> Report {
             changed_tests_path: "30_context/changed-tests.txt",
         },
         sarif: SarifSection {
-            findings_count: ctx.findings.len(),
-            sarif_path: if ctx.findings.is_empty() {
+            findings_count: sarif_findings_count,
+            sarif_path: if sarif_findings_count == 0 {
                 None
             } else {
                 Some("30_context/INLINE_FINDINGS.sarif")
@@ -1090,7 +1127,7 @@ fn build_report(input: &ReportInput<'_>) -> Report {
                 files_changed_report: None,
                 findings_count_sarif: disk.findings_count_sarif,
                 findings_count_gate: disk.findings_count_gate,
-                findings_count_report: Some(ctx.findings.len()),
+                findings_count_report: Some(sarif_findings_count),
                 breaking_count_signal: None,
                 breaking_count_report: None,
                 skipped_checks_gate: None,
@@ -1268,6 +1305,27 @@ Compiling prview v0.1.0\n";
     }
 
     #[test]
+    fn pytest_stats_count_diagnostics_instead_of_progress_paths() {
+        let progress = "===== test session starts =====\n\
+            tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+            tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n";
+        assert_eq!(pytest_finding_stats_from_output(progress), None);
+
+        let failures = format!(
+            "{progress}===== FAILURES =====\n\
+            _____ test_real_failure _____\n\
+            E   AssertionError: incorrect value\n\
+            tests/test_parser.py:42: AssertionError\n\
+            ===== short test summary info =====\n\
+            FAILED tests/test_parser.py::test_real_failure\n"
+        );
+        let stats = pytest_finding_stats_from_output(&failures).expect("one diagnostic");
+        assert_eq!(stats.total_findings, 1);
+        assert_eq!(stats.real_findings, 1);
+        assert_eq!(stats.generated_path_findings, 0);
+    }
+
+    #[test]
     fn semgrep_stats_count_results_array_not_json_noise() {
         // results:[] with PartialParsing errors must report ZERO findings, not
         // phantom counts scraped from `line`/`col` offsets in the error spans.
@@ -1439,6 +1497,54 @@ test result: FAILED. 0 passed; 1 failed
             entry["failed_tests"].as_array(),
             Some(&vec![serde_json::Value::String("tests::bad".to_string())])
         );
+
+        // Exercise the serialized report path as well as the parser. A
+        // progress-only process failure has no source findings, while a real
+        // assertion retains its evidence and location after startup noise.
+        for (output, has_diagnostic) in [
+            (
+                "===== test session starts =====\n\
+                 tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+                 tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n",
+                false,
+            ),
+            (
+                "===== test session starts =====\n\
+                 tests/test_parser.py::test_failed_setup_is_reported PASSED\n\
+                 ===== FAILURES =====\n\
+                 _____ test_real_failure _____\n\
+                 E   AssertionError: incorrect value\n\
+                 tests/test_parser.py:42: AssertionError\n",
+                true,
+            ),
+        ] {
+            let pytest_checks = [CheckResult {
+                name: "Pytest".to_string(),
+                status: CheckStatus::Failed,
+                duration: Duration::ZERO,
+                output: output.to_string(),
+                cached: false,
+                provenance: None,
+            }];
+            let pytest_input = ReportInput {
+                checks: &pytest_checks,
+                ..input
+            };
+            let payload = serde_json::to_value(build_report(&pytest_input)).expect("report JSON");
+            let entry = &payload["checks"][0];
+            assert_eq!(entry["status"], "FAIL");
+            let excerpt = entry["error_excerpt"].as_str().expect("failure context");
+            assert!(!excerpt.contains("PASSED"));
+            assert!(!excerpt.contains("test session starts"));
+            if has_diagnostic {
+                assert!(excerpt.contains("tests/test_parser.py:42"));
+                assert!(excerpt.contains("AssertionError: incorrect value"));
+                assert_eq!(entry["finding_stats"]["real_findings"], 1);
+            } else {
+                assert!(excerpt.contains("cause is unknown"));
+                assert!(entry.get("finding_stats").is_none());
+            }
+        }
     }
 
     #[test]
@@ -2033,6 +2139,123 @@ test result: FAILED. 0 passed; 1 failed
             non_code_count: 0,
             ghost_tests: vec![],
         }
+    }
+
+    fn report_with_general_notes(include_located_failure: bool) -> serde_json::Value {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context_dir = tmp.path().join("30_context");
+        let summary_dir = tmp.path().join("00_summary");
+        std::fs::create_dir_all(&context_dir).unwrap();
+        std::fs::create_dir_all(&summary_dir).unwrap();
+        let mut checks = vec![CheckResult {
+            name: "heuristics_loctree".into(),
+            status: CheckStatus::Warnings,
+            duration: std::time::Duration::ZERO,
+            output: "9 dead exports; 8 unused symbols".into(),
+            cached: false,
+            provenance: None,
+        }];
+        if include_located_failure {
+            checks.push(CheckResult {
+                name: "Pytest".into(),
+                status: CheckStatus::Failed,
+                duration: std::time::Duration::ZERO,
+                output: "===== FAILURES =====\n_____ test_parser _____\nE   AssertionError: unexpected input\ntests/test_parser.py:42: AssertionError\n".into(),
+                cached: false,
+                provenance: None,
+            });
+        }
+        let inline = crate::artifacts::findings::generate_inline_findings(
+            &context_dir,
+            &checks,
+            &[],
+            None,
+            None,
+        )
+        .expect("generate findings");
+        std::fs::write(
+            summary_dir.join("MERGE_GATE.json"),
+            serde_json::to_string(&serde_json::json!({
+                "inline_findings": {"findings_count": inline.findings_count}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut ctx = skip_as_zero_ctx(coverage_delta(0, 0, None));
+        // Build the context the way `build_dashboard_context` does: the
+        // operator-finding list, not the raw summary. Copying the unfiltered
+        // rows here would make the fixture report a number no production run
+        // can produce.
+        ctx.findings = crate::artifacts::findings::operator_findings(&inline.dashboard_findings);
+        let config = crate::config::test_config();
+        let target = ResolvedRef {
+            name: "feature/findings".into(),
+            commit_id: "deadbeef".into(),
+            is_remote: false,
+        };
+        let report = build_report(&ReportInput {
+            dir: tmp.path(),
+            config: &config,
+            diffs: &[],
+            checks: &checks,
+            resolved_target: &target,
+            resolved_bases: &[],
+            ctx: &ctx,
+            run_started_at: "2026-09-09T00:00:00Z",
+            heuristics: None,
+            regression: None,
+            provenance: &ProvenanceConsistency::default(),
+        });
+        let report = serde_json::to_value(report).expect("serialize report");
+
+        // `quality.sarif.findings_count` describes the SARIF artifact, so it has
+        // to equal the number of results that file actually carries. Notes are
+        // canonical evidence about the run, not SARIF results, so they are
+        // absent from both sides of this equality.
+        let sarif_path = context_dir.join("INLINE_FINDINGS.sarif");
+        let emitted: usize = if sarif_path.exists() {
+            let sarif: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&sarif_path).expect("read sarif"))
+                    .expect("parse sarif");
+            sarif["runs"]
+                .as_array()
+                .map(|runs| {
+                    runs.iter()
+                        .map(|run| run["results"].as_array().map_or(0, |r| r.len()))
+                        .sum()
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        assert_eq!(
+            report["quality"]["sarif"]["findings_count"].as_u64(),
+            Some(emitted as u64),
+            "the reported count must match the results the SARIF file carries"
+        );
+
+        report
+    }
+
+    #[test]
+    fn report_sarif_note_only_has_no_results_or_missing_artifact_link() {
+        let report = report_with_general_notes(false);
+        assert_eq!(report["quality"]["sarif"]["findings_count"], 0);
+        assert!(report["quality"]["sarif"]["sarif_path"].is_null());
+        assert_eq!(report["quality"]["consistency"]["consistent"], true);
+        let caveats = report["gate"]["review_caveats"].to_string();
+        assert!(!caveats.contains("inline"));
+    }
+
+    #[test]
+    fn report_sarif_mixed_notes_and_failures_count_only_emitted_results() {
+        let report = report_with_general_notes(true);
+        assert_eq!(report["quality"]["sarif"]["findings_count"], 1);
+        assert_eq!(
+            report["quality"]["sarif"]["sarif_path"],
+            "30_context/INLINE_FINDINGS.sarif"
+        );
+        assert_eq!(report["quality"]["consistency"]["consistent"], true);
     }
 
     #[test]

@@ -234,11 +234,7 @@ fn reviewed_cargo_jobs_limit(
         .ancestors()
         .map(|ancestor| ancestor.join(".cargo"))
         .collect();
-    if let Some(cargo_home) = cargo_home {
-        directories.push(cargo_home.to_path_buf());
-    } else {
-        return None;
-    }
+    directories.push(cargo_home?.to_path_buf());
 
     let mut visited = std::collections::BTreeSet::new();
     for directory in directories {

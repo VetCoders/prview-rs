@@ -21,6 +21,9 @@ pub(crate) struct DashboardFinding {
     pub check_id: String,
     pub message: String,
     pub in_diff: Option<bool>,
+    /// Source location reported by the tool, never inferred from a log filename.
+    pub file: Option<String>,
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +131,8 @@ pub(crate) enum MergeDecisionState {
 impl MergeDecisionState {
     pub(crate) fn hero_class(self) -> &'static str {
         match self {
-            MergeDecisionState::Allow | MergeDecisionState::AllowWithReview => "merge-allow",
+            MergeDecisionState::Allow => "merge-allow",
+            MergeDecisionState::AllowWithReview => "merge-review",
             MergeDecisionState::Hold => "merge-hold",
             MergeDecisionState::Block => "merge-block",
         }
@@ -1866,6 +1870,8 @@ mod tests {
 
     fn out_of_diff_finding(check_id: &str) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),
@@ -1876,6 +1882,8 @@ mod tests {
 
     fn in_diff_finding(check_id: &str) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),
@@ -1931,6 +1939,8 @@ mod tests {
 
     fn unlocated_finding(check_id: &str) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),

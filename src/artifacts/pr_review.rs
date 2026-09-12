@@ -64,7 +64,7 @@ pub(crate) fn generate_pr_review(
     )?;
     writeln!(
         md,
-        "> **Commits:** {} \u{2022} **Files:** {} \u{2022} **Code:** {} \u{2022} **Tests:** {} \u{2022} **Non-code:** {}",
+        "> **Commits:** {} \u{2022} **Files:** {} \u{2022} **Code (excluding tests):** {} \u{2022} **Tests:** {} \u{2022} **Non-code:** {}",
         commit_count, files_changed, code_files, test_files, non_code_files
     )?;
     writeln!(md, "> **Generated:** {}", timestamp)?;
@@ -85,7 +85,7 @@ pub(crate) fn generate_pr_review(
     writeln!(md, "| Commits | {} |", commit_count)?;
     writeln!(md, "| Files changed | {} |", files_changed)?;
     writeln!(md, "| Diff | {} |", diff_stat_line)?;
-    writeln!(md, "| Code files | {} |", code_files)?;
+    writeln!(md, "| Code files (excluding tests) | {} |", code_files)?;
     writeln!(md, "| Test files | {} |", test_files)?;
     writeln!(md, "| Non-code files | {} |", non_code_files)?;
     writeln!(md)?;
@@ -226,14 +226,7 @@ pub(crate) fn generate_pr_review(
         writeln!(md, "|------|--------|---------|")?;
         for c in &diff.commits {
             let cc_type = classify_commit_type(&c.message);
-            let msg: String = c
-                .message
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(72)
-                .collect();
+            let msg = c.message.lines().next().unwrap_or("").replace('|', "\\|");
             writeln!(md, "| `{}` | `{}` | {} |", cc_type, c.short_id, msg)?;
         }
         writeln!(md)?;
@@ -392,7 +385,7 @@ pub(crate) fn generate_pr_review(
         }
     }
 
-    let quick_wins = collect_quick_wins(config, checks, exact_twins);
+    let quick_wins = collect_quick_wins(config, checks);
     if !quick_wins.is_empty() {
         writeln!(md, "## Quick Wins")?;
         writeln!(md)?;

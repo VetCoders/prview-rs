@@ -39,16 +39,24 @@ pub(crate) struct FlakyCheckScore {
     pub confidence: &'static str,
 }
 
-/// PRV-205: Diff-aware lint metrics for a single lint check.
+/// PRV-205: Lint view over the canonical findings of a single lint check.
 ///
-/// Issues are classified as "new" (in changed files) vs "legacy" (pre-existing)
-/// based on cross-referencing lint output file paths with the diff file list.
+/// Every field here is a regrouping of rows the canonical model already
+/// produced — the dashboard neither re-parses check output nor decides the
+/// origin of a finding. `in_diff` is the canonical tri-state: `Some(true)` =
+/// the tool reported the finding in a file this diff touches (a location
+/// signal, not proof the PR introduced it), `Some(false)` = outside the changed
+/// files, `None` = the canonical model left the origin unknown.
 pub(crate) struct LintMetrics {
     pub check_name: String,
-    pub new_issues: usize,
-    pub legacy_issues: usize,
-    pub total_issues: usize,
-    pub changed_files_with_issues: Vec<String>,
+    /// Canonical check status, rendered 1:1 — a skipped or errored check is
+    /// never folded into a "no findings" statement.
+    pub status: crate::checks::CheckStatus,
+    pub findings_in_changed_files: usize,
+    pub findings_outside_changed_files: usize,
+    pub findings_origin_unknown: usize,
+    pub total_findings: usize,
+    pub changed_files_with_findings: Vec<String>,
 }
 
 /// All extra data the dashboard needs beyond Config/Diff/CheckResult/Heuristics.
@@ -73,6 +81,22 @@ pub(crate) struct DashboardContext {
     pub breaking: Vec<BreakingFinding>,
     pub rust_api_delta: Option<api_delta::ApiArtifactView>,
     pub coverage: CoverageDelta,
+    /// Operator findings only — the canonical rows that pass
+    /// [`super::findings::is_operator_finding`], filtered exactly once when
+    /// this context is built. Populate it with
+    /// [`super::findings::operator_findings`]; that is also the set emitted as
+    /// SARIF results, so the count cannot describe a file that carries
+    /// something else.
+    ///
+    /// Informational notes (a Cargo audit baseline row, a Loctree repository
+    /// summary) are evidence about the run, not diagnostics, and never enter
+    /// this list. That matters because the same list feeds three comparable
+    /// numbers: `report.json`'s `quality.sarif.findings_count`, the synthetic
+    /// current row in the run history, and the previous-run delta. Counting a
+    /// note in one of them and not in the others turned an unchanged run into
+    /// a worsening trend. Consumers must count this list, never re-filter it
+    /// and never fall back to the unfiltered
+    /// `InlineFindingsSummary::dashboard_findings`.
     pub findings: Vec<DashboardFinding>,
     pub per_file_diff_files: Vec<String>,
     pub skipped_checks: Vec<crate::checks::SkippedCheck>,
@@ -225,12 +249,10 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
     // in the three an operator actually reads.
     review_caveats.extend(provenance.review_caveats());
 
-    let findings = inline
-        .dashboard_findings
-        .iter()
-        .filter(|finding| is_operator_finding(finding))
-        .cloned()
-        .collect::<Vec<_>>();
+    // The single application of the operator predicate. Everything downstream
+    // — report.json, the run-history row below, and the previous-run delta —
+    // counts this list, so the three numbers stay comparable across runs.
+    let findings = findings::operator_findings(&inline.dashboard_findings);
     // Discover per-file diff files
     let per_file_dir = diff_dir.join("per-file-diffs");
     let per_file_diff_files = if per_file_dir.exists() {
@@ -281,6 +303,9 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
                 .filter(|c| c.status == crate::checks::CheckStatus::Warnings)
                 .count(),
             quality_pass,
+            // Same list, same predicate as `quality.sarif.findings_count` in
+            // report.json — which is what `load_run_history` reads back for
+            // every earlier run.
             findings_count: findings.len(),
         };
         run_history.retain(|r| r.timestamp != current_ts);
@@ -290,8 +315,9 @@ pub(crate) fn build_dashboard_context(input: DashboardContextInput<'_>) -> Dashb
     // PRV-204: Compute flaky scores from historical per-check data
     let flaky_scores = compute_flaky_scores(out_dir, 20);
 
-    // PRV-205: Compute diff-aware lint metrics
-    let lint_metrics = compute_lint_metrics(checks, diffs);
+    // PRV-205: Project the canonical findings onto the lint checks that
+    // produced them. No counting or classification happens in this layer.
+    let lint_metrics = project_lint_metrics(checks, &findings);
 
     // B4: Compute file risk scores
     let risk_scores = signal::compute_file_risk_scores_with_api(

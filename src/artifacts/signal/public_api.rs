@@ -268,12 +268,28 @@ pub fn write_public_api_diff(
                 )
         })
     });
-    let msg = format!(
+    let mut msg = format!(
         "Public API changed: {} new, {} removed, {} modified",
         diff.added.len(),
         diff.removed.len(),
         diff.changed.len()
     );
+    let unknowns = public_api_unknowns(&diff);
+    if !unknowns.is_empty() {
+        msg = format!(
+            "Public API analysis incomplete: {} unknown region(s); known changes: {} new, {} removed, {} modified. {}",
+            unknowns.len(),
+            diff.added.len(),
+            diff.removed.len(),
+            diff.changed.len(),
+            unknowns
+                .iter()
+                .filter_map(|finding| finding.unknown_reason.as_deref())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
 
     Ok(Some(CheckResult {
         name: "public_api_diff".to_string(),
@@ -287,6 +303,17 @@ pub fn write_public_api_diff(
         cached: false,
         provenance: None,
     }))
+}
+
+fn public_api_unknowns(diff: &PublicApiDiff) -> Vec<&ApiDeltaFinding> {
+    diff.rust_api_delta
+        .iter()
+        .flat_map(|view| &view.findings)
+        .filter(|finding| {
+            finding.kind == ApiDeltaKind::Unknown
+                || finding.confidence == ApiDeltaConfidence::Unknown
+        })
+        .collect()
 }
 
 fn project_rust_finding_for_legacy_fields(diff: &mut PublicApiDiff, finding: &ApiDeltaFinding) {
@@ -600,6 +627,26 @@ fn format_public_api_diff(diff: &PublicApiDiff) -> String {
         );
     }
 
+    let unknowns = public_api_unknowns(diff);
+    if !unknowns.is_empty() {
+        let _ = writeln!(
+            md,
+            "## Analysis incomplete\n\n{} unknown region(s). Counts above describe known facts only; they do not establish that the remaining API is unchanged.\n",
+            unknowns.len()
+        );
+        for finding in unknowns {
+            let _ = writeln!(
+                md,
+                "- {}",
+                finding
+                    .unknown_reason
+                    .as_deref()
+                    .unwrap_or("Rust API evidence is unavailable for this region.")
+            );
+        }
+        let _ = writeln!(md);
+    }
+
     if !diff.added.is_empty() {
         let _ = writeln!(md, "## Added ({} elements)", diff.added.len());
         for item in &diff.added {
@@ -643,6 +690,85 @@ fn format_public_api_diff(diff: &PublicApiDiff) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn public_api_unknown_timeout_is_incomplete_with_known_counts_preserved() {
+        use super::super::api_delta::{ApiArtifactViewKind, ApiDeltaCounts, ApiIdentity};
+        let reason = "Rust API analysis timed out after 30 seconds";
+        let view = ApiArtifactView {
+            view: ApiArtifactViewKind::PublicApiDiff,
+            analysis_source: REPO_BACKED_RUST_API_SOURCE,
+            base_revision: "base".into(),
+            target_revision: "target".into(),
+            counts: ApiDeltaCounts {
+                added: 0,
+                removed: 0,
+                changed: 0,
+                relocated: 0,
+                visibility_changed: 0,
+                unknown: 1,
+            },
+            findings: vec![ApiDeltaFinding {
+                id: "unknown:timeout".into(),
+                kind: ApiDeltaKind::Unknown,
+                identity: ApiIdentity {
+                    crate_name: "fixture".into(),
+                    module_path: vec![],
+                    namespace: "unknown".into(),
+                    name: "timeout".into(),
+                    cfg_region: vec![],
+                },
+                before: None,
+                after: None,
+                analysis_source: REPO_BACKED_RUST_API_SOURCE,
+                confidence: ApiDeltaConfidence::Unknown,
+                evidence: vec![],
+                unknown_reason: Some(reason.into()),
+                unknown_source: None,
+            }],
+        };
+        for with_known_change in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let diff = PublicApiDiff {
+                added: if with_known_change {
+                    vec![ApiFinding {
+                        file: "src/api.ts".into(),
+                        symbol_type: "export".into(),
+                        signature: "export function known() {}".into(),
+                    }]
+                } else {
+                    vec![]
+                },
+                removed: vec![],
+                changed: vec![],
+                analysis_source: None,
+                rust_api_delta: None,
+            };
+            let check = write_public_api_diff(tmp.path(), diff, Some(&view))
+                .unwrap()
+                .unwrap();
+            assert_eq!(check.status, CheckStatus::Warnings);
+            assert!(check.output.starts_with("Public API analysis incomplete:"));
+            assert!(check.output.contains(reason));
+            assert!(check.output.contains(&format!(
+                "known changes: {} new",
+                usize::from(with_known_change)
+            )));
+            assert!(!check.output.contains("Public API changed:"));
+            let md = fs::read_to_string(tmp.path().join("PUBLIC_API_DIFF.md")).unwrap();
+            assert!(md.contains("## Analysis incomplete"));
+            assert!(md.contains(reason));
+            let json: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(tmp.path().join("PUBLIC_API_DIFF.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(json["rust_api_delta"]["counts"]["unknown"], 1);
+            assert_eq!(
+                json["added"].as_array().unwrap().len(),
+                usize::from(with_known_change)
+            );
+        }
+    }
 
     #[test]
     fn public_api_diff_detects_additions() {

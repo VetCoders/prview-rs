@@ -333,7 +333,7 @@ fn cancellation_injection_stops_every_artifact_generation_seam() {
     let publication_home = tempfile::tempdir().expect("publication home");
     let _publication_home =
         crate::config::override_test_prview_home(publication_home.path().to_path_buf());
-    assert_eq!(ArtifactGenerationSeam::ALL.len(), 22);
+    assert_eq!(ArtifactGenerationSeam::ALL.len(), 23);
     let unique_labels: std::collections::HashSet<_> = ArtifactGenerationSeam::ALL
         .iter()
         .map(|seam| seam.label())
@@ -781,19 +781,30 @@ async fn cancellation_during_shared_snapshot_cleanup_never_publishes_the_pack() 
     std::fs::set_permissions(&shim, permissions).unwrap();
 
     let governor = Arc::new(crate::governor::ResourceGovernor::new());
+    let (generation_complete, generation_finished) = std::sync::mpsc::channel();
     let canceller = {
         let governor = Arc::clone(&governor);
         let pids = pids.clone();
         std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // Allow the preceding pack generation to finish, but retain a
+            // finite fixture deadline and cancel owned work if it expires.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while crate::proc::read_published_unix_pids(&pids, 2).is_none() {
+                if std::time::Instant::now() >= deadline {
+                    governor.cancel();
+                    return Err("snapshot cleanup did not start within 30s");
+                }
                 assert!(
-                    std::time::Instant::now() < deadline,
-                    "snapshot cleanup never spawned its governed git child"
+                    matches!(
+                        generation_finished.try_recv(),
+                        Err(std::sync::mpsc::TryRecvError::Empty)
+                    ),
+                    "generation ended before snapshot cleanup published its governed git child"
                 );
                 std::thread::sleep(Duration::from_millis(5));
             }
             governor.cancel();
+            Ok(())
         })
     };
     let _git = crate::git::override_test_git_program(shim);
@@ -811,7 +822,10 @@ async fn cancellation_during_shared_snapshot_cleanup_never_publishes_the_pack() 
         })
     })
     .await;
-    canceller.join().unwrap();
+    // Also wake the observer if generation fails or skips cleanup: absence of
+    // the expected child must fail the test rather than leave the join waiting.
+    let _ = generation_complete.send(());
+    canceller.join().unwrap().expect("bounded cleanup observer");
 
     let error = result.expect_err("cancelled cleanup must abort before publication");
     assert!(crate::governor::is_cancellation(&error), "{error:#}");
@@ -901,6 +915,13 @@ fn artifact_generation_registry_is_exact_and_success_path_reaches_every_seam() {
     );
     assert!(!output_dir.join("00_summary/INCOMPLETE.json").exists());
     for relative in CANCELLED_GENERATION_SUCCESS_SURFACES {
+        if relative == "review.html" {
+            assert!(
+                !output_dir.join(relative).exists(),
+                "dashboard is the only default HTML"
+            );
+            continue;
+        }
         assert!(
             output_dir.join(relative).exists(),
             "positive control did not publish {relative}"
@@ -942,6 +963,13 @@ fn cancellation_after_durable_publication_commit_does_not_relabel_the_run() {
     );
     assert!(!output_dir.join("00_summary/INCOMPLETE.json").exists());
     for relative in CANCELLED_GENERATION_SUCCESS_SURFACES {
+        if relative == "review.html" {
+            assert!(
+                !output_dir.join(relative).exists(),
+                "dashboard is the only default HTML"
+            );
+            continue;
+        }
         assert!(
             output_dir.join(relative).exists(),
             "completed publication lost {relative} after its commit point"
@@ -2924,6 +2952,8 @@ fn merge_gate_surfaces_review_caveats_when_merge_needs_review() {
         status: "warnings".to_string(),
         findings_count: 1,
         dashboard_findings: vec![DashboardFinding {
+            file: None,
+            line: None,
             level: "warning",
             check_name: "heuristics_loctree".to_string(),
             check_id: "heuristics_loctree".to_string(),
@@ -3028,6 +3058,8 @@ fn build_review_caveats_include_orphaned_test_candidates() {
 fn merge_gate_splits_introduced_and_preexisting_inline_findings() {
     let config = create_test_config(PolicyConfig::default());
     let mk = |in_diff: bool| DashboardFinding {
+        file: None,
+        line: None,
         level: "warning",
         check_name: "Semgrep scan".to_string(),
         check_id: "semgrep_scan".to_string(),
@@ -3224,6 +3256,8 @@ fn merge_gate_reason_mentions_preexisting_failures_under_merge_with_review() {
         status: "warnings".to_string(),
         findings_count: 1,
         dashboard_findings: vec![DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "ESLint".to_string(),
             check_id: "eslint".to_string(),
@@ -4776,7 +4810,7 @@ fn generate_ai_index_writes_reading_order_and_verdict() {
     // Lists artifacts that exist.
     assert!(index.contains("00_summary/MERGE_GATE.json"));
     assert!(index.contains("report.json"));
-    assert!(index.contains("review.html"));
+    assert!(!index.contains("review.html"));
     // The HTML dashboard is a key human artifact and is listed when present
     // (PR #10 review by @gemini-code-assist).
     assert!(index.contains("dashboard.html"));
@@ -4820,6 +4854,68 @@ fn standard_review_html_is_generated_from_pack_markdown() {
     assert!(html.contains("review required"));
     assert!(html.contains("dashboard.html"));
     assert!(html.contains("cargo test failed"));
+}
+
+#[test]
+fn review_html_renders_the_gate_verdict_verbatim() {
+    // A verdict the gate could not reach is not a pass. The standard export
+    // must repeat exactly what the canonical gate decided and must never
+    // upgrade an absent or unavailable verdict into a passing badge.
+    for (verdict, expected_class) in [
+        ("ALLOW", "v-pass"),
+        ("BLOCK", "v-block"),
+        ("CONDITIONAL", "v-warn"),
+        ("HOLD", "v-hold"),
+        ("UNAVAILABLE", "v-hold"),
+        ("NOT_RUN", "v-hold"),
+        ("SKIPPED", "v-hold"),
+        ("UNKNOWN", "v-hold"),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path();
+        fs::create_dir_all(out.join("00_summary")).expect("create 00_summary");
+        fs::write(
+            out.join("00_summary/MERGE_GATE.json"),
+            format!(
+                r#"{{"decision":{{"verdict":"{verdict}","decision_reason":"recorded reason"}}}}"#
+            ),
+        )
+        .expect("write MERGE_GATE.json");
+
+        generate_standard_review_html(out).expect("generate_standard_review_html");
+        let html = fs::read_to_string(out.join("review.html")).expect("read review.html");
+
+        assert!(
+            html.contains(&format!(
+                r#"<span class="badge {expected_class}">{verdict}</span>"#
+            )),
+            "`{verdict}` must render verbatim with class `{expected_class}`"
+        );
+        if expected_class != "v-pass" {
+            assert!(
+                !html.contains(r#"<span class="badge v-pass">"#),
+                "`{verdict}` must not be rendered as a passing verdict"
+            );
+        }
+    }
+}
+
+#[test]
+fn review_html_states_a_missing_gate_instead_of_assuming_one() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = tmp.path();
+
+    generate_standard_review_html(out).expect("generate_standard_review_html");
+    let html = fs::read_to_string(out.join("review.html")).expect("read review.html");
+
+    assert!(
+        html.contains(r#"<span class="badge v-hold">UNKNOWN</span>"#),
+        "a missing MERGE_GATE.json is an unknown verdict, not a pass"
+    );
+    assert!(
+        html.contains("No gate reason recorded"),
+        "the export must say the reason is missing"
+    );
 }
 
 #[test]
@@ -4873,6 +4969,7 @@ fn pr_review_counts_code_test_and_non_code_separately() {
     use crate::git::{DiffStats, FileChange, FileStatus};
     use crate::heuristics::{DeadParrot, HeuristicsResult, LoctreeAnalysis, TwinsAnalysis};
 
+    let commit_subject = "fix: preserve the complete and unusually long commit subject explaining the parser behavior | including the final words";
     let diffs = vec![Diff {
         base: "main".to_string(),
         target: "feature".to_string(),
@@ -4910,7 +5007,14 @@ fn pr_review_counts_code_test_and_non_code_separately() {
             deletions: 6,
             copied: 0,
         },
-        commits: vec![],
+        commits: vec![crate::git::CommitInfo {
+            id: "abcdef".to_string(),
+            short_id: "abcdef".to_string(),
+            author: "Author".to_string(),
+            email: "author@example.test".to_string(),
+            date: "2026-09-09".to_string(),
+            message: commit_subject.to_string(),
+        }],
     }];
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -4918,6 +5022,12 @@ fn pr_review_counts_code_test_and_non_code_separately() {
     let heuristics = HeuristicsResult {
         loctree: Some(LoctreeAnalysis {
             twins: TwinsAnalysis {
+                exact_twins: serde_json::from_value(serde_json::json!([{
+                    "file_a": "untouched/one.py",
+                    "file_b": "untouched/two.py",
+                    "symbol": "helper"
+                }]))
+                .expect("twin fixture"),
                 dead_parrots: vec![DeadParrot {
                     file: "src/lib.rs".to_string(),
                     symbol: "unused_helper".to_string(),
@@ -4952,7 +5062,11 @@ fn pr_review_counts_code_test_and_non_code_separately() {
     .expect("pr review");
     let content = std::fs::read_to_string(tmp.path().join("PR_REVIEW.md")).expect("read");
 
-    assert!(content.contains("**Code:** 1"));
+    assert!(content.contains(&commit_subject.replace('|', "\\|")));
+    assert!(!content.contains("low-risk"));
+    assert!(!content.contains("dedup wins"));
+    assert!(content.contains("| Code files (excluding tests) | 1 |"));
+    assert!(content.contains("**Code (excluding tests):** 1"));
     assert!(content.contains("**Tests:** 1"));
     assert!(content.contains("**Non-code:** 2"));
     assert!(content.contains("| Non-code files | 2 |"));
@@ -4962,7 +5076,7 @@ fn pr_review_counts_code_test_and_non_code_separately() {
             .contains("Hotspots: 1 file(s) crossed the hotspot threshold (`>=80` changed lines).")
     );
     assert!(content.contains("Top hotspots: `tests/integration.rs` (80)"));
-    assert!(content.contains("Loctree twins: 0 exact twin pair(s) and 1 unused symbol(s)."));
+    assert!(content.contains("Loctree twins: 1 exact twin pair(s) and 1 unused symbol(s)."));
 }
 
 #[test]
@@ -5397,7 +5511,7 @@ fn test_codeowners_pattern_directory_slash() {
 #[test]
 fn test_codeowners_pattern_directory_star() {
     assert!(codeowners_pattern_matches("docs/*", "docs/README.md"));
-    assert!(codeowners_pattern_matches("docs/*", "docs/api/index.html"));
+    assert!(!codeowners_pattern_matches("docs/*", "docs/api/index.html"));
     assert!(!codeowners_pattern_matches(
         "docs/*",
         "documentation/file.md"
@@ -5407,7 +5521,8 @@ fn test_codeowners_pattern_directory_star() {
 #[test]
 fn test_codeowners_pattern_exact_match() {
     assert!(codeowners_pattern_matches("Cargo.toml", "Cargo.toml"));
-    assert!(!codeowners_pattern_matches("Cargo.toml", "src/Cargo.toml"));
+    assert!(codeowners_pattern_matches("Cargo.toml", "src/Cargo.toml"));
+    assert!(!codeowners_pattern_matches("/Cargo.toml", "src/Cargo.toml"));
 }
 
 #[test]
@@ -5635,64 +5750,6 @@ fn test_flaky_scores_sorted_by_score_descending() {
     );
 }
 
-// -----------------------------------------------------------------------
-// PRV-205: Lint metrics tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_parse_lint_issues_clippy_output() {
-    let output = r#"warning: unused variable `x`
-  --> src/foo.rs:42:9
-   |
-42 |     let x = 5;
-   |         ^ help: if this is intentional, prefix it with an underscore
-
-warning: unused import: `std::io`
-  --> src/bar.rs:3:5
-   |
-3  | use std::io;
-   |     ^^^^^^^
-"#;
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 2);
-    assert!(issues.contains(&"src/foo.rs".to_string()));
-    assert!(issues.contains(&"src/bar.rs".to_string()));
-}
-
-#[test]
-fn test_parse_lint_issues_eslint_output() {
-    let output = r#"/home/user/project/src/app.js:10:5: warning 'foo' is defined but never used
-/home/user/project/src/utils.ts:25:1: error Missing semicolon
-src/index.tsx:3:8: warning Unexpected console statement
-"#;
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 3);
-    // Full paths get normalized but keep structure
-    assert!(issues.iter().any(|p| p.contains("app.js")));
-    assert!(issues.iter().any(|p| p.contains("utils.ts")));
-    assert!(issues.iter().any(|p| p.contains("index.tsx")));
-}
-
-#[test]
-fn test_parse_lint_issues_ruff_output() {
-    let output = r#"src/foo.py:15:1: E501 Line too long (120 > 79)
-src/bar.py:8:1: F401 `os` imported but unused
-"#;
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 2);
-    assert!(issues.contains(&"src/foo.py".to_string()));
-    assert!(issues.contains(&"src/bar.py".to_string()));
-}
-
-#[test]
-fn test_parse_lint_issues_empty_output() {
-    let issues = parse_lint_issues("");
-    assert!(issues.is_empty());
-
-    let issues2 = parse_lint_issues("All checks passed!\n");
-    assert!(issues2.is_empty());
-}
-
 #[test]
 fn test_build_regression_patch_text_is_none_when_empty() {
     assert_eq!(build_regression_patch_text(&[]), None);
@@ -5711,145 +5768,9 @@ fn test_build_regression_patch_text_truncates_on_char_boundary_and_appends_note(
     assert!(built.is_char_boundary(prefix.len()));
 }
 
-#[test]
-fn test_compute_lint_metrics_all_new() {
-    use crate::git::{Diff, DiffStats, FileChange, FileStatus};
-
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Warnings,
-        duration: Duration::from_secs(5),
-        output: "warning: unused\n  --> src/main.rs:10:5\nwarning: unused\n  --> src/lib.rs:20:1\n"
-            .into(),
-        cached: false,
-        provenance: None,
-    }];
-    let diffs = vec![Diff {
-        base: "main".into(),
-        target: "feature/x".into(),
-        base_commit_id: "aaa".into(),
-        target_commit_id: "bbb".into(),
-        files: vec![
-            FileChange {
-                path: "src/main.rs".into(),
-                status: FileStatus::Modified,
-                additions: 10,
-                deletions: 2,
-            },
-            FileChange {
-                path: "src/lib.rs".into(),
-                status: FileStatus::Modified,
-                additions: 5,
-                deletions: 1,
-            },
-        ],
-        stats: DiffStats {
-            files_changed: 2,
-            additions: 15,
-            deletions: 3,
-            copied: 0,
-        },
-        commits: vec![],
-    }];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].check_name, "cargo clippy");
-    assert_eq!(metrics[0].new_issues, 2);
-    assert_eq!(metrics[0].legacy_issues, 0);
-    assert_eq!(metrics[0].total_issues, 2);
-    assert_eq!(metrics[0].changed_files_with_issues.len(), 2);
-}
-
-#[test]
-fn test_compute_lint_metrics_mixed_new_and_legacy() {
-    use crate::git::{Diff, DiffStats, FileChange, FileStatus};
-
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Warnings,
-        duration: Duration::from_secs(5),
-        output:
-            "warning: unused\n  --> src/main.rs:10:5\nwarning: unused\n  --> src/legacy.rs:20:1\n"
-                .into(),
-        cached: false,
-        provenance: None,
-    }];
-    let diffs = vec![Diff {
-        base: "main".into(),
-        target: "feature/x".into(),
-        base_commit_id: "aaa".into(),
-        target_commit_id: "bbb".into(),
-        files: vec![FileChange {
-            path: "src/main.rs".into(),
-            status: FileStatus::Modified,
-            additions: 10,
-            deletions: 2,
-        }],
-        stats: DiffStats {
-            files_changed: 1,
-            additions: 10,
-            deletions: 2,
-            copied: 0,
-        },
-        commits: vec![],
-    }];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].new_issues, 1, "src/main.rs is in the diff");
-    assert_eq!(
-        metrics[0].legacy_issues, 1,
-        "src/legacy.rs is NOT in the diff"
-    );
-    assert_eq!(metrics[0].total_issues, 2);
-    assert_eq!(metrics[0].changed_files_with_issues, vec!["src/main.rs"]);
-}
-
-#[test]
-fn test_compute_lint_metrics_skips_error_checks() {
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Error,
-        duration: Duration::from_secs(1),
-        output: "INTERNAL ERROR: some garbage\n  --> src/main.rs:1:1\n".into(),
-        cached: false,
-        provenance: None,
-    }];
-    let diffs: Vec<Diff> = vec![];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert!(metrics.is_empty(), "Error-status checks should be skipped");
-}
-
-#[test]
-fn test_compute_lint_metrics_non_lint_checks_ignored() {
-    let checks = vec![
-        CheckResult {
-            name: "cargo check".into(),
-            status: CheckStatus::Passed,
-            duration: Duration::from_secs(2),
-            output: "Compiling project\n".into(),
-            cached: false,
-            provenance: None,
-        },
-        CheckResult {
-            name: "cargo test".into(),
-            status: CheckStatus::Passed,
-            duration: Duration::from_secs(10),
-            output: "test result: ok. 42 passed\n".into(),
-            cached: false,
-            provenance: None,
-        },
-    ];
-    let diffs: Vec<Diff> = vec![];
-
-    let metrics = compute_lint_metrics(&checks, &diffs);
-    assert!(
-        metrics.is_empty(),
-        "Non-lint checks should not produce metrics"
-    );
-}
+// -----------------------------------------------------------------------
+// PRV-205: Lint findings projection tests
+// -----------------------------------------------------------------------
 
 #[test]
 fn test_is_lint_check_identification() {
@@ -5866,178 +5787,146 @@ fn test_is_lint_check_identification() {
     assert!(!is_lint_check("vitest"));
 }
 
-#[test]
-fn test_normalize_lint_path() {
-    assert_eq!(normalize_lint_path("./src/foo.rs"), "src/foo.rs");
-    assert_eq!(normalize_lint_path("/src/foo.rs"), "src/foo.rs");
-    assert_eq!(normalize_lint_path("src/foo.rs"), "src/foo.rs");
-    assert_eq!(normalize_lint_path("  src/foo.rs  "), "src/foo.rs");
+fn lint_finding(check_id: &str, file: &str, in_diff: Option<bool>) -> DashboardFinding {
+    DashboardFinding {
+        level: "warning",
+        check_name: "Clippy".into(),
+        check_id: check_id.into(),
+        message: "unused variable".into(),
+        in_diff,
+        file: Some(file.into()),
+        line: Some(1),
+    }
 }
 
-#[test]
-fn test_normalize_lint_path_absolute_unix() {
-    // P1 fix: absolute paths must be relativized to repo-relative form
-    assert_eq!(
-        normalize_lint_path("/Users/dev/Git/myapp/src/app.ts"),
-        "src/app.ts"
-    );
-    assert_eq!(
-        normalize_lint_path("/home/ci/project/src/utils/helpers.rs"),
-        "src/utils/helpers.rs"
-    );
-    // Prefix depth >= 2 slashes → cut
-    assert_eq!(
-        normalize_lint_path("/opt/ci/build/lib/parser.py"),
-        "lib/parser.py"
-    );
-    // Prefix depth < 2 slashes → stay as-is
-    assert_eq!(
-        normalize_lint_path("/opt/build/lib/parser.py"),
-        "opt/build/lib/parser.py"
-    );
-    // No known marker — returns as-is (minus leading /)
-    assert_eq!(
-        normalize_lint_path("/weird/path/foo.rs"),
-        "weird/path/foo.rs"
-    );
-}
-
-#[test]
-fn test_normalize_lint_path_windows() {
-    // P2 fix: Windows backslash paths and drive letters
-    assert_eq!(
-        normalize_lint_path(r"C:\Users\dev\project\src\foo.rs"),
-        "src/foo.rs"
-    );
-    assert_eq!(normalize_lint_path(r"src\bar\baz.ts"), "src/bar/baz.ts");
-    assert_eq!(normalize_lint_path(r".\src\foo.rs"), "src/foo.rs");
-    // Shallow depth after drive strip — stays as-is
-    assert_eq!(
-        normalize_lint_path(r"D:\builds\app\lib\utils.py"),
-        "builds/app/lib/utils.py"
-    );
-    // Deep Windows path (prefix depth >= 2) gets relativized
-    assert_eq!(
-        normalize_lint_path(r"C:\Users\dev\project\src\foo.rs"),
-        "src/foo.rs"
-    );
-}
-
-#[test]
-fn test_parse_lint_issues_windows_paths() {
-    // Windows clippy-like output with backslashes
-    let output = r"warning: unused variable
-  --> src\foo.rs:42:9
-
-error: mismatched types
-  --> src\bar\baz.rs:10:5
-";
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues.len(), 2);
-    assert!(issues.contains(&"src/foo.rs".to_string()));
-    assert!(issues.contains(&"src/bar/baz.rs".to_string()));
-}
-
-#[test]
-fn test_parse_lint_issues_eslint_block_format() {
-    // ESLint/Stylelint default formatter: path on own line, indented issues below
-    let output = r#"
-/Users/dev/project/src/components/App.tsx
-  10:5  warning  Unexpected console statement  no-console
-  25:1  error    Missing semicolon             semi
-
-/Users/dev/project/src/utils/helpers.ts
-  3:8   warning  'foo' is defined but never used  no-unused-vars
-
-src/index.tsx
-  42:10  error   'bar' is not defined  no-undef
-  50:3   warning  Unexpected var       no-var
-"#;
-    let issues = parse_lint_issues(output);
-    // 2 issues from App.tsx + 1 from helpers.ts + 2 from index.tsx = 5
-    assert_eq!(issues.len(), 5);
-    let app_count = issues.iter().filter(|p| p.contains("App.tsx")).count();
-    assert_eq!(app_count, 2, "App.tsx should have 2 issues");
-    let helpers_count = issues.iter().filter(|p| p.contains("helpers.ts")).count();
-    assert_eq!(helpers_count, 1, "helpers.ts should have 1 issue");
-    let index_count = issues.iter().filter(|p| p.contains("index.tsx")).count();
-    assert_eq!(index_count, 2, "index.tsx should have 2 issues");
-}
-
-#[test]
-fn test_parse_lint_issues_ignores_false_positive_block_paths_without_issue_lines() {
-    let output = r#"
-/Users/dev/project/src/components/App.tsx
-This is just a heading, not a lint issue
-
-src/index.tsx
-  42:10  error   'bar' is not defined  no-undef
-"#;
-
-    let issues = parse_lint_issues(output);
-    assert_eq!(issues, vec!["src/index.tsx".to_string()]);
-}
-
-#[test]
-fn test_normalize_lint_path_src_tauri_collision() {
-    // P2: relative paths with nested markers must NOT be truncated
-    assert_eq!(
-        normalize_lint_path("src-tauri/src/lib.rs"),
-        "src-tauri/src/lib.rs"
-    );
-    assert_eq!(
-        normalize_lint_path("packages/app/src/main.ts"),
-        "packages/app/src/main.ts"
-    );
-    // Deep absolute paths (>=3 segments prefix) still get relativized
-    assert_eq!(
-        normalize_lint_path("/Users/dev/Git/myapp/src/app.ts"),
-        "src/app.ts"
-    );
-    assert_eq!(
-        normalize_lint_path("/home/ci/project/lib/parser.py"),
-        "lib/parser.py"
-    );
-}
-
-#[test]
-fn test_compute_lint_metrics_clean_lint() {
-    use crate::git::{Diff, DiffStats, FileChange, FileStatus};
-
-    let checks = vec![CheckResult {
-        name: "cargo clippy".into(),
-        status: CheckStatus::Passed,
-        duration: Duration::from_secs(5),
-        output: "Checking project v0.1.0\n    Finished `dev` profile [unoptimized + debuginfo]\n"
-            .into(),
+fn lint_check(name: &str, status: CheckStatus) -> CheckResult {
+    CheckResult {
+        name: name.into(),
+        status,
+        duration: Duration::from_secs(1),
+        output: String::new(),
         cached: false,
         provenance: None,
-    }];
-    let diffs = vec![Diff {
-        base: "main".into(),
-        target: "feature/x".into(),
-        base_commit_id: "aaa".into(),
-        target_commit_id: "bbb".into(),
-        files: vec![FileChange {
-            path: "src/main.rs".into(),
-            status: FileStatus::Modified,
-            additions: 10,
-            deletions: 2,
-        }],
-        stats: DiffStats {
-            files_changed: 1,
-            additions: 10,
-            deletions: 2,
-            copied: 0,
-        },
-        commits: vec![],
-    }];
+    }
+}
 
-    let metrics = compute_lint_metrics(&checks, &diffs);
+#[test]
+fn lint_projection_regroups_canonical_in_diff_states() {
+    let checks = vec![lint_check("cargo clippy", CheckStatus::Warnings)];
+    let findings = vec![
+        lint_finding("cargo_clippy", "src/main.rs", Some(true)),
+        lint_finding("cargo_clippy", "src/lib.rs", Some(true)),
+        lint_finding("cargo_clippy", "src/legacy.rs", Some(false)),
+        lint_finding("cargo_clippy", "src/unknown.rs", None),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &findings);
+
     assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].total_issues, 0);
-    assert_eq!(metrics[0].new_issues, 0);
-    assert_eq!(metrics[0].legacy_issues, 0);
+    assert_eq!(metrics[0].check_name, "cargo clippy");
+    assert_eq!(metrics[0].findings_in_changed_files, 2);
+    assert_eq!(metrics[0].findings_outside_changed_files, 1);
+    assert_eq!(metrics[0].findings_origin_unknown, 1);
+    assert_eq!(metrics[0].total_findings, 4);
+    assert_eq!(
+        metrics[0].changed_files_with_findings,
+        vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+        "only findings the canonical model located in changed files are listed"
+    );
+}
+
+#[test]
+fn lint_projection_never_reparses_check_output() {
+    // The check output is full of file:line noise; without canonical findings
+    // the projection must report nothing rather than inventing counts.
+    let mut check = lint_check("cargo clippy", CheckStatus::Warnings);
+    check.output =
+        "warning: unused\n  --> src/main.rs:10:5\nwarning: unused\n  --> src/lib.rs:20:1\n".into();
+
+    let metrics = project_lint_metrics(&[check], &[]);
+
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].total_findings, 0);
+    assert_eq!(metrics[0].findings_in_changed_files, 0);
+}
+
+#[test]
+fn lint_projection_keeps_the_canonical_status_of_checks_that_did_not_run() {
+    let checks = vec![
+        lint_check("cargo clippy", CheckStatus::Skipped),
+        lint_check("eslint", CheckStatus::Error),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &[]);
+
+    assert_eq!(
+        metrics.len(),
+        2,
+        "a check that did not run is still reported"
+    );
+    assert_eq!(metrics[0].status, CheckStatus::Skipped);
+    assert_eq!(metrics[1].status, CheckStatus::Error);
+    assert!(metrics.iter().all(|m| m.total_findings == 0));
+}
+
+#[test]
+fn lint_projection_excludes_rows_from_checks_that_did_not_execute() {
+    // An errored lint check still produces a canonical row — the runner or
+    // setup diagnostic the generic fallback captured. Counting it contradicted
+    // the card the renderer draws for the same check, which says no result was
+    // produced.
+    let checks = vec![
+        lint_check("eslint", CheckStatus::Error),
+        lint_check("cargo clippy", CheckStatus::Skipped),
+    ];
+    let findings = vec![
+        lint_finding("eslint", "src/app.ts", None),
+        lint_finding("cargo_clippy", "src/main.rs", Some(true)),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &findings);
+
+    assert_eq!(metrics.len(), 2);
+    assert!(
+        metrics.iter().all(|m| m.total_findings == 0
+            && m.findings_in_changed_files == 0
+            && m.findings_outside_changed_files == 0
+            && m.findings_origin_unknown == 0
+            && m.changed_files_with_findings.is_empty()),
+        "a check reported as not executed must contribute no counted findings"
+    );
+    assert!(!lint_check_executed(CheckStatus::Error));
+    assert!(!lint_check_executed(CheckStatus::Skipped));
+    for status in [
+        CheckStatus::Passed,
+        CheckStatus::Failed,
+        CheckStatus::Warnings,
+    ] {
+        assert!(lint_check_executed(status));
+    }
+}
+
+#[test]
+fn lint_projection_ignores_findings_from_other_checks() {
+    let checks = vec![lint_check("cargo clippy", CheckStatus::Warnings)];
+    let findings = vec![
+        lint_finding("cargo_clippy", "src/main.rs", Some(true)),
+        lint_finding("pytest", "tests/test_x.py", None),
+    ];
+
+    let metrics = project_lint_metrics(&checks, &findings);
+
+    assert_eq!(metrics[0].total_findings, 1);
+}
+
+#[test]
+fn lint_projection_ignores_non_lint_checks() {
+    let checks = vec![
+        lint_check("cargo check", CheckStatus::Passed),
+        lint_check("cargo test", CheckStatus::Passed),
+    ];
+
+    assert!(project_lint_metrics(&checks, &[]).is_empty());
 }
 
 #[test]
@@ -6222,6 +6111,8 @@ fn preexisting_failures_do_not_block_gate() {
         findings_count: 2,
         dashboard_findings: vec![
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "ESLint".to_string(),
                 check_id: "eslint".to_string(),
@@ -6229,6 +6120,8 @@ fn preexisting_failures_do_not_block_gate() {
                 in_diff: Some(false),
             },
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Prettier".to_string(),
                 check_id: "prettier".to_string(),
@@ -6337,6 +6230,8 @@ fn introduced_failures_still_block_gate() {
         status: "warnings".to_string(),
         findings_count: 1,
         dashboard_findings: vec![DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "ESLint".to_string(),
             check_id: "eslint".to_string(),
@@ -6442,6 +6337,8 @@ fn mixed_failures_include_both_preexisting_and_introduced_in_output() {
         findings_count: 3,
         dashboard_findings: vec![
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "ESLint".to_string(),
                 check_id: "eslint".to_string(),
@@ -6449,6 +6346,8 @@ fn mixed_failures_include_both_preexisting_and_introduced_in_output() {
                 in_diff: Some(true),
             },
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "ESLint".to_string(),
                 check_id: "eslint".to_string(),
@@ -6456,6 +6355,8 @@ fn mixed_failures_include_both_preexisting_and_introduced_in_output() {
                 in_diff: Some(false),
             },
             DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Prettier".to_string(),
                 check_id: "prettier".to_string(),
@@ -7533,6 +7434,149 @@ fn worktree_digest_separates_nested_repositories_by_their_own_state() {
         dirty.status_digest,
         "the same nested tree must fingerprint identically",
     );
+}
+
+/// A repeated run whose only finding row is an informational note must report
+/// no movement: the stored count, the synthetic current history row and the
+/// previous-run delta all count the same operator-only list.
+///
+/// Before this was pinned, `report.json` stored operator findings while the
+/// dashboard's current row counted every canonical row. A Cargo audit baseline
+/// note — emitted on every Rust run, diagnostic-free by construction — then
+/// turned a stored 0 into a current 1 and rendered a worsening trend for a run
+/// in which nothing changed.
+#[test]
+fn informational_notes_keep_current_and_historical_counts_comparable() {
+    let config = create_test_config(PolicyConfig::default());
+    let resolved_target = ResolvedRef {
+        name: "feature/security-gate".to_string(),
+        commit_id: "abc1234abc1234abc1234abc1234abc1234ab".to_string(),
+        is_remote: false,
+    };
+    let resolved_bases = vec![ResolvedRef {
+        name: "main".to_string(),
+        commit_id: "def5678def5678def5678def5678def5678de".to_string(),
+        is_remote: false,
+    }];
+
+    // The Cargo audit baseline note verbatim: no location, no diagnostic, and
+    // an `in_diff` value, so it cannot be filtered out by origin alone.
+    let baseline_note = DashboardFinding {
+        file: None,
+        line: None,
+        level: "note",
+        check_name: "Cargo audit baseline".to_string(),
+        check_id: "cargo_audit_baseline".to_string(),
+        message: "Cargo audit baseline: status=not-required, new=0, pre-existing=0, \
+                  resolved=0, unknown-baseline=0"
+            .to_string(),
+        in_diff: Some(false),
+    };
+    let inline = InlineFindingsSummary {
+        status: "passed".to_string(),
+        findings_count: 1,
+        dashboard_findings: vec![baseline_note],
+    };
+
+    let branch_dir = tempfile::tempdir().expect("tempdir");
+    let previous_dir = branch_dir.path().join("20260101-000000");
+    let current_dir = branch_dir.path().join("20260101-010000");
+    fs::create_dir_all(&previous_dir).expect("previous run dir");
+    fs::create_dir_all(&current_dir).expect("current run dir");
+
+    let context_for = |out_dir: &Path| {
+        build_dashboard_context(DashboardContextInput {
+            config: &config,
+            checks: &[],
+            heuristics: None,
+            inline: &inline,
+            breaking: Vec::new(),
+            rust_api_delta: None,
+            coverage: CoverageDelta {
+                total_source: 0,
+                covered_count: 0,
+                pct: None,
+                uncovered: vec![],
+                covered: vec![],
+                non_code_count: 0,
+                ghost_tests: vec![],
+            },
+            diff_dir: out_dir,
+            skipped_checks: Vec::new(),
+            out_dir,
+            diffs: &[],
+            ownership_map: Vec::new(),
+            clean_comparison: CleanComparison::for_test(true, true),
+            snapshot_integrity: None,
+            provenance: &ProvenanceConsistency::default(),
+        })
+    };
+
+    // Run one: the note is not an operator finding anywhere.
+    let previous_ctx = context_for(previous_dir.as_path());
+    assert!(
+        previous_ctx.findings.is_empty(),
+        "an informational note is not an operator finding"
+    );
+    report::generate(&report::ReportInput {
+        dir: &previous_dir,
+        config: &config,
+        diffs: &[],
+        checks: &[],
+        resolved_target: &resolved_target,
+        resolved_bases: &resolved_bases,
+        ctx: &previous_ctx,
+        run_started_at: "2026-01-01T00:00:00Z",
+        heuristics: None,
+        regression: None,
+        provenance: &ProvenanceConsistency::default(),
+    })
+    .expect("previous report.json");
+
+    let stored: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(previous_dir.join("report.json")).expect("read previous report"),
+    )
+    .expect("parse previous report");
+    assert_eq!(
+        stored["quality"]["sarif"]["findings_count"].as_u64(),
+        Some(0),
+        "report.json must store the operator-finding count"
+    );
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&previous_dir, branch_dir.path().join("latest"))
+        .expect("latest symlink");
+
+    // Run two: identical evidence, so every comparable number stays at zero.
+    let current_ctx = context_for(current_dir.as_path());
+    let current_row = current_ctx
+        .run_history
+        .first()
+        .expect("current run is prepended to the history");
+    assert_eq!(current_row.timestamp, "20260101-010000");
+    assert_eq!(
+        current_row.findings_count, 0,
+        "the synthetic current history row must count the same list report.json stored"
+    );
+    assert!(
+        current_ctx
+            .run_history
+            .iter()
+            .all(|run| run.findings_count == 0),
+        "a replayed run with unchanged diagnostics must not grow the trend"
+    );
+
+    // `build_delta_section` renders `ctx.findings.len()` against
+    // `previous_run.findings_before`; both must be the same operator count.
+    #[cfg(unix)]
+    {
+        let previous = current_ctx
+            .previous_run
+            .as_ref()
+            .expect("previous run delta resolved through the latest symlink");
+        assert_eq!(previous.findings_before, 0);
+        assert_eq!(current_ctx.findings.len(), previous.findings_before);
+    }
 }
 
 #[test]

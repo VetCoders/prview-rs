@@ -13,6 +13,41 @@ pub(super) fn is_operator_finding(finding: &DashboardFinding) -> bool {
     matches!(finding.level, "error" | "warning")
 }
 
+/// The operator-finding list: the canonical rows that are diagnostics rather
+/// than evidence about the run.
+///
+/// This is the only place the predicate is applied to a whole summary, and the
+/// rows it keeps are exactly the ones emitted as SARIF results — informational
+/// notes stay in `InlineFindingsSummary::dashboard_findings` but never reach
+/// the SARIF file, so counting them would make `quality.sarif.findings_count`
+/// describe a file that does not contain them. Build
+/// `DashboardContext::findings` through this function rather
+/// than copying the unfiltered list, so the current count, the run history and
+/// the previous-run delta cannot drift apart.
+pub(super) fn operator_findings(all: &[DashboardFinding]) -> Vec<DashboardFinding> {
+    all.iter()
+        .filter(|finding| is_operator_finding(finding))
+        .cloned()
+        .collect()
+}
+
+/// The origin tri-state every SARIF result carries, per
+/// `docs/contracts/merge_gate.md`.
+///
+/// `introduced` means the tool reported the finding in a file this diff
+/// touches — a location signal, not proof the change created it. `preexisting`
+/// means it reported it outside those files. `unclassified` means the origin
+/// was not established; it is not a pass, and a consumer must not read it as
+/// one. Every emitter uses this mapping so `properties.classification` cannot
+/// disagree with `properties.in_diff`.
+pub(super) fn origin_classification(in_diff: Option<bool>) -> &'static str {
+    match in_diff {
+        Some(true) => "introduced",
+        Some(false) => "preexisting",
+        None => "unclassified",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CargoAuditBaselineCounts {
     new: usize,
@@ -398,6 +433,8 @@ pub(super) fn generate_inline_findings(
             );
 
             dashboard_findings.push(DashboardFinding {
+                file: None,
+                line: None,
                 level: "note",
                 check_name: "Cargo audit baseline".to_string(),
                 check_id: "cargo_audit_baseline".to_string(),
@@ -445,6 +482,8 @@ pub(super) fn generate_inline_findings(
                 );
 
                 dashboard_findings.push(DashboardFinding {
+                    file: None,
+                    line: None,
                     level: finding.sarif_level,
                     check_name: check.name.clone(),
                     check_id: check_id.clone(),
@@ -472,6 +511,7 @@ pub(super) fn generate_inline_findings(
                     "properties": {
                         "check": "cargo_audit",
                         "in_diff": current_audit_in_diff,
+                        "classification": origin_classification(current_audit_in_diff),
                         "package": finding.package_display(),
                         "severity": finding.severity,
                     }
@@ -487,6 +527,44 @@ pub(super) fn generate_inline_findings(
 
         // Dispatch to structured parsers first.
         match check_id.as_str() {
+            "heuristics_loctree" => {
+                // A repository-wide summary is not a diagnostic at a source line.
+                // Preserve it as context without inventing an inline location.
+                dashboard_findings.push(DashboardFinding {
+                    file: None,
+                    line: None,
+                    level: "note",
+                    check_name: check.name.clone(),
+                    check_id: check_id.clone(),
+                    message: check.output.trim().to_string(),
+                    in_diff: None,
+                });
+                continue;
+            }
+            "pytest" => {
+                let parsed = parse_pytest_failures(&check.output);
+                if parsed.is_empty() {
+                    dashboard_findings.push(DashboardFinding {
+                        file: None,
+                        line: None,
+                        level: "note",
+                        check_name: check.name.clone(),
+                        check_id: check_id.clone(),
+                        message: check_failure_excerpt(check),
+                        in_diff: None,
+                    });
+                } else {
+                    tool_findings_sets.push(ToolFindings {
+                        source: "pytest",
+                        tool_name: "Pytest",
+                        check_id: check_id.clone(),
+                        findings: parsed,
+                    });
+                }
+                // Never attach an arbitrary path found in startup output to a
+                // test failure whose traceback did not provide a location.
+                continue;
+            }
             "eslint" => {
                 let parsed = parsers::eslint::parse_eslint_output(&check.output);
                 if !parsed.is_empty() {
@@ -576,34 +654,44 @@ pub(super) fn generate_inline_findings(
 
         // Extract file:line from output for proper SARIF locations.
         let extracted = extract_file_line_from_output(&check.output);
-        let sarif_location = if let Some((ref file, line_num)) = extracted {
+        let (sarif_location, generic_in_diff) = if let Some((ref file, line_num)) = extracted {
             let in_diff_val = is_in_diff(file);
             dashboard_findings.push(DashboardFinding {
+                file: Some(file.clone()),
+                line: Some(line_num),
                 level,
                 check_name: check.name.clone(),
                 check_id: check_id.clone(),
                 message: first_line.to_string(),
                 in_diff: Some(in_diff_val),
             });
-            json!({
-                "physicalLocation": {
-                    "artifactLocation": { "uri": file },
-                    "region": { "startLine": line_num }
-                }
-            })
+            (
+                json!({
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": file },
+                        "region": { "startLine": line_num }
+                    }
+                }),
+                Some(in_diff_val),
+            )
         } else {
             dashboard_findings.push(DashboardFinding {
+                file: None,
+                line: None,
                 level,
                 check_name: check.name.clone(),
                 check_id: check_id.clone(),
                 message: first_line.to_string(),
                 in_diff: None,
             });
-            json!({
-                "physicalLocation": {
-                    "artifactLocation": { "uri": "20_quality/full-checks.log" }
-                }
-            })
+            (
+                json!({
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": "20_quality/full-checks.log" }
+                    }
+                }),
+                None,
+            )
         };
 
         let rule_id = format!("prview.{}", check_id_from_name(&check.name));
@@ -618,7 +706,16 @@ pub(super) fn generate_inline_findings(
             "ruleId": rule_id,
             "level": level,
             "message": { "text": format!("{}: {}", check.name, first_line) },
-            "locations": [sarif_location]
+            "locations": [sarif_location],
+            // Unparsed checks carry the same origin tri-state as parsed tool
+            // findings. A row that fell back to the combined log has no
+            // established location, so it reports `null`/`unclassified` rather
+            // than silently omitting the properties a consumer reads.
+            "properties": {
+                "in_diff": generic_in_diff,
+                "classification": origin_classification(generic_in_diff),
+                "source": &check_id,
+            }
         }));
     }
 
@@ -630,6 +727,7 @@ pub(super) fn generate_inline_findings(
         // TOOLING-08: explicit introduced (touched by this PR) vs preexisting
         // (inherited) split over the *reported* findings.
         let mut preexisting_count = 0usize;
+        let mut unclassified_count = 0usize;
         let mut emitted_count = 0usize;
 
         for finding in &tool_set.findings {
@@ -657,20 +755,24 @@ pub(super) fn generate_inline_findings(
                 }));
             }
 
-            let in_diff = is_in_diff(&finding.file);
-            if in_diff {
-                in_diff_count += 1;
-            } else {
-                preexisting_count += 1;
+            // A test can fail because of inputs or its environment. Its
+            // traceback location alone cannot classify the failure's origin.
+            let in_diff = (tool_set.source != "pytest").then(|| is_in_diff(&finding.file));
+            let classification = origin_classification(in_diff);
+            match in_diff {
+                Some(true) => in_diff_count += 1,
+                Some(false) => preexisting_count += 1,
+                None => unclassified_count += 1,
             }
-            let classification = if in_diff { "introduced" } else { "preexisting" };
 
             dashboard_findings.push(DashboardFinding {
+                file: Some(finding.file.clone()),
+                line: Some(finding.line),
                 level: finding.level,
                 check_name: tool_set.tool_name.to_string(),
                 check_id: tool_set.check_id.clone(),
                 message: finding.message.clone(),
-                in_diff: Some(in_diff),
+                in_diff,
             });
 
             let mut location = json!({
@@ -714,6 +816,7 @@ pub(super) fn generate_inline_findings(
                     "in_diff_count": in_diff_count,
                     "introduced_count": in_diff_count,
                     "preexisting_count": preexisting_count,
+                    "unclassified_count": unclassified_count,
                 }
             }));
         }
@@ -787,6 +890,330 @@ pub(super) fn is_pathish_candidate(candidate: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Does `candidate` (the text before a `:line:` token in Pytest output) name a
+/// file a collector reported?
+///
+/// Two shapes used to be rejected for reasons Pytest does not share. A
+/// repository path may contain spaces (`tests with space/test_bad.py:2: in
+/// test_bad`), and a location need not be Python at all: doctest and plugin
+/// collectors report `.rst`, `.txt` or `.md` files. What a location never is,
+/// is a fragment of source text, so the candidate is rejected when it carries
+/// characters that only occur in code and must end in a file extension.
+fn is_pytest_location_candidate(candidate: &str) -> bool {
+    const CODE_CHARS: &[char] = &[
+        '{', '}', '"', '=', '(', ')', ';', ',', '\'', '`', '*', '<', '>', '[', ']', '#',
+    ];
+    if candidate.is_empty() || candidate.contains(CODE_CHARS) {
+        return false;
+    }
+    let name = candidate.rsplit(['/', '\\']).next().unwrap_or(candidate);
+    name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && !extension.is_empty()
+            && extension.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+/// Extract located Pytest diagnostics only from its failure/error sections.
+/// A traceback location says where the failure was reported, not what caused it.
+pub(super) fn parse_pytest_failures(output: &str) -> Vec<parsers::LintFinding> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    // The path is captured lazily up to the numeric `:line:` suffix rather
+    // than as a run of non-whitespace with a `.py` extension; see
+    // `is_pytest_location_candidate` for what is then accepted as a path.
+    static LOCATION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(.+?):([1-9][0-9]*):\s+(.+)$").expect("pytest location regex")
+    });
+    let mut findings = Vec::new();
+    let mut in_failures = false;
+    let mut test_name = String::new();
+    let mut evidence = Vec::new();
+    let mut pending_frame: Option<(String, u32)> = None;
+    let flush_frame = |findings: &mut Vec<parsers::LintFinding>,
+                       pending: &mut Option<(String, u32)>,
+                       evidence: &[String],
+                       name: &str| {
+        if !evidence.is_empty()
+            && let Some((file, line)) = pending.take()
+        {
+            findings.push(parsers::LintFinding {
+                file,
+                line,
+                column: None,
+                level: "error",
+                message: format!(
+                    "Pytest reported a failure in {name}:\n{}",
+                    evidence.join("\n")
+                ),
+                rule_id: None,
+                source: "pytest",
+            });
+        }
+    };
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('=') && trimmed.ends_with('=') {
+            flush_frame(&mut findings, &mut pending_frame, &evidence, &test_name);
+            pending_frame = None;
+            let section = trimmed.trim_matches('=').trim();
+            in_failures = matches!(section, "FAILURES" | "ERRORS");
+            evidence.clear();
+            continue;
+        }
+        if !in_failures {
+            continue;
+        }
+        if trimmed.starts_with("___") && trimmed.ends_with("___") {
+            flush_frame(&mut findings, &mut pending_frame, &evidence, &test_name);
+            pending_frame = None;
+            test_name = trimmed.trim_matches('_').trim().to_string();
+            evidence.clear();
+            continue;
+        }
+        if let Some(detail) = trimmed.strip_prefix("E ") {
+            if evidence.len() < 6 && !detail.trim().is_empty() {
+                evidence.push(detail.trim().to_string());
+            }
+            continue;
+        }
+        let Some(caps) = LOCATION.captures(trimmed) else {
+            continue;
+        };
+        if !is_pytest_location_candidate(&caps[1]) {
+            continue;
+        }
+        if caps[3].starts_with("in ") {
+            // Retain the last frame until an error corroborates it. A later
+            // terminal location takes precedence over abbreviated frames.
+            if let Ok(line_number) = caps[2].parse::<u32>() {
+                pending_frame = Some((caps[1].to_string(), line_number));
+            }
+            continue;
+        }
+        let Ok(line_number) = caps[2].parse::<u32>() else {
+            continue;
+        };
+        let detail = if evidence.is_empty() {
+            caps[3].to_string()
+        } else {
+            evidence.join("\n")
+        };
+        let context = if test_name.is_empty() {
+            "Pytest reported a failure".to_string()
+        } else {
+            format!("Pytest reported a failure in {test_name}")
+        };
+        findings.push(parsers::LintFinding {
+            file: caps[1].to_string(),
+            line: line_number,
+            column: None,
+            level: "error",
+            message: format!("{context}:\n{detail}"),
+            rule_id: None,
+            source: "pytest",
+        });
+        pending_frame = None;
+        evidence.clear();
+    }
+    flush_frame(&mut findings, &mut pending_frame, &evidence, &test_name);
+    findings
+}
+
+/// A bounded diagnostic excerpt for human-facing test output. Startup and
+/// per-test progress are deliberately excluded; the complete log remains evidence.
+pub(super) fn pytest_failure_excerpt(output: &str) -> Option<String> {
+    static FAILED_PROGRESS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^\S+\.py::.+\s(?:FAILED|ERROR)(?:\s+\[[^\]]+\])?\s*$")
+            .expect("pytest failed progress regex")
+    });
+    let parsed = parse_pytest_failures(output);
+    if !parsed.is_empty() {
+        return Some(
+            parsed
+                .iter()
+                .take(3)
+                .map(|finding| format!("{}\n{}:{}", finding.message, finding.file, finding.line))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+    }
+    let summary: Vec<_> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("FAILED ")
+                || line.starts_with("ERROR ")
+                || FAILED_PROGRESS.is_match(line)
+        })
+        .take(3)
+        .collect();
+    if !summary.is_empty() {
+        return Some(summary.join("\n"));
+    }
+
+    // Pytest can capture exception details without a terminal path:line (for
+    // example a collection error or an abbreviated traceback). Keep that real
+    // diagnostic as unlocated evidence rather than replacing it with startup.
+    let mut in_failures = false;
+    let mut traceback = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('=') && trimmed.ends_with('=') {
+            in_failures = matches!(trimmed.trim_matches('=').trim(), "FAILURES" | "ERRORS");
+            continue;
+        }
+        if in_failures && trimmed.starts_with("E ") && traceback.len() < 6 {
+            traceback.push(trimmed.to_string());
+        }
+    }
+    (!traceback.is_empty()).then(|| traceback.join("\n"))
+}
+
+/// Shared human and machine excerpt. A failed process is not evidence that a
+/// named test failed; Pytest startup and passing rows never replace diagnostics.
+pub(super) fn check_failure_excerpt(check: &CheckResult) -> String {
+    let semgrep = check
+        .name
+        .to_ascii_lowercase()
+        .contains("semgrep")
+        .then(|| semgrep_check_excerpt(&check.output))
+        .flatten();
+    let mut excerpt = if let Some(summary) = semgrep {
+        summary
+    } else if !matches!(check.status, CheckStatus::Failed | CheckStatus::Error) {
+        // The checks panel also calls this helper for successful/skipped rows.
+        // Preserve their neutral output without inventing a failed process.
+        let mut lines: Vec<_> = check.output.lines().rev().take(12).collect();
+        lines.reverse();
+        lines.join("\n")
+    } else if check.name.to_ascii_lowercase().contains("pytest") {
+        super::root_cause::extract_pytest_root_cause(check)
+            .map(|diagnostic| {
+                if diagnostic.evidence.is_empty() {
+                    diagnostic.cause
+                } else {
+                    diagnostic.evidence
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        let is_vitest = check.name.to_ascii_lowercase().contains("vitest");
+        let lines: Vec<_> = check
+            .output
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                if is_vitest && trimmed.starts_with(['✓', '✔', '√']) {
+                    return false;
+                }
+                !(trimmed.starts_with("test ") && trimmed.ends_with(" ... ok")
+                    || trimmed.contains(".py::")
+                        && trimmed.split_whitespace().any(|part| part == "PASSED"))
+            })
+            .collect();
+        let failure = is_vitest
+            .then(|| {
+                lines.iter().position(|line| {
+                    let line = line.trim();
+                    line.starts_with("FAIL ") || line.starts_with(['×', '✗'])
+                })
+            })
+            .flatten()
+            .or_else(|| {
+                lines.iter().position(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower.contains("error:")
+                        || lower.contains("error[")
+                        || lower.contains("failed")
+                        || lower.contains("panicked at")
+                        || lower.contains("caused by:")
+                })
+            });
+        let start = failure.unwrap_or_else(|| lines.len().saturating_sub(12));
+        lines
+            .iter()
+            .skip(start)
+            .take(12)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    const MAX_EXCERPT_BYTES: usize = 8 * 1024;
+    const TRUNCATED: &str = "\n... (truncated; see the full check log)";
+    if excerpt.len() > MAX_EXCERPT_BYTES {
+        let end = excerpt.floor_char_boundary(MAX_EXCERPT_BYTES - TRUNCATED.len());
+        excerpt.truncate(end);
+        excerpt.push_str(TRUNCATED);
+    }
+    excerpt
+}
+
+/// Summarize scan findings separately from parser/tool diagnostics. Preserve
+/// the complete JSON and stderr in the raw log linked by the checks panel.
+fn semgrep_check_excerpt(output: &str) -> Option<String> {
+    let start = output.find('{')?;
+    let payload = &output[start..];
+    let mut stream = serde_json::Deserializer::from_str(payload).into_iter::<serde_json::Value>();
+    let json = stream.next()?.ok()?;
+    let results = json.get("results")?.as_array()?;
+    let errors = json
+        .get("errors")
+        .and_then(|value| value.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let scan_errors = errors
+        .iter()
+        .filter(|error| {
+            error
+                .get("level")
+                .and_then(|value| value.as_str())
+                .is_some_and(|level| level.eq_ignore_ascii_case("error"))
+        })
+        .count();
+    let mut summary = format!(
+        "{} findings; {} scan warnings; {} scan errors",
+        results.len(),
+        errors.len() - scan_errors,
+        scan_errors
+    );
+    if !errors.is_empty() {
+        summary.push_str(". Scan diagnostics may limit coverage.");
+    }
+    let compact = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(240)
+            .collect::<String>()
+    };
+    for finding in parsers::semgrep::parse_semgrep_json_output(&payload[..stream.byte_offset()])
+        .iter()
+        .take(3)
+    {
+        summary.push_str(&format!(
+            "\nFinding: {}:{} — {}",
+            finding.file,
+            finding.line,
+            compact(&finding.message)
+        ));
+    }
+    for error in errors.iter().take(3) {
+        let kind = error
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Scan diagnostic");
+        let message = ["message", "long_msg", "short_msg"]
+            .iter()
+            .find_map(|field| error.get(field).and_then(|value| value.as_str()))
+            .unwrap_or(kind);
+        summary.push_str(&format!("\nScan diagnostic ({kind}): {}", compact(message)));
+    }
+    Some(summary)
 }
 
 /// Extract the first file:line reference from check output.
@@ -903,10 +1330,372 @@ pub(super) fn should_skip_inline_fallback_line(is_geiger: bool, line: &str) -> b
 
 #[cfg(test)]
 mod tests {
+    const PYTEST_FAILURE: &str = "================ test session starts ================\n\
+plugins: unrelated\n\
+tests/test_parser.py::test_roundtrip FAILED [100%]\n\
+================ FAILURES ================\n\
+________________ test_roundtrip ________________\n\
+>       assert refusals == []\n\
+E       AssertionError: unsupported message\n\
+E       assert ['AgentMessage'] == []\n\
+tests/test_parser.py:42: AssertionError\n\
+================ short test summary info ================\n\
+FAILED tests/test_parser.py::test_roundtrip\n\
+================ 1 failed, 12 passed ================\n";
+
+    #[test]
+    fn pytest_failure_uses_diagnostic_and_preserves_location() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::from_secs(1),
+            output: PYTEST_FAILURE.to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        let summary = super::generate_inline_findings(
+            tmp.path(),
+            &checks,
+            &[one_file_diff("tests/test_parser.py")],
+            None,
+            None,
+        )
+        .expect("findings");
+        assert_eq!(summary.findings_count, 1);
+        let finding = &summary.dashboard_findings[0];
+        assert_eq!(finding.file.as_deref(), Some("tests/test_parser.py"));
+        assert_eq!(finding.line, Some(42));
+        assert_eq!(
+            finding.in_diff, None,
+            "a changed test file is not proof of origin"
+        );
+        assert!(
+            finding
+                .message
+                .contains("AssertionError: unsupported message")
+        );
+        assert!(!finding.message.contains("test session starts"));
+        assert!(!finding.message.contains("caused by"));
+        let sarif: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("INLINE_FINDINGS.sarif")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"],
+            42
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["classification"],
+            "unclassified"
+        );
+        let excerpt = super::pytest_failure_excerpt(PYTEST_FAILURE).expect("excerpt");
+        assert!(excerpt.contains("tests/test_parser.py:42"));
+        assert!(!excerpt.contains("plugins:"));
+    }
+
+    #[test]
+    fn pytest_never_borrows_startup_location_for_unlocated_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "plugins/helper.py:19: loaded\nFAILED tests/test_parser.py::test_roundtrip"
+                .to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        let summary = super::generate_inline_findings(tmp.path(), &checks, &[], None, None)
+            .expect("findings");
+        assert_eq!(summary.findings_count, 0);
+        assert_eq!(summary.dashboard_findings[0].file, None);
+        assert_eq!(summary.dashboard_findings[0].line, None);
+        assert!(summary.dashboard_findings[0].message.starts_with("FAILED "));
+        assert!(!tmp.path().join("INLINE_FINDINGS.sarif").exists());
+    }
+
+    #[test]
+    fn pytest_short_tracebacks_pair_final_frames_with_error_evidence() {
+        let output = "===== FAILURES =====\n_____ test_one _____\ntests/test_parser.py:42: in test_parser\n    helper()\nsrc/parser.py:9: in helper\nE   ValueError: invalid input\n_____ test_two _____\ntests/test_other.py:17: in test_other\nE   AssertionError: mismatch\n===== short test summary info =====";
+        let located = super::parse_pytest_failures(output);
+        assert_eq!(located.len(), 2);
+        assert_eq!((&*located[0].file, located[0].line), ("src/parser.py", 9));
+        assert!(located[0].message.contains("invalid input"));
+        assert_eq!(
+            (&*located[1].file, located[1].line),
+            ("tests/test_other.py", 17)
+        );
+        assert!(!located[1].message.contains("invalid input"));
+        let without_summary = output.split("===== short").next().unwrap();
+        assert_eq!(super::parse_pytest_failures(without_summary).len(), 2);
+        assert!(
+            super::parse_pytest_failures("===== FAILURES =====\ntests/x.py:42: in test_x")
+                .is_empty()
+        );
+        let terminal = "===== FAILURES =====\ntests/x.py:42: in test_x\nE   ValueError: detail\nsrc/y.py:8: ValueError";
+        let located = super::parse_pytest_failures(terminal);
+        assert_eq!(located.len(), 1);
+        assert_eq!((&*located[0].file, located[0].line), ("src/y.py", 8));
+    }
+
+    #[test]
+    fn pytest_locations_keep_paths_with_spaces() {
+        let output = "===== FAILURES =====\n\
+            _____ test_bad _____\n\
+            tests with space/test_bad.py:2: in test_bad\n\
+            E   AssertionError: mismatch\n";
+        let located = super::parse_pytest_failures(output);
+        assert_eq!(located.len(), 1);
+        assert_eq!(located[0].file, "tests with space/test_bad.py");
+        assert_eq!(located[0].line, 2);
+    }
+
+    #[test]
+    fn pytest_locations_accept_non_python_collectors() {
+        let output = "===== FAILURES =====\n\
+            _____ [doctest] docs/example.rst _____\n\
+            E   Expected 2, got 3\n\
+            docs/example.rst:4: DocTestFailure\n";
+        let located = super::parse_pytest_failures(output);
+        assert_eq!(located.len(), 1);
+        assert_eq!(located[0].file, "docs/example.rst");
+        assert_eq!(located[0].line, 4);
+        assert!(located[0].message.contains("Expected 2, got 3"));
+    }
+
+    #[test]
+    fn pytest_location_candidate_rejects_code_fragments() {
+        assert!(super::is_pytest_location_candidate("tests/a b/test_x.py"));
+        assert!(super::is_pytest_location_candidate("docs/example.rst"));
+        assert!(super::is_pytest_location_candidate("test_bad.py"));
+        assert!(!super::is_pytest_location_candidate(
+            "raise ValueError(\"x\""
+        ));
+        assert!(!super::is_pytest_location_candidate("no_extension_here"));
+        assert!(!super::is_pytest_location_candidate(""));
+    }
+
+    #[test]
+    fn pytest_keeps_each_failure_paired_with_its_own_evidence() {
+        let output = "===== FAILURES =====\n\
+            _____ test_one _____\n\
+            E   AssertionError: first failure\n\
+            tests/test_one.py:12: AssertionError\n\
+            _____ test_two _____\n\
+            E   ValueError: second failure\n\
+            tests/test_two.py:34: ValueError\n\
+            ===== short test summary info =====";
+        let findings = super::parse_pytest_failures(output);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].file, "tests/test_one.py");
+        assert_eq!(findings[0].line, 12);
+        assert!(findings[0].message.contains("first failure"));
+        assert!(!findings[0].message.contains("second failure"));
+        assert_eq!(findings[1].file, "tests/test_two.py");
+        assert_eq!(findings[1].line, 34);
+        assert!(findings[1].message.contains("second failure"));
+        assert!(!findings[1].message.contains("first failure"));
+    }
+
+    #[test]
+    fn pytest_aborted_progress_is_not_an_inline_finding() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "===== test session starts =====\n\
+                plugins/helper.py:19: loaded\n\
+                tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+                tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n"
+                .to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        assert_eq!(super::pytest_failure_excerpt(&checks[0].output), None);
+        let summary = super::generate_inline_findings(tmp.path(), &checks, &[], None, None)
+            .expect("findings");
+        assert_eq!(summary.findings_count, 0);
+        let note = &summary.dashboard_findings[0];
+        assert_eq!(note.level, "note");
+        assert_eq!(note.file, None);
+        assert_eq!(note.line, None);
+        assert!(note.message.contains("cause is unknown"));
+        assert!(!note.message.contains("PASSED"));
+        assert!(!tmp.path().join("INLINE_FINDINGS.sarif").exists());
+    }
+
+    #[test]
+    fn pytest_unlocated_exception_remains_diagnostic_evidence() {
+        let output = "===== ERRORS =====\n\
+            _____ ERROR collecting tests/test_import.py _____\n\
+            E   ImportError: cannot import name 'missing'\n";
+        assert!(super::parse_pytest_failures(output).is_empty());
+        let excerpt = super::pytest_failure_excerpt(output).expect("exception evidence");
+        assert!(excerpt.contains("ImportError: cannot import name 'missing'"));
+    }
+
+    #[test]
+    fn pytest_progress_requires_an_actual_failed_status() {
+        let passed = "tests/test_parser.py::test_error[FAILED input] PASSED [ 25%]";
+        assert_eq!(super::pytest_failure_excerpt(passed), None);
+        let failed = "tests/test_parser.py::test_real_failure FAILED [ 26%]";
+        let output = format!("{passed}\n{failed}");
+        assert!(super::parse_pytest_failures(&output).is_empty());
+        assert_eq!(
+            super::pytest_failure_excerpt(&output).as_deref(),
+            Some(failed)
+        );
+    }
+
+    #[test]
+    fn shared_failure_excerpt_skips_passing_names_and_keeps_rust_panic_location() {
+        let check = super::CheckResult {
+            name: "Cargo test".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "Compiling fixture\n\
+                test test_failed_setup_is_reported ... ok\n\
+                test test_error ... ok\n\
+                thread 'tests::real_failure' panicked at src/lib.rs:42:5:\n\
+                assertion failed: false\n\
+                stack backtrace:\n\
+                0: fixture::real_failure\n"
+                .to_string(),
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.contains("src/lib.rs:42:5"));
+        assert!(excerpt.contains("stack backtrace:"));
+        assert!(!excerpt.contains(" ... ok"));
+        assert!(!excerpt.contains("Compiling fixture"));
+    }
+
+    #[test]
+    fn vitest_excerpt_starts_at_failure_not_a_passing_test_name() {
+        let mut output = "✓ handles failed requests\n".repeat(20);
+        output.push_str("× rejects malformed payload\nAssertionError: expected false to be true\n");
+        let check = super::CheckResult {
+            name: "Vitest".into(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output,
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.starts_with("× rejects malformed payload"));
+        assert!(excerpt.contains("AssertionError"));
+        assert!(!excerpt.contains("handles failed requests"));
+    }
+
+    #[test]
+    fn pytest_nonfailure_excerpt_never_invents_noncompletion() {
+        for status in [
+            crate::checks::CheckStatus::Passed,
+            crate::checks::CheckStatus::Skipped,
+            crate::checks::CheckStatus::Warnings,
+        ] {
+            let check = super::CheckResult {
+                name: "Pytest".to_string(),
+                status,
+                duration: std::time::Duration::ZERO,
+                output: "tests/test_parser.py::test_error PASSED\n===== 1 passed in 0.1s ====="
+                    .to_string(),
+                cached: false,
+                provenance: None,
+            };
+            let excerpt = super::check_failure_excerpt(&check);
+            assert!(excerpt.contains("1 passed in 0.1s"));
+            assert!(!excerpt.contains("did not complete"));
+            assert!(!excerpt.contains("cause is unknown"));
+            assert!(super::super::root_cause::extract_pytest_root_cause(&check).is_none());
+        }
+    }
+
+    #[test]
+    fn shared_failure_excerpt_bounds_a_huge_unicode_line() {
+        let check = super::CheckResult {
+            name: "Cargo check".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: format!("error[E0001]: invalid value {}", "ą🧪".repeat(4096)),
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.len() <= 8 * 1024);
+        assert!(excerpt.starts_with("error[E0001]: invalid value "));
+        assert!(excerpt.ends_with("... (truncated; see the full check log)"));
+        assert!(excerpt.contains("ą🧪"));
+    }
+
+    #[test]
+    fn semgrep_warning_excerpt_separates_scan_diagnostics_from_findings() {
+        let json = serde_json::json!({
+            "results": [],
+            "errors": [{"type": "PartialParsing", "level": "warn", "message": format!("Could not parse src/ui.js: {}", "ą🧪".repeat(4096))}]
+        });
+        let check = super::CheckResult {
+            name: "Semgrep".into(),
+            status: crate::checks::CheckStatus::Warnings,
+            duration: std::time::Duration::ZERO,
+            output: format!("{json}\npkg_resources is deprecated"),
+            cached: false,
+            provenance: None,
+        };
+        let excerpt = super::check_failure_excerpt(&check);
+        assert!(excerpt.starts_with("0 findings; 1 scan warnings; 0 scan errors"));
+        assert!(excerpt.contains("Scan diagnostic (PartialParsing): Could not parse src/ui.js:"));
+        assert!(!excerpt.contains("pkg_resources"));
+        assert!(!excerpt.contains("\"errors\""));
+        assert!(!excerpt.contains("Finding:"));
+        assert!(excerpt.len() < 2048);
+    }
+
+    #[test]
+    fn semgrep_excerpt_preserves_actual_findings_and_scan_errors() {
+        let output = serde_json::json!({
+            "results": [{"path": "src/api.py", "start": {"line": 7}, "extra": {"severity": "ERROR", "message": "Unsafe eval"}}],
+            "errors": [{"type": "Timeout", "level": "error", "short_msg": "Timed out parsing src/large.py"}]
+        }).to_string();
+        let excerpt = super::semgrep_check_excerpt(&output).unwrap();
+        assert!(excerpt.starts_with("1 findings; 0 scan warnings; 1 scan errors"));
+        assert!(excerpt.contains("Finding: src/api.py:7 — Unsafe eval"));
+        assert!(excerpt.contains("Scan diagnostic (Timeout): Timed out parsing src/large.py"));
+        assert_eq!(super::semgrep_check_excerpt("semgrep unavailable"), None);
+        assert_eq!(super::semgrep_check_excerpt("{invalid json}"), None);
+    }
+
+    #[test]
+    fn loctree_summary_is_general_context_not_an_inline_finding() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [super::CheckResult {
+            name: "heuristics_loctree".to_string(),
+            status: crate::checks::CheckStatus::Warnings,
+            duration: std::time::Duration::ZERO,
+            output: "9 dead exports; 8 unused symbols".to_string(),
+            cached: false,
+            provenance: None,
+        }];
+        let summary = super::generate_inline_findings(tmp.path(), &checks, &[], None, None)
+            .expect("findings");
+        assert_eq!(summary.findings_count, 0);
+        assert_eq!(summary.dashboard_findings.len(), 1);
+        assert_eq!(summary.dashboard_findings[0].level, "note");
+        assert_eq!(summary.dashboard_findings[0].file, None);
+        assert_eq!(summary.dashboard_findings[0].message, checks[0].output);
+        assert!(!tmp.path().join("INLINE_FINDINGS.sarif").exists());
+    }
+
     use super::*;
 
     fn err(in_diff: Option<bool>) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "Semgrep".to_string(),
             check_id: "semgrep_scan".to_string(),
@@ -935,6 +1724,8 @@ mod tests {
         in_diff: Option<bool>,
     ) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level,
             check_name: check_id.to_string(),
             check_id: check_id.to_string(),
@@ -946,6 +1737,8 @@ mod tests {
     #[test]
     fn baseline_metadata_is_not_an_operator_finding() {
         let metadata = DashboardFinding {
+            file: None,
+            line: None,
             level: "note",
             check_name: "Cargo audit baseline".to_string(),
             check_id: "cargo_audit_baseline".to_string(),
@@ -1060,6 +1853,8 @@ mod tests {
         // still gate — unlike a baseline-signal semgrep out-of-diff row, which
         // does not (proven by inline_gate_ignores_preexisting_only_errors).
         let cargo_test_row = DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "Cargo Test".to_string(),
             check_id: "cargo_test".to_string(),
@@ -1330,9 +2125,86 @@ mod tests {
         assert_eq!(advisory.in_diff, Some(false));
     }
 
+    fn sarif_results(dir: &Path) -> Vec<serde_json::Value> {
+        let sarif: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("INLINE_FINDINGS.sarif")).expect("sarif"),
+        )
+        .expect("parse sarif");
+        sarif["runs"][0]["results"]
+            .as_array()
+            .expect("sarif results")
+            .clone()
+    }
+
+    #[test]
+    fn generic_check_sarif_rows_carry_the_origin_tri_state() {
+        // A check without a dedicated parser is still a SARIF result, and the
+        // contract says every result carries `in_diff` + `classification`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = vec![rustfmt_check("Diff in src/changed.rs:3:\n-old\n+new\n")];
+        let diffs = vec![one_file_diff("src/changed.rs")];
+        generate_inline_findings(tmp.path(), &checks, &diffs, None, None).expect("findings");
+
+        let results = sarif_results(tmp.path());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["properties"]["in_diff"].as_bool(), Some(true));
+        assert_eq!(
+            results[0]["properties"]["classification"].as_str(),
+            Some("introduced")
+        );
+    }
+
+    #[test]
+    fn unlocated_generic_sarif_row_reports_unclassified_not_absent() {
+        // Falling back to the combined log establishes no origin. That is the
+        // `null` / `unclassified` state, not a missing property a consumer
+        // has to guess about.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = vec![rustfmt_check("some formatting problem\n")];
+        let diffs = vec![one_file_diff("src/changed.rs")];
+        generate_inline_findings(tmp.path(), &checks, &diffs, None, None).expect("findings");
+
+        let results = sarif_results(tmp.path());
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["properties"]["in_diff"].is_null());
+        assert_eq!(
+            results[0]["properties"]["classification"].as_str(),
+            Some("unclassified")
+        );
+    }
+
+    #[test]
+    fn cargo_audit_sarif_rows_classify_their_origin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let checks = [cargo_audit_check(
+            crate::checks::CheckStatus::Failed,
+            VULNERABLE_CARGO_AUDIT,
+        )];
+        let diffs = [one_file_diff("Cargo.toml")];
+        generate_inline_findings(tmp.path(), &checks, &diffs, None, None).expect("findings");
+
+        for result in sarif_results(tmp.path()) {
+            let in_diff = result["properties"]["in_diff"].as_bool();
+            assert_eq!(
+                result["properties"]["classification"].as_str(),
+                Some(origin_classification(in_diff)),
+                "classification must agree with in_diff on every advisory row"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_classification_covers_the_documented_tri_state() {
+        assert_eq!(origin_classification(Some(true)), "introduced");
+        assert_eq!(origin_classification(Some(false)), "preexisting");
+        assert_eq!(origin_classification(None), "unclassified");
+    }
+
     #[test]
     fn inline_gate_warns_on_new_warnings_only() {
         let warn = DashboardFinding {
+            file: None,
+            line: None,
             level: "warning",
             check_name: "Semgrep".to_string(),
             check_id: "semgrep_scan".to_string(),

@@ -484,7 +484,16 @@ pub(super) fn generate_merge_gate(input: MergeGateInput<'_>) -> Result<()> {
             "inline_findings": inline_findings_path,
             "full_patch": "10_diff/full.patch",
             "checks_log": "20_quality/full-checks.log",
-            "dashboard": "dashboard.html"
+            // The pack has exactly one browser entry point: `dashboard.html` by
+            // default, `review.html` under `--no-dashboard`. Naming the file
+            // that was not generated handed every static-report consumer a dead
+            // link out of the canonical decision, so this follows the HTML the
+            // run actually wrote.
+            "dashboard": if config.create_dashboard {
+                "dashboard.html"
+            } else {
+                "review.html"
+            }
         }
     });
 
@@ -739,6 +748,8 @@ mod tests {
 
     fn semgrep_dashboard_finding(path: &str, in_diff: bool) -> DashboardFinding {
         DashboardFinding {
+            file: None,
+            line: None,
             level: "error",
             check_name: "Semgrep scan".to_string(),
             check_id: "semgrep_scan".to_string(),
@@ -1475,6 +1486,8 @@ mod tests {
             status: "failed".to_string(),
             findings_count: 1,
             dashboard_findings: vec![DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Cargo Test".to_string(),
                 check_id: "cargo_test".to_string(),
@@ -1578,6 +1591,8 @@ mod tests {
             status: "failed".to_string(),
             findings_count: 1,
             dashboard_findings: vec![DashboardFinding {
+                file: None,
+                line: None,
                 level: "error",
                 check_name: "Semgrep scan".to_string(),
                 check_id: "semgrep_scan".to_string(),
@@ -2009,6 +2024,8 @@ mod tests {
             status: "warnings".to_string(),
             findings_count: 1,
             dashboard_findings: vec![DashboardFinding {
+                file: None,
+                line: None,
                 level: "warning",
                 check_name: "Rustfmt".to_string(),
                 check_id: "rustfmt".to_string(),

@@ -102,7 +102,7 @@ fn mock_checks() -> Vec<CheckResult> {
     ]
 }
 
-fn mock_ctx() -> DashboardContext {
+pub(super) fn mock_ctx() -> DashboardContext {
     DashboardContext {
         verdict: "PASS",
         analysis_status: crate::policy::engine::AnalysisStatus::Complete,
@@ -180,6 +180,34 @@ fn test_safe_id_no_collisions() {
     assert_ne!(safe_id("a-b"), safe_id("a_b"));
     assert_ne!(safe_id("a/b"), safe_id("a_b"));
     assert_ne!(safe_id("a.b"), safe_id("a_b"));
+}
+
+#[test]
+fn source_test_sidebar_preserves_full_matching_fraction() {
+    let config = mock_config();
+    let diffs = vec![mock_diff()];
+    let checks = mock_checks();
+    let mut ctx = mock_ctx();
+    ctx.coverage.pct = Some(100);
+    ctx.coverage.covered_count = 21;
+    ctx.coverage.total_source = 21;
+    let dir = std::env::temp_dir();
+    let html = build_html_test!(&config, &diffs, &checks, None, &ctx, "", &dir, "", None);
+    let navigation = html
+        .split("<nav")
+        .nth(1)
+        .expect("sidebar navigation")
+        .split("</nav>")
+        .next()
+        .unwrap()
+        .split("href=\"#section-coverage\"")
+        .nth(1)
+        .unwrap()
+        .split("</a>")
+        .next()
+        .unwrap();
+    assert!(navigation.contains(">21/21</span>"));
+    assert!(!navigation.contains("PASS"));
 }
 
 #[test]
@@ -278,6 +306,8 @@ fn test_skipped_checks_rendered() {
         "Should show skipped check name"
     );
     assert!(html.contains("not installed"), "Should show skip reason");
+    assert!(html.contains("data-i18n-template=\"message.skippedCheckDetail\""));
+    assert!(html.contains("data-reason=\"not installed\""));
 }
 
 #[test]
@@ -288,7 +318,8 @@ fn runtime_skipped_check_renders_operator_disclaimer() {
     let html = build_checks_section(&checks, &mock_ctx());
 
     assert!(html.contains("Not executed by this PrView run."));
-    assert!(html.contains("Reason: virtual manifest — configure -p demo."));
+    assert!(html.contains("virtual manifest — configure -p demo"));
+    assert!(html.contains("data-i18n=\"message.notExecutedHere\""));
     assert!(html.contains("External CI status not included."));
 }
 
@@ -347,8 +378,11 @@ fn test_file_with_patch_has_data_attr() {
 #[test]
 fn test_artifacts_explorer_has_per_file_patches() {
     let ctx = mock_ctx();
-    let dir = tempfile::tempdir().unwrap();
-    let html = build_artifacts_section(&ctx, dir.path());
+    let files = vec![super::evidence::EvidenceFile {
+        path: "10_diff/per-file-diffs/abc12345__src~2Fmain.rs.patch".into(),
+        text: Some("patch".into()),
+    }];
+    let html = build_artifacts_section(&ctx, &files, false);
 
     assert!(
         html.contains("Artifacts Explorer"),
@@ -371,19 +405,22 @@ fn snapshot_integrity_explorer_links_only_published_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let quality = dir.path().join("20_quality");
     std::fs::create_dir(&quality).unwrap();
-    assert!(!build_artifacts_section(&ctx, dir.path()).contains("SNAPSHOT_INTEGRITY"));
+    let section = |dir: &std::path::Path| {
+        build_artifacts_section(&ctx, &super::evidence::inventory(dir), false)
+    };
+    assert!(!section(dir.path()).contains("SNAPSHOT_INTEGRITY"));
     std::fs::write(quality.join("SNAPSHOT_INTEGRITY.md"), "# Evidence").unwrap();
     // A path-shaped directory is not a published JSON artifact.
     std::fs::create_dir(quality.join("SNAPSHOT_INTEGRITY.json")).unwrap();
-    let html = build_artifacts_section(&ctx, dir.path());
-    assert!(html.contains("href=\"20_quality/SNAPSHOT_INTEGRITY.md\""));
+    let html = section(dir.path());
+    assert!(html.contains("href=\"./20_quality/SNAPSHOT_INTEGRITY.md\""));
     assert!(!html.contains("SNAPSHOT_INTEGRITY.json"));
     std::fs::remove_dir(quality.join("SNAPSHOT_INTEGRITY.json")).unwrap();
     std::fs::write(quality.join("SNAPSHOT_INTEGRITY.json"), "{}").unwrap();
-    let html = build_artifacts_section(&ctx, dir.path());
-    assert!(html.contains("href=\"20_quality/SNAPSHOT_INTEGRITY.json\""));
-    assert!(html.contains("Snapshot Integrity (MD)"));
-    assert!(html.contains("Snapshot Integrity (JSON)"));
+    let html = section(dir.path());
+    assert!(html.contains("href=\"./20_quality/SNAPSHOT_INTEGRITY.json\""));
+    assert!(html.contains(">SNAPSHOT_INTEGRITY.md<"));
+    assert!(html.contains(">SNAPSHOT_INTEGRITY.json<"));
 }
 
 #[test]
@@ -451,6 +488,34 @@ fn test_header_merge_chip_shows_hold_when_not_recommended() {
 
     assert!(html.contains("HOLD MERGE"));
     assert!(!html.contains("BLOCK MERGE"));
+    let quality_badge = Regex::new(
+        r#"<span class="badge ([^"]+)"[^>]*>[^<]*<span[^>]*data-i18n-template="badge.qualityFail""#,
+    )
+    .unwrap();
+    // A permissive merge policy does not turn a failed quality check into a warning.
+    // Both the header and the decision panel retain their failure color classes.
+    assert_eq!(
+        quality_badge
+            .captures(&html)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .as_str(),
+        "badge-error"
+    );
+    let panel = build_merge_decision_card(&ctx);
+    assert!(panel.contains("merge-decision-badge mdb-fail"));
+    ctx.policy_allow_merge = false;
+    let enforced = build_header(&config, Some(&diff), &ctx, Path::new("20260308-031035"), "");
+    assert_eq!(
+        quality_badge
+            .captures(&enforced)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .as_str(),
+        "badge-error"
+    );
 }
 
 #[test]
@@ -557,6 +622,8 @@ fn test_merge_decision_card_review_caveats() {
         check_name: "heuristics_loctree".into(),
         check_id: "heuristics_loctree".into(),
         message: "review me".into(),
+        file: None,
+        line: None,
         in_diff: Some(true),
     }];
     let html = build_merge_decision_card(&ctx);
@@ -573,6 +640,21 @@ fn test_merge_decision_card_review_caveats() {
         ));
     assert!(html.contains("11% coverage heuristic"));
     assert!(html.contains("1 inline finding"));
+}
+
+#[test]
+fn merge_decision_summary_hides_serialized_api_payload_without_mutating_evidence() {
+    let mut ctx = mock_ctx();
+    let caveat = "Rust API analysis incomplete [api-delta:{\"kind\":\"unknown\"}]".to_string();
+    ctx.review_caveats = vec![caveat.clone()];
+    let html = build_merge_decision_card(&ctx);
+    assert!(html.contains("Rust API analysis incomplete"));
+    assert!(!html.contains("api-delta:"));
+    assert_eq!(ctx.review_caveats, vec![caveat]);
+    assert_eq!(
+        crate::artifacts::verdict::MergeDecisionState::AllowWithReview.hero_class(),
+        "merge-review"
+    );
 }
 
 #[test]
@@ -637,14 +719,23 @@ fn test_action_center_traffic_light_chips() {
         html.contains(r#"data-i18n-template="count.warnings""#),
         "Checks warning card should be localizable"
     );
-    // Should have Breaking chip
+    // The public API chip names the structural scan it actually ran and says
+    // what it did not assess.
     assert!(
-        html.contains("Breaking"),
-        "Action center should contain Breaking chip"
+        html.contains(r#"data-i18n-template="chip.publicApiStructuralChangesClear""#),
+        "Action center should contain the public API structural chip"
+    );
+    assert!(
+        html.contains(r#"data-i18n="message.structuralScanScope""#),
+        "The structural chip must carry its scope note"
+    );
+    assert!(
+        !html.contains("Breaking: 0"),
+        "A structural scan cannot claim there are no breaking changes"
     );
     // Should have Findings chip
     assert!(
-        html.contains("Findings"),
+        html.contains(r#"data-i18n-template="chip.findingsClear""#),
         "Action center should contain Findings chip"
     );
 }
@@ -758,18 +849,20 @@ fn test_blockers_section_max_three() {
 
 #[test]
 fn test_blockers_debug_hints() {
-    assert_eq!(debug_hint_for_check("cargo_clippy"), "cargo clippy --fix");
-    assert_eq!(
-        debug_hint_for_check("cargo_test"),
-        "cargo test -- --nocapture"
-    );
-    assert_eq!(debug_hint_for_check("cargo_fmt"), "cargo fmt");
-    assert_eq!(debug_hint_for_check("eslint"), "npx eslint --fix .");
-    assert_eq!(debug_hint_for_check("ruff_check"), "ruff check --fix .");
-    assert_eq!(
-        debug_hint_for_check("unknown_check"),
-        "Re-run locally with verbose output"
-    );
+    for name in [
+        "cargo_clippy",
+        "cargo_test",
+        "pytest",
+        "cargo_fmt",
+        "eslint",
+        "ruff_check",
+        "unknown_check",
+    ] {
+        let hint = debug_hint_for_check(name);
+        assert!(hint.contains("evidence"));
+        assert!(!hint.contains("--fix"));
+        assert!(!hint.contains("Re-run"));
+    }
 }
 
 // ---- PRV-103: Time Budget ----
@@ -790,7 +883,7 @@ fn test_time_budget_basic() {
     assert!(html.contains("cargo check"), "Should show check name");
     assert!(html.contains("cargo clippy"), "Should show check name");
     assert!(
-        html.contains(r#"data-i18n="label.total""#),
+        html.contains(r#"data-i18n="label.recordedCheckTime""#),
         "Should localize total label"
     );
     assert!(html.contains("2 checks"), "Should show count");
@@ -1373,18 +1466,29 @@ fn narrative_section_renders_markdown_through_mdrender() {
     let md = "## Findings\n\n> [!NOTE]\n> Look here.\n\n```rust\nfn a() {}\n```\n";
     let html = build_narrative_section(md);
 
-    // Rendered through mdrender (scoped wrapper + GFM callout + code highlight).
+    // Rendered through mdrender; dashboard CSS owns all presentation colors.
     assert!(html.contains("<div class=\"mdr\">"), "mdr wrapper missing");
     assert!(
         html.contains("markdown-alert markdown-alert-note"),
         "note callout missing: {html}"
     );
     assert!(
-        html.contains("<span style=\"color:#"),
-        "syntect highlight spans missing"
+        !html.contains("style=\"color:#") && !html.contains("style=\"background-color:#"),
+        "fenced code must not inject a competing inline palette"
     );
     // Raw markdown is still preserved for the copy-as-markdown control.
     assert!(html.contains("narrative-content"));
+    let panel = html
+        .find("card narrative-rendered")
+        .expect("narrative content panel");
+    let copy = html.find("id=\"copy-narrative-btn\"").expect("copy action");
+    let rendered = html
+        .find("<div class=\"mdr\">")
+        .expect("rendered narrative");
+    assert!(
+        panel < copy && copy < rendered,
+        "copy action belongs inside the narrative panel before its content"
+    );
 }
 
 #[test]
@@ -1421,7 +1525,10 @@ fn test_pl_locale_merge_gate_caveat_translations() {
         "returned-warnings PL missing"
     );
     assert!(js.contains("skipped: "), "skipped shape missing");
-    assert!(js.contains("' pominięty: '"), "skipped PL wrapper missing");
+    assert!(
+        js.contains("' — pominięto: '"),
+        "skipped PL wrapper missing"
+    );
     assert!(
         js.contains("'lint disabled': 'lint wyłączony'"),
         "lint reason map missing"
@@ -1431,7 +1538,7 @@ fn test_pl_locale_merge_gate_caveat_translations() {
         "tests reason map missing"
     );
     assert!(
-        js.contains("'security disabled': 'security wyłączone'"),
+        js.contains("'security disabled': 'analiza bezpieczeństwa wyłączona'"),
         "security reason map missing"
     );
     assert!(
@@ -1461,4 +1568,174 @@ fn test_pl_locale_merge_gate_caveat_translations() {
         js.contains("return text;"),
         "decision-reason EN fallback missing"
     );
+}
+
+#[test]
+fn archive_download_is_present_only_when_archive_creation_is_enabled() {
+    let ctx = mock_ctx();
+    let enabled = build_artifacts_section(&ctx, &[], true);
+    assert!(enabled.contains("href=\"artifacts.zip\" download"));
+    assert!(!enabled.contains("data-evidence-path=\"artifacts.zip\""));
+    assert!(!build_artifacts_section(&ctx, &[], false).contains("artifacts.zip"));
+}
+
+// ---------------------------------------------------------------------------
+// Canonical check status → UI label (no invented verdicts)
+// ---------------------------------------------------------------------------
+
+const ALL_CHECK_STATUSES: [CheckStatus; 5] = [
+    CheckStatus::Passed,
+    CheckStatus::Failed,
+    CheckStatus::Warnings,
+    CheckStatus::Skipped,
+    CheckStatus::Error,
+];
+
+fn executed(status: CheckStatus) -> bool {
+    matches!(
+        status,
+        CheckStatus::Passed | CheckStatus::Failed | CheckStatus::Warnings
+    )
+}
+
+fn status_check(name: &str, status: CheckStatus, output: &str) -> CheckResult {
+    CheckResult {
+        name: name.into(),
+        status,
+        duration: Duration::from_secs(1),
+        output: output.into(),
+        cached: false,
+        provenance: None,
+    }
+}
+
+/// Words that assert a check did its job. None of them may appear in the row of
+/// a check that never produced a result.
+fn asserts_success(fragment: &str) -> Option<String> {
+    let re = Regex::new(
+        r"(?i)\b(clean|pass|passed|passing|ok|success|successful|no issues|no findings)\b",
+    )
+    .expect("success-word regex");
+    re.find(fragment).map(|m| m.as_str().to_string())
+}
+
+fn check_row(html: &str) -> String {
+    let start = html
+        .find("<tr class=\"check-row")
+        .expect("check row present");
+    let end = html[start..].find("</tr>").expect("check row closed") + start;
+    html[start..end].to_string()
+}
+
+#[test]
+fn checks_table_renders_every_canonical_status_verbatim() {
+    for status in ALL_CHECK_STATUSES {
+        let checks = vec![status_check(
+            "tool-check",
+            status,
+            "runner reported: nothing to report",
+        )];
+        let ctx = mock_ctx();
+        let html = build_checks_section(&checks, &ctx);
+        let row = check_row(&html);
+
+        assert!(
+            row.contains(&format!(
+                r#"data-i18n="status.{key}">{key}<"#,
+                key = status.as_str()
+            )),
+            "{:?} must render its canonical label 1:1, got: {row}",
+            status
+        );
+
+        if !executed(status) {
+            assert!(
+                asserts_success(&row).is_none(),
+                "{:?} row must not claim success ({:?}): {row}",
+                status,
+                asserts_success(&row)
+            );
+            assert!(
+                !row.contains("badge-success"),
+                "{:?} must not be styled as a passing check",
+                status
+            );
+        }
+    }
+}
+
+#[test]
+fn skipped_checks_keep_their_reason_and_never_read_as_clean() {
+    for reason in [
+        "tool not installed",
+        "no matching files in diff",
+        "disabled by profile",
+        "reason unavailable",
+    ] {
+        let checks = vec![status_check("tool-check", CheckStatus::Skipped, reason)];
+        let mut ctx = mock_ctx();
+        ctx.skipped_checks = vec![SkippedCheck {
+            id: "tool_check".into(),
+            name: "tool-check".into(),
+            reason: reason.into(),
+        }];
+        let html = build_checks_section(&checks, &ctx);
+
+        assert!(
+            html.contains(&format!(r#"data-reason="{reason}""#)),
+            "skip reason `{reason}` must reach the reader verbatim"
+        );
+        assert!(
+            html.contains(r#"data-i18n="message.notExecutedHere""#),
+            "a skipped check must say it was not executed"
+        );
+        let row = check_row(&html);
+        assert!(
+            asserts_success(&row).is_none(),
+            "skip reason `{reason}` must not be rendered as a passing check: {row}"
+        );
+    }
+}
+
+#[test]
+fn security_cards_never_report_a_metric_for_a_check_that_did_not_run() {
+    for status in ALL_CHECK_STATUSES {
+        // A skipped scanner's output is its skip reason; an audit parser would
+        // happily scrape a number out of anything that looks like one.
+        let checks = vec![status_check(
+            "cargo audit",
+            status,
+            "{\"vulnerabilities\":{\"count\":0}}",
+        )];
+        let ctx = mock_ctx();
+        let html = build_security_section(&checks, &ctx);
+
+        assert!(
+            html.contains(&format!(
+                r#"data-i18n="status.{key}">{key}<"#,
+                key = status.as_str()
+            )),
+            "{:?} must render its canonical label 1:1 in the security card",
+            status
+        );
+
+        if !executed(status) {
+            assert!(
+                html.contains(r#"data-i18n-template="message.notExecutedHere""#),
+                "{:?} security card must say it was not executed",
+                status
+            );
+            assert!(
+                !html.contains("0 vulnerabilities"),
+                "{:?} security card must not report a scanned metric",
+                status
+            );
+        } else {
+            assert!(
+                html.contains("0 vulnerabilities"),
+                "{:?} security card keeps the metric the scanner produced",
+                status
+            );
+        }
+    }
 }

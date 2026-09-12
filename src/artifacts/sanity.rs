@@ -248,6 +248,7 @@ pub(super) fn expected_outputs_for_timing(label: &str) -> &'static [&'static str
             "00_summary/FAILURES_SUMMARY.md",
         ],
         "PR_REVIEW + AI_INDEX" => &["PR_REVIEW.md", "AI_INDEX.md"],
+        "review handoff" => &["REVIEW_SUMMARY.md", "AI_INDEX.md"],
         "REVIEW_SUMMARY + review.html + AI_INDEX" => {
             &["REVIEW_SUMMARY.md", "review.html", "AI_INDEX.md"]
         }

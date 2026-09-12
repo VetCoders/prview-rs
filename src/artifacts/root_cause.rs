@@ -20,6 +20,13 @@ pub(crate) fn extract_root_cause(check: &CheckResult) -> Option<RootCause> {
         return Some(root_cause);
     }
 
+    // Pytest progress and parameterized test names can contain words such as
+    // "failed", "error", or "timed out" even when that test passed. Its
+    // structured diagnostics must take precedence over generic signatures.
+    if name_lower.contains("pytest") {
+        return extract_pytest_root_cause(check);
+    }
+
     // Timeout detection (universal)
     if let Some(ref prov) = check.provenance
         && (prov.exit_code == Some(-1)
@@ -102,7 +109,9 @@ pub(crate) fn extract_root_cause(check: &CheckResult) -> Option<RootCause> {
 
     // Vitest / tests (JS)
     if name_lower.contains("vitest")
-        || (name_lower.contains("test") && !name_lower.contains("cargo"))
+        || (name_lower.contains("test")
+            && !name_lower.contains("cargo")
+            && !name_lower.contains("pytest"))
     {
         return extract_vitest_root_cause(output);
     }
@@ -173,11 +182,6 @@ pub(crate) fn extract_root_cause(check: &CheckResult) -> Option<RootCause> {
             evidence: error_line.unwrap_or("").to_string(),
             hint: "Fix type annotations or add type: ignore comments".into(),
         });
-    }
-
-    // Pytest (Python)
-    if name_lower.contains("pytest") {
-        return extract_pytest_root_cause(output);
     }
 
     // Fallback: first non-empty line
@@ -361,19 +365,285 @@ pub(crate) fn extract_vitest_root_cause(output: &str) -> Option<RootCause> {
     })
 }
 
-pub(crate) fn extract_pytest_root_cause(output: &str) -> Option<RootCause> {
-    let summary = output.lines().find(|l| {
-        l.contains("failed") && l.contains("passed")
-            || l.starts_with("FAILED")
-            || l.contains("error")
+pub(crate) fn extract_pytest_root_cause(check: &CheckResult) -> Option<RootCause> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    if !matches!(check.status, CheckStatus::Failed | CheckStatus::Error) {
+        return None;
+    }
+
+    static RUNNER_TIMEOUT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:pytest|uv) timed out after [0-9]+s$").expect("pytest runner timeout regex")
     });
-    let first_failure = output
+    if check.status == CheckStatus::Error && RUNNER_TIMEOUT.is_match(check.output.trim()) {
+        return Some(RootCause {
+            cause: "Process timed out".into(),
+            evidence: check.output.trim().to_string(),
+            hint: "Inspect the timeout budget and full Pytest log.".into(),
+        });
+    }
+
+    if check.provenance.as_ref().and_then(|p| p.exit_code) == Some(-1) {
+        return Some(RootCause {
+            cause: "Process timed out".into(),
+            evidence: "PrView recorded a runner timeout (exit code -1).".into(),
+            hint: "Inspect the timeout budget and full Pytest log.".into(),
+        });
+    }
+
+    static FAILURE_COUNT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:^|,\s*)[1-9][0-9]* (?:failed|errors?)\b")
+            .expect("pytest failure summary regex")
+    });
+    let output = &check.output;
+    let excerpt = findings::pytest_failure_excerpt(output);
+    let summary = output
         .lines()
-        .find(|l| l.starts_with("FAILED") || l.contains("ERRORS"));
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            line.starts_with('=')
+                && line.ends_with('=')
+                && FAILURE_COUNT.is_match(line.trim_matches('=').trim())
+        })
+        .map(|line| line.trim_matches('=').trim());
+
+    if excerpt.is_none() && summary.is_none() {
+        let runner_errors: Vec<_> = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("ERROR:"))
+            .take(3)
+            .collect();
+        let no_tests = check.provenance.as_ref().and_then(|p| p.exit_code) == Some(5)
+            && output
+                .lines()
+                .map(str::trim)
+                .any(|line| line.trim_matches('=').trim().starts_with("no tests ran"));
+        if !runner_errors.is_empty() || no_tests {
+            return Some(RootCause {
+                cause: if no_tests && runner_errors.is_empty() {
+                    "Pytest collected no tests".into()
+                } else {
+                    "Pytest reported a runner error".into()
+                },
+                evidence: if runner_errors.is_empty() {
+                    "No tests ran; Pytest exited with code 5.".into()
+                } else {
+                    runner_errors.join("\n")
+                },
+                hint: "Inspect test discovery, command arguments and Pytest configuration.".into(),
+            });
+        }
+        let exit = check
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.exit_code)
+            .map(|code| format!(" (exit code {code})"))
+            .unwrap_or_default();
+        return Some(RootCause {
+            cause: format!(
+                "Pytest did not complete successfully{exit}. No failed-test diagnostic was captured; the cause is unknown."
+            ),
+            evidence: String::new(),
+            hint: "Inspect the full Pytest log and runner details to determine why the process stopped. The exit code alone does not establish the cause."
+                .into(),
+        });
+    }
 
     Some(RootCause {
-        cause: summary.unwrap_or("Pytest failures").to_string(),
-        evidence: first_failure.unwrap_or("").to_string(),
-        hint: "Run pytest -x to reproduce first failure".into(),
+        cause: summary
+            .unwrap_or("Pytest reported test failure or error diagnostics")
+            .to_string(),
+        evidence: excerpt.unwrap_or_default(),
+        hint: "Inspect the captured test diagnostics and their inputs in the full Pytest log before choosing a fix."
+            .into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn interrupted_pytest() -> CheckResult {
+        CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::from_secs(111),
+            output: "===== test session starts =====\n\
+                rootdir: /tmp/project\n\
+                collecting ... collected 3293 items\n\
+                tests/test_parser.py::test_failed_setup_is_reported PASSED [ 25%]\n\
+                tests/test_parser.py::test_error[2026-02-30T00:00:00Z] PASSED [ 25%]\n\
+                tests/test_parser.py::test_next_case "
+                .to_string(),
+            cached: false,
+            provenance: Some(crate::checks::CheckProvenance {
+                command: "uv run pytest -v".to_string(),
+                tool_version: None,
+                cwd: "/tmp/project".to_string(),
+                target_sha: None,
+                tree_state: None,
+                exit_code: Some(137),
+                started_at: String::new(),
+                finished_at: String::new(),
+                hard_fail_signatures: vec![],
+                cache_key: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn pytest_runner_timeout_without_exit_code_is_explicit() {
+        for launcher in ["pytest", "uv"] {
+            let mut check = interrupted_pytest();
+            check.status = CheckStatus::Error;
+            check.provenance.as_mut().unwrap().exit_code = None;
+            check.output = format!("{launcher} timed out after 600s");
+            assert_eq!(
+                extract_root_cause(&check).unwrap().cause,
+                "Process timed out"
+            );
+            assert_eq!(findings::check_failure_excerpt(&check), check.output);
+            check.output = format!("tests/test_x.py::test_{launcher} timed out after 600s PASSED");
+            assert_ne!(
+                extract_root_cause(&check).unwrap().cause,
+                "Process timed out"
+            );
+        }
+    }
+
+    #[test]
+    fn pytest_recorded_timeout_precedes_progress_text() {
+        let mut check = interrupted_pytest();
+        check.provenance.as_mut().unwrap().exit_code = Some(-1);
+        let diagnostic = extract_root_cause(&check).unwrap();
+        assert_eq!(diagnostic.cause, "Process timed out");
+        assert!(findings::check_failure_excerpt(&check).contains("runner timeout"));
+        check.provenance.as_mut().unwrap().exit_code = Some(137);
+        check
+            .output
+            .push_str("\ntests/test_x.py::test_timed_out PASSED");
+        assert!(
+            extract_root_cause(&check)
+                .unwrap()
+                .cause
+                .contains("unknown")
+        );
+    }
+
+    #[test]
+    fn pytest_retains_explicit_runner_diagnostics_without_inventing_test_failures() {
+        for (code, output, expected) in [
+            (5, "===== no tests ran in 0.01s =====", "No tests ran"),
+            (
+                4,
+                "ERROR: usage: pytest [options]\nERROR: unrecognized arguments: --bad",
+                "unrecognized arguments",
+            ),
+        ] {
+            let mut check = interrupted_pytest();
+            check.output = output.into();
+            check.provenance.as_mut().unwrap().exit_code = Some(code);
+            let diagnostic = extract_root_cause(&check).unwrap();
+            assert!(!diagnostic.cause.contains("unknown"));
+            assert!(diagnostic.evidence.contains(expected));
+            assert!(findings::check_failure_excerpt(&check).contains(expected));
+            assert!(findings::parse_pytest_failures(output).is_empty());
+        }
+        let mut check = interrupted_pytest();
+        check.provenance.as_mut().unwrap().exit_code = Some(5);
+        assert!(
+            extract_root_cause(&check)
+                .unwrap()
+                .cause
+                .contains("unknown")
+        );
+    }
+
+    #[test]
+    fn pytest_interrupted_process_does_not_invent_a_failed_test() {
+        let check = interrupted_pytest();
+        let diagnostic = extract_root_cause(&check).expect("process diagnostic");
+        assert!(diagnostic.cause.contains("exit code 137"));
+        assert!(
+            diagnostic
+                .cause
+                .contains("No failed-test diagnostic was captured")
+        );
+        assert!(diagnostic.cause.contains("cause is unknown"));
+        assert!(diagnostic.evidence.is_empty());
+        assert!(!diagnostic.hint.contains("reported test failure"));
+        assert!(!diagnostic.cause.contains("SIGKILL"));
+        assert!(!diagnostic.cause.contains("memory"));
+        assert_eq!(findings::check_failure_excerpt(&check), diagnostic.cause);
+    }
+
+    #[test]
+    fn pytest_failure_summary_uses_diagnostics_and_plain_exit_code() {
+        let tmp = tempfile::tempdir().expect("summary directory");
+        crate::artifacts::generate_failures_summary(tmp.path(), &[interrupted_pytest()])
+            .expect("failure summary");
+        let summary = std::fs::read_to_string(tmp.path().join("FAILURES_SUMMARY.md")).unwrap();
+        assert!(summary.contains("**Status:** failed"));
+        assert!(summary.contains("**Exit code:** 137\n"));
+        assert!(summary.contains("### Failure details"));
+        assert!(summary.contains("cause is unknown"));
+        for misleading in [
+            "Some(137)",
+            "Root Cause",
+            "PASSED",
+            "test_failed_setup_is_reported",
+            "test_error[",
+            "test session starts",
+            "rootdir:",
+            "reported test failure and its inputs",
+        ] {
+            assert!(
+                !summary.contains(misleading),
+                "unexpected {misleading}: {summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn pytest_dispatch_reports_python_evidence_and_final_summary() {
+        let check = CheckResult {
+            name: "Pytest".to_string(),
+            status: crate::checks::CheckStatus::Failed,
+            duration: std::time::Duration::ZERO,
+            output: "===== test session starts =====\n\
+                tests/test_parser.py::test_failed_input_is_handled PASSED\n\
+                tests/test_parser.py::test_roundtrip FAILED\n\
+                ===== FAILURES =====\n\
+                _____ test_roundtrip _____\n\
+                E   AssertionError: unexpected message\n\
+                tests/test_parser.py:42: AssertionError\n\
+                ===== short test summary info =====\n\
+                FAILED tests/test_parser.py::test_roundtrip\n\
+                ===== 1 failed, 12 passed in 0.10s ====="
+                .to_string(),
+            cached: false,
+            provenance: None,
+        };
+        let diagnostic = extract_root_cause(&check).expect("diagnostic");
+        assert_eq!(diagnostic.cause, "1 failed, 12 passed in 0.10s");
+        assert!(
+            diagnostic
+                .evidence
+                .contains("AssertionError: unexpected message")
+        );
+        assert!(diagnostic.evidence.contains("tests/test_parser.py:42"));
+        assert!(!diagnostic.evidence.contains("test session starts"));
+        assert!(!diagnostic.hint.contains("cargo"));
+        assert!(!diagnostic.hint.contains("Run test suite"));
+        let tmp = tempfile::tempdir().expect("summary directory");
+        crate::artifacts::generate_failures_summary(tmp.path(), &[check]).expect("failure summary");
+        let summary = std::fs::read_to_string(tmp.path().join("FAILURES_SUMMARY.md")).unwrap();
+        assert!(summary.contains("tests/test_parser.py:42"));
+        assert!(summary.contains("AssertionError: unexpected message"));
+        assert!(!summary.contains("PASSED"));
+        assert!(!summary.contains("test session starts"));
+    }
 }
