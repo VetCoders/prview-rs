@@ -28,8 +28,12 @@ a manual dry run:
    `--version`.
 4. **build (macOS only)** — Developer ID signing, strict signature
    verification, a `TeamIdentifier` assertion, Apple notarization that must
-   reach `Accepted`, a Gatekeeper `spctl --assess` check, and a code directory
-   hash comparison proving the archived binary is the notarized one.
+   reach `Accepted`, a Gatekeeper check
+   (`spctl -a -t open --context context:primary-signature -vv`) that must exit 0
+   and report `source=Notarized Developer ID`, and a code directory hash
+   comparison proving the archived binary is the notarized one. `--type execute`
+   is deliberately not used: it rejects every standalone Mach-O with "does not
+   seem to be an app".
 5. **checksums** — the set of produced archives must match
    `PRVIEW_RELEASE_TARGETS` exactly, so a dropped build target fails the release
    instead of silently shipping a partial one; `SHA256SUMS` is then regenerated

@@ -16,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The macOS release binary is now signed with a Developer ID Application
   certificate (Team ID `MW223P3NPX`) and notarized by Apple. The release
   workflow verifies the signature strictly, asserts the `TeamIdentifier`,
-  requires notarization to reach `Accepted`, requires Gatekeeper acceptance via
-  `spctl --assess --type execute`, and proves the archived binary is the
-  notarized one by comparing code directory hashes after extraction. A
+  requires notarization to reach `Accepted`, requires Gatekeeper to report
+  `source=Notarized Developer ID` via
+  `spctl -a -t open --context context:primary-signature`, and proves the
+  archived binary is the notarized one by comparing code directory hashes after
+  extraction. A
   credentials preflight job fails the whole run when a signing or notarization
   secret is missing, so no release can be produced unsigned.
 - The release workflow accepts `workflow_dispatch` as a dry run. It executes the

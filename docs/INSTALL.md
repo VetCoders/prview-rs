@@ -146,13 +146,20 @@ codesign -dv --verbose=2 ./prview
 #         TeamIdentifier=MW223P3NPX
 #         flags=0x10000(runtime)
 
-spctl --assess --type execute --verbose=2 ./prview
+spctl -a -t open --context context:primary-signature -vv ./prview
 # expect: ./prview: accepted
 #         source=Notarized Developer ID
 ```
 
 A standalone command-line executable cannot be stapled, so `spctl` resolves the
-notarization ticket online; the check needs network access.
+notarization ticket online; the check needs network access. `source=Notarized
+Developer ID` is the proof that the ticket resolved — a plain
+`source=Developer ID` means signed but not notarized.
+
+Do not use `spctl --assess --type execute` here: that assessment type only
+passes for bundled applications and rejects every standalone executable
+(including Apple's own `/bin/ls`) with "the code is valid but does not seem to
+be an app".
 
 The Linux binary is not code-signed — verify it with `SHA256SUMS`.
 

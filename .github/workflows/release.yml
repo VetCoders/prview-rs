@@ -328,22 +328,41 @@ jobs:
 
           BIN="target/${{ matrix.target }}/release/prview"
 
-          # A standalone Mach-O executable cannot be stapled, so Gatekeeper
-          # resolves the ticket online. Propagation can lag a few seconds after
-          # the submission is Accepted.
+          # `spctl --assess --type execute` is the wrong assessment for a bare
+          # Mach-O: it rejects EVERY standalone executable with "the code is
+          # valid but does not seem to be an app" - Apple's own /bin/ls included
+          # - because that type only ever passes for bundled applications. The
+          # correct assessment for a CLI binary is the `open` type evaluated
+          # against the primary signature.
+          #
+          # A standalone executable also cannot be stapled, so Gatekeeper has to
+          # resolve the notarization ticket online; `source=Notarized Developer
+          # ID` is the proof that lookup succeeded. A plain `source=Developer ID`
+          # means signed but not notarized and must not pass. Ticket propagation
+          # can lag a few seconds after notarytool reports Accepted, hence the
+          # retries. spctl writes the source/origin lines to stderr, so the
+          # output is captured with 2>&1.
           ATTEMPT=1
+          ASSESS=""
+          RC=0
           while [ "${ATTEMPT}" -le 5 ]; do
-            ASSESS="$(spctl --assess --type execute --verbose=2 "${BIN}" 2>&1 || true)"
+            set +e
+            ASSESS="$(spctl -a -t open --context context:primary-signature -vv "${BIN}" 2>&1)"
+            RC=$?
+            set -e
             printf '%s\n' "${ASSESS}"
-            if printf '%s\n' "${ASSESS}" | grep -q ': accepted'; then
-              echo "gatekeeper: accepted on attempt ${ATTEMPT}"
+            if [ "${RC}" -eq 0 ] && printf '%s\n' "${ASSESS}" | grep -qx 'source=Notarized Developer ID'; then
+              echo "gatekeeper: accepted as Notarized Developer ID on attempt ${ATTEMPT}"
               exit 0
             fi
+            if [ "${ATTEMPT}" -lt 5 ]; then
+              sleep 15
+            fi
             ATTEMPT=$((ATTEMPT + 1))
-            sleep 15
           done
 
-          echo "::error::spctl did not accept the notarized binary"
+          echo "::error::Gatekeeper did not report a notarized assessment for ${BIN} after 5 attempts; expected spctl exit 0 and a 'source=Notarized Developer ID' line, observed exit ${RC} and:"
+          printf '%s\n' "${ASSESS:-<no output>}" >&2
           exit 1
 
       - name: Package archive
