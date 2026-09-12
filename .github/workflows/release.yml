@@ -160,6 +160,32 @@ jobs:
 
           echo "provenance ok: ${ACTUAL_VERSION} built from ${ACTUAL_SHA}"
 
+      - name: Assert binary is self-contained
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BIN="target/${{ matrix.target }}/release/prview"
+
+          # prview reads local repositories through a vendored libgit2 and
+          # shells out to `git` for anything on the network, so none of these
+          # belong in the link map. A dynamic OpenSSL dependency in particular
+          # makes the binary unusable on hosts with a different libssl soname.
+          LINKED="$(ldd "$BIN")"
+          printf '%s\n' "${LINKED}"
+          OFFENDERS="$(printf '%s\n' "${LINKED}" \
+            | grep -E 'libssl|libcrypto|libssh2|libgit2|libcurl' || true)"
+          if [ -n "${OFFENDERS}" ]; then
+            echo "::error::binary links libraries it must not depend on:"
+            printf '%s\n' "${OFFENDERS}" | while IFS= read -r line; do
+              echo "::error::  ${line}"
+            done
+            exit 1
+          fi
+
+          echo "self-contained ok: no OpenSSL/libssh2/libgit2/libcurl linkage"
+
       - name: Import Developer ID signing certificate
         if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
@@ -275,6 +301,55 @@ jobs:
           fi
           echo "NOTARIZED_CDHASH=${CDHASH}" >> "${GITHUB_ENV}"
           echo "cdhash: ${CDHASH}"
+
+      - name: Assert signed binary runs and is self-contained
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          BIN="target/${{ matrix.target }}/release/prview"
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+
+          # `Assert embedded provenance` ran before signing. Under a hardened
+          # runtime (`--options runtime`) dyld refuses to map a non-platform
+          # dylib signed by a different Team ID, so a binary that links e.g.
+          # Homebrew OpenSSL aborts on every launch — including `--version` —
+          # while still signing, notarizing and passing Gatekeeper. Re-run the
+          # assertions on the signed file so that failure cannot ship.
+          ACTUAL_SHA="$("$BIN" --build-source-sha)"
+          if [ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::signed binary reports source SHA '${ACTUAL_SHA}', expected '${EXPECTED_SHA}'"
+            exit 1
+          fi
+
+          ACTUAL_VERSION="$("$BIN" --version)"
+          if [ "${ACTUAL_VERSION}" != "prview ${VERSION}" ]; then
+            echo "::error::signed binary reports version '${ACTUAL_VERSION}', expected 'prview ${VERSION}'"
+            exit 1
+          fi
+
+          echo "signed binary runs: ${ACTUAL_VERSION} built from ${ACTUAL_SHA}"
+
+          # Every dependency must come from the OS, so the binary runs on a Mac
+          # without Homebrew. The first `otool -L` line is the binary's own
+          # path, not a dependency.
+          LINKED="$(otool -L "$BIN")"
+          printf '%s\n' "${LINKED}"
+          OFFENDERS="$(printf '%s\n' "${LINKED}" | tail -n +2 \
+            | sed -e 's/^[[:space:]]*//' \
+            | grep -v -E '^(/usr/lib/|/System/)' || true)"
+          if [ -n "${OFFENDERS}" ]; then
+            echo "::error::signed binary links non-system libraries:"
+            printf '%s\n' "${OFFENDERS}" | while IFS= read -r line; do
+              echo "::error::  ${line}"
+            done
+            exit 1
+          fi
+
+          echo "self-contained ok: only /usr/lib and /System libraries linked"
 
       - name: Notarize binary
         if: matrix.target == 'aarch64-apple-darwin'
