@@ -354,6 +354,13 @@ jobs:
           # COPYFILE_DISABLE=1 stops macOS bsdtar from adding AppleDouble
           # (._prview) entries; the installer requires exactly one entry, prview.
           COPYFILE_DISABLE=1 tar czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" prview
+          # install.sh rejects any archive that isn't exactly `prview`, so pin the same shape here.
+          LISTING="$(tar tzf "$ARCHIVE")"
+          if [ "$LISTING" != "prview" ]; then
+            echo "::error::release archive $ARCHIVE must contain exactly one entry 'prview'; got:" >&2
+            printf '%s\n' "$LISTING" >&2
+            exit 1
+          fi
 
       - name: Assert packaged binary is the notarized binary
         if: matrix.target == 'aarch64-apple-darwin'
