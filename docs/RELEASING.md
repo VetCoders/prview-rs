@@ -30,8 +30,10 @@ a manual dry run:
    verification, a `TeamIdentifier` assertion, Apple notarization that must
    reach `Accepted`, a Gatekeeper `spctl --assess` check, and a code directory
    hash comparison proving the archived binary is the notarized one.
-5. **checksums** — `SHA256SUMS` is regenerated deterministically from the
-   archives and verified with `sha256sum -c`.
+5. **checksums** — the set of produced archives must match
+   `PRVIEW_RELEASE_TARGETS` exactly, so a dropped build target fails the release
+   instead of silently shipping a partial one; `SHA256SUMS` is then regenerated
+   deterministically from the archives and verified with `sha256sum -c`.
 
 Only after all of that do the tag-gated `release` (GitHub Release) and
 `publish` (crates.io) jobs run.

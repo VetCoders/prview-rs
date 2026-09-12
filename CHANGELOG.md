@@ -38,7 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SHA256SUMS` is regenerated deterministically from the downloaded archives in
   a byte-sorted order, verified with `sha256sum -c`, and every archive is
   required to have an entry. The per-build `prview-*.tar.gz.sha256` files are no
-  longer uploaded; the manifest format is unchanged.
+  longer uploaded; the manifest format is unchanged. The release also pins the
+  published target set to the two documented platforms, so a release that is
+  missing a target archive — or carries an undocumented one — fails instead of
+  publishing a partial set.
 
 - `report.json` schema 3.0 makes `quality.breaking_changes.md_path` nullable.
   Missing Markdown reports no longer advertise a dead link; existing Rust API
