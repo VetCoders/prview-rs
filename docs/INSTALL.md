@@ -114,7 +114,64 @@ supported on Linux, macOS, and Windows. On other targets, use the CLI directly.
 
 ## Verifying a release
 
-Run the built-in release gate to confirm local build health:
+Official releases are built by `.github/workflows/release.yml` on a pushed `v*`
+tag. Every published artifact can be verified offline or against Apple.
+
+### Checksums
+
+`SHA256SUMS` is published with each release and lists one `sha256sum`-format
+line per archive:
+
+```bash
+curl -fsSLO https://github.com/vetcoders/prview-rs/releases/latest/download/SHA256SUMS
+# Linux
+sha256sum --ignore-missing -c SHA256SUMS
+# macOS
+shasum -a 256 --ignore-missing -c SHA256SUMS
+```
+
+The workflow regenerates the manifest from the downloaded archives in a
+byte-sorted order and verifies it with `sha256sum -c` before the release is
+created, so a release can never ship an archive that is missing an entry.
+
+### macOS signature and notarization
+
+The `aarch64-apple-darwin` binary is signed with a Developer ID Application
+certificate (Team ID `MW223P3NPX`) and notarized by Apple:
+
+```bash
+tar xzf prview-aarch64-apple-darwin.tar.gz
+codesign -dv --verbose=2 ./prview
+# expect: Authority=Developer ID Application: ... (MW223P3NPX)
+#         TeamIdentifier=MW223P3NPX
+#         flags=0x10000(runtime)
+
+spctl --assess --type execute --verbose=2 ./prview
+# expect: ./prview: accepted
+#         source=Notarized Developer ID
+```
+
+A standalone command-line executable cannot be stapled, so `spctl` resolves the
+notarization ticket online; the check needs network access.
+
+The Linux binary is not code-signed — verify it with `SHA256SUMS`.
+
+### Provenance
+
+Official binaries embed the exact commit they were built from:
+
+```bash
+prview --build-source-sha
+# prints the 40-character source commit of this build
+```
+
+A release binary that prints `unknown` did not come from the release workflow.
+The workflow asserts on both runners that the built binary reports exactly the
+commit being released before anything is packaged.
+
+### Local build health
+
+To confirm the state of a local checkout before tagging:
 
 ```bash
 make release-gate
@@ -126,8 +183,10 @@ The install contract for automated consumption:
 
 - **Binary**: `prview`
 - **Archive naming**: `prview-{target}.tar.gz`
-- **Checksum**: `SHA256SUMS` in the same release
+- **Checksum**: `SHA256SUMS` in the same release (`sha256sum -c` format)
 - **Version query**: `prview --version`
+- **Provenance query**: `prview --build-source-sha` (40-character source commit)
+- **macOS signing**: Developer ID Application, Team ID `MW223P3NPX`, notarized
 - **Minimum invocation**: `prview --quick` (fast local scan, no network)
 - **crates.io package**: `prview`
 - **GitHub release trigger**: push of `v*` tag to `main`

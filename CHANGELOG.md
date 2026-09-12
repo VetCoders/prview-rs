@@ -11,7 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The macOS release binary is now signed with a Developer ID Application
+  certificate (Team ID `MW223P3NPX`) and notarized by Apple. The release
+  workflow verifies the signature strictly, asserts the `TeamIdentifier`,
+  requires notarization to reach `Accepted`, requires Gatekeeper acceptance via
+  `spctl --assess --type execute`, and proves the archived binary is the
+  notarized one by comparing code directory hashes after extraction. A
+  credentials preflight job fails the whole run when a signing or notarization
+  secret is missing, so no release can be produced unsigned.
+- The release workflow accepts `workflow_dispatch` as a dry run. It executes the
+  identical preflight, validate, build, sign, notarize and checksum jobs and
+  uploads the archives plus `SHA256SUMS` as workflow artifacts; GitHub Release
+  creation and the crates.io publish remain gated on a pushed `v*` tag.
+
+### Fixed
+
+- Official release binaries no longer report `unknown` from
+  `prview --build-source-sha`. The workflow builds with `PRVIEW_SOURCE_SHA` set
+  to the released commit and fails the job unless the built binary reports
+  exactly that commit and the Cargo.toml version.
+
 ### Changed
+
+- `SHA256SUMS` is regenerated deterministically from the downloaded archives in
+  a byte-sorted order, verified with `sha256sum -c`, and every archive is
+  required to have an entry. The per-build `prview-*.tar.gz.sha256` files are no
+  longer uploaded; the manifest format is unchanged.
 
 - `report.json` schema 3.0 makes `quality.breaking_changes.md_path` nullable.
   Missing Markdown reports no longer advertise a dead link; existing Rust API
