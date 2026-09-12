@@ -36,9 +36,12 @@
 #                        the signature or notarization checks.
 #   PRVIEW_TEST_UNAME_S  Test hook: override `uname -s` for platform detection.
 #   PRVIEW_TEST_UNAME_M  Test hook: override `uname -m` for platform detection.
-#                        The test hooks only choose which official asset is
-#                        requested; every verification above still runs, and a
-#                        binary for a foreign platform cannot pass step 7.
+#                        Honoured ONLY when PRVIEW_BASE_URL points somewhere
+#                        other than the official release base; against the
+#                        official releases they are ignored with an info line.
+#                        They only choose which asset is requested; every
+#                        verification above still runs, and a binary for a
+#                        foreign platform cannot pass step 7.
 #
 # Exit codes:
 #   0  installed and verified
@@ -56,9 +59,11 @@ BIN="prview"
 DOCS_URL="https://github.com/vetcoders/prview-rs/blob/main/docs/INSTALL.md"
 SUPPORTED_TARGETS="aarch64-apple-darwin (macOS arm64), x86_64-unknown-linux-gnu (glibc Linux x86_64)"
 
+DEFAULT_BASE_URL="https://github.com/${REPO}/releases"
+
 : "${PRVIEW_INSTALL_DIR:=${HOME}/.local/bin}"
 : "${PRVIEW_VERSION:=latest}"
-: "${PRVIEW_BASE_URL:=https://github.com/${REPO}/releases}"
+: "${PRVIEW_BASE_URL:=${DEFAULT_BASE_URL}}"
 : "${PRVIEW_MACOS_TEAM_ID:=MW223P3NPX}"
 
 INSTALL_DIR="${PRVIEW_INSTALL_DIR}"
@@ -123,8 +128,19 @@ is_musl_linux() {
 # Map the running platform to a released target triple. Anything without an
 # official binary leaves TARGET empty, which is a hard failure (exit 2).
 detect_target() {
-	OS="${PRVIEW_TEST_UNAME_S:-$(uname -s)}"
-	ARCH="${PRVIEW_TEST_UNAME_M:-$(uname -m)}"
+	OS="$(uname -s)"
+	ARCH="$(uname -m)"
+	# The uname test hooks belong to the mirror/testing path only. Against the
+	# official release base they are ignored, so a stray export can never make
+	# a real user fetch and install an asset for a platform they are not on.
+	if [ -n "${PRVIEW_TEST_UNAME_S:-}${PRVIEW_TEST_UNAME_M:-}" ]; then
+		if [ "${BASE_URL}" = "${DEFAULT_BASE_URL}" ]; then
+			info "ignoring PRVIEW_TEST_UNAME_S/PRVIEW_TEST_UNAME_M: they apply only with a non-default PRVIEW_BASE_URL"
+		else
+			OS="${PRVIEW_TEST_UNAME_S:-${OS}}"
+			ARCH="${PRVIEW_TEST_UNAME_M:-${ARCH}}"
+		fi
+	fi
 	case "${OS}" in
 		Darwin)
 			case "${ARCH}" in
