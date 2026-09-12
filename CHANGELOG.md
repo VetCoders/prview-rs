@@ -33,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release binaries no longer link Homebrew or system OpenSSL. `git2` is now
+  built without its default `https`/`ssh` features — which drops `openssl-sys`
+  and `libssh2-sys` — and with `vendored-libgit2`, so libgit2 is bundled rather
+  than picked up from the build host. prview only reads local repositories
+  through libgit2; every network operation already went through the `git` CLI.
+  The previous macOS binaries linked `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`
+  and aborted on launch on any Mac without that exact Homebrew install: under
+  the hardened runtime dyld refuses a non-platform dylib with a different Team
+  ID, so even `prview --version` died with SIGABRT despite a valid signature,
+  notarization and Gatekeeper acceptance.
+- The release workflow now executes the *signed* macOS binary — not just the
+  pre-signing one — and fails unless it prints the expected version and source
+  commit, and unless `otool -L` shows only libraries under `/usr/lib` or
+  `/System`. The Linux build asserts the same shape with `ldd`, rejecting any
+  `libssl`, `libcrypto`, `libssh2`, `libgit2` or `libcurl` linkage.
 - Official release binaries no longer report `unknown` from
   `prview --build-source-sha`. The workflow builds with `PRVIEW_SOURCE_SHA` set
   to the released commit and fails the job unless the built binary reports
