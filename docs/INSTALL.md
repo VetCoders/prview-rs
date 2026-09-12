@@ -110,10 +110,11 @@ zsh and bash.
 Fail-closed is retroactive. Releases published before signing and build
 provenance existed cannot satisfy the checks above:
 
-- On macOS, releases up to and including **v0.7.0** are unsigned and are
-  rejected with exit 5. Install the first signed, provenance-bearing release
-  (newer than v0.7.0), or use the manual path below with your own judgement
-  about what you are running.
+- On macOS, releases up to and including **v0.7.0** were never signed and are
+  rejected with exit 5 by design. For a newer release, an exit 5 here means a
+  corrupted or tampered download — re-download it from the official release
+  page rather than bypassing the check, or use the manual path below with
+  your own judgement about what you are running.
 - Any release whose binary reports `--build-source-sha` as `unknown` is
   rejected with exit 6 on every platform.
 
