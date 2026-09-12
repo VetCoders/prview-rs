@@ -15,6 +15,18 @@ binary or it installs nothing. There is no source-build fallback — it never
 runs `cargo`, never clones, and never compiles on your machine. It never uses
 sudo.
 
+> **This path requires a release from the signed release pipeline** (added in
+> [PR #41](https://github.com/vetcoders/prview-rs/pull/41)). The installer only
+> accepts releases that pipeline produces: a Developer ID-signed, notarized
+> macOS binary, and an embedded source commit on every platform. Releases up to
+> and including **v0.7.0** predate it and are rejected by design. Until the
+> first such release is published, this quick-install command fails for
+> everyone — so it must not be advertised before then.
+
+On macOS, the notarization check (`spctl --assess`) needs network access to
+Apple's notarization service: the ticket is published by Apple rather than
+stapled to a bare binary, so the assessment is an online lookup.
+
 ### What it verifies
 
 1. **Platform** — only `aarch64-apple-darwin` (macOS arm64) and
@@ -30,17 +42,27 @@ sudo.
    rather than skipping the check.
 5. **Archive contents** — the archive must contain exactly one regular file
    named `prview`: no directories, no `../` paths, no symlinks, no extra files.
-   Unpacking happens in a temporary directory, never straight into the install
-   directory.
+   Unpacking happens in a temporary directory, never straight over the binary
+   you already have.
 6. **macOS identity** — on macOS the binary must pass
    `codesign --verify --strict`, report Team ID `MW223P3NPX`, and be accepted by
    `spctl --assess --type execute` (notarization). There is no bypass
    environment variable.
-7. **Post-install** — the binary is executed before and after installation:
-   `--version` must match the resolved tag, and `--build-source-sha` must print
-   a 40-hex commit rather than `unknown`.
+7. **Identity of the build** — the binary is executed: `--version` must match
+   the resolved tag, and `--build-source-sha` must print a 40-hex commit rather
+   than `unknown`.
 
-Only after every check passes is the binary written, atomically, with mode 755.
+Checks 6 and 7 run the binary, so it is first copied to a staging file inside
+the install directory (`.prview.<pid>.tmp`, mode 755) and both checks run
+against that path. Running it from the install directory rather than `$TMPDIR`
+also keeps the checks working on hosts that mount `$TMPDIR` with `noexec`.
+
+The atomic rename of the staging file over `prview` is the **last** action of
+the run. Until it happens the install directory's `prview` is untouched, and
+after it happens there is nothing left that can fail — so a non-zero exit
+always means the binary you already had is still exactly the binary you have.
+A staging file from a crashed earlier run is never read, executed, or
+installed; the current run's own staging file is removed on any failure.
 
 ### Environment variables
 
@@ -50,6 +72,8 @@ Only after every check passes is the binary written, atomically, with mode 755.
 | `PRVIEW_VERSION` | `latest` | Release to install: `latest`, `X.Y.Z`, or `vX.Y.Z`. |
 | `PRVIEW_BASE_URL` | `https://github.com/vetcoders/prview-rs/releases` | Release base URL — mirror/testing hook. A mirror that cannot emit HTTP redirects must publish `<base>/latest/VERSION` containing the tag. |
 | `PRVIEW_MACOS_TEAM_ID` | `MW223P3NPX` | Expected Apple Team ID, for forks signing with their own Developer ID. It cannot skip the signature or notarization checks. |
+| `PRVIEW_TEST_UNAME_S` | unset | **Test/mirror only.** Overrides `uname -s` for platform detection. Honoured only when `PRVIEW_BASE_URL` is not the official release base; against the official releases it is ignored with an info line. |
+| `PRVIEW_TEST_UNAME_M` | unset | **Test/mirror only.** Overrides `uname -m`, under the same `PRVIEW_BASE_URL` condition. |
 
 ```bash
 # Pin a version and a directory
@@ -72,7 +96,7 @@ zsh and bash.
 | 3 | Release artifact missing or download failed |
 | 4 | Checksum mismatch, malformed `SHA256SUMS`, or unsafe archive contents |
 | 5 | macOS signature / Team ID / notarization verification failed |
-| 6 | Post-install verification failed (version or build provenance) |
+| 6 | Binary verification failed (version or build provenance) |
 
 ### Releases the installer will refuse
 
@@ -200,7 +224,8 @@ The install contract for automated consumption:
 - **Version pinning**: `PRVIEW_VERSION=<X.Y.Z>` for the curl installer
 - **Installer exit codes**: 0 ok, 1 tooling, 2 unsupported platform, 3 missing
   artifact, 4 checksum/archive invalid, 5 macOS signature/notarization, 6
-  post-install verification — a non-zero code always means nothing was installed
+  binary verification — a non-zero code always means nothing was installed and
+  any `prview` already in the install directory is untouched
 - **Minimum invocation**: `prview --quick` (fast local scan, no network)
 - **crates.io package**: `prview`
 - **GitHub release trigger**: push of `v*` tag to `main`
