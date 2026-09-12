@@ -12,8 +12,13 @@
 #   4. the archive matches its exact SHA256SUMS entry;
 #   5. the archive contains exactly one regular file named `prview`;
 #   6. on macOS: Developer ID signature, Team ID, and notarization (spctl);
-#   7. the binary reports the expected version and a 40-hex build source SHA,
-#      checked before it is installed and again from the installed path.
+#   7. the binary reports the expected version and a 40-hex build source SHA.
+#
+# Checks 6 and 7 execute the binary, so it is first staged inside the install
+# directory as `.prview.<pid>.tmp` and every check runs against that staged
+# path. The atomic `mv` into place is the last action of the run: until it
+# happens, ${PRVIEW_INSTALL_DIR}/prview is untouched, and after it happens
+# nothing is left that can fail.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/vetcoders/prview-rs/main/install.sh | sh
@@ -42,7 +47,7 @@
 #   3  release artifact missing or download failed
 #   4  checksum mismatch, malformed SHA256SUMS, or unsafe archive contents
 #   5  macOS signature / Team ID / notarization verification failed
-#   6  post-install verification failed (version or build provenance)
+#   6  binary verification failed (version or build provenance)
 #
 set -eu
 
@@ -333,12 +338,29 @@ Releases published before build provenance was recorded are rejected by design; 
 
 # --- install ------------------------------------------------------------------
 
-install_binary() {
-	staged="$1"
+# Copy the unpacked binary to a private path inside the install directory. The
+# checks that execute the binary then run from there, which also survives a
+# `noexec` $TMPDIR. The path is unique to this process, and the only file this
+# script ever reads back is the one it just wrote: a stale `.prview.*.tmp` left
+# by an earlier crashed run is never picked up, never executed, and never
+# installed. Nothing outside this path is touched until finalize_install.
+stage_binary() {
+	source_binary="$1"
 	mkdir -p "${INSTALL_DIR}" || fail 1 "could not create ${INSTALL_DIR}"
 	STAGED_TARGET="${INSTALL_DIR}/.${BIN}.$$.tmp"
-	install -m 755 "${staged}" "${STAGED_TARGET}" || fail 1 "could not stage ${BIN} in ${INSTALL_DIR}"
-	mv -f "${STAGED_TARGET}" "${INSTALL_DIR}/${BIN}" || fail 1 "could not install ${BIN} into ${INSTALL_DIR}"
+	# Remove, never write through, anything already sitting at that path — a
+	# leftover symlink must not redirect the staged copy somewhere else.
+	rm -f "${STAGED_TARGET}" || fail 1 "could not clear the stale staging path ${STAGED_TARGET}"
+	install -m 755 "${source_binary}" "${STAGED_TARGET}" ||
+		fail 1 "could not stage ${BIN} in ${INSTALL_DIR} (is it writable?)"
+}
+
+# The last mutation of the run: every check has already passed against the
+# staged file, so this rename is the single moment the install directory's
+# `prview` changes, and nothing after it can fail.
+finalize_install() {
+	mv -f "${STAGED_TARGET}" "${INSTALL_DIR}/${BIN}" ||
+		fail 1 "could not install ${BIN} into ${INSTALL_DIR}"
 	STAGED_TARGET=""
 }
 
@@ -380,14 +402,14 @@ main() {
 	verify_checksum "${TMPDIR_INSTALL}" "${archive}"
 	extract_archive "${TMPDIR_INSTALL}" "${archive}"
 
-	staged="${TMPDIR_INSTALL}/extract/${BIN}"
-	if [ "${TARGET}" = "aarch64-apple-darwin" ]; then
-		verify_macos_identity "${staged}"
-	fi
+	stage_binary "${TMPDIR_INSTALL}/extract/${BIN}"
 
-	verify_binary "${staged}" "staged binary"
-	install_binary "${staged}"
-	verify_binary "${INSTALL_DIR}/${BIN}" "installed binary"
+	if [ "${TARGET}" = "aarch64-apple-darwin" ]; then
+		verify_macos_identity "${STAGED_TARGET}"
+	fi
+	verify_binary "${STAGED_TARGET}" "staged binary"
+
+	finalize_install
 
 	info ""
 	info "${BIN} ${VERSION} installed to ${INSTALL_DIR}/${BIN}"
