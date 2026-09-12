@@ -193,6 +193,7 @@ jobs:
 
           P12_PATH="${RUNNER_TEMP}/prview-cert.p12"
           printf '%s' "${MACOS_CERT_P12_BASE64}" | base64 --decode > "${P12_PATH}"
+          chmod 600 "${P12_PATH}"
           # `security import` reads legacy-format PKCS#12 bundles as-is.
           security import "${P12_PATH}" \
             -k "${KEYCHAIN_PATH}" \
@@ -350,7 +351,9 @@ jobs:
         run: |
           set -euo pipefail
           ARCHIVE="prview-${{ matrix.target }}.tar.gz"
-          tar czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" prview
+          # COPYFILE_DISABLE=1 stops macOS bsdtar from adding AppleDouble
+          # (._prview) entries; the installer requires exactly one entry, prview.
+          COPYFILE_DISABLE=1 tar czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" prview
 
       - name: Assert packaged binary is the notarized binary
         if: matrix.target == 'aarch64-apple-darwin'
