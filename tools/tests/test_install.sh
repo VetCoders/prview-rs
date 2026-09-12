@@ -205,6 +205,32 @@ assert_true() {
 	fi
 }
 
+# seed_install_dir <dir> -> plants a sentinel `prview` and prints its sha256.
+# Stands in for the binary a user already has installed.
+seed_install_dir() {
+	mkdir -p "$1"
+	write_fake_prview "$1/prview" "0.0.1-previous" "1111111111111111111111111111111111111111"
+	sha256_of "$1/prview"
+}
+
+# assert_preserved <label> <dir> <expected-sha>
+assert_preserved() {
+	preserved=0
+	if [ -f "$2/prview" ] && [ "$(sha256_of "$2/prview")" = "$3" ]; then
+		preserved=1
+	fi
+	assert_true "$1" "${preserved}"
+}
+
+# assert_no_staged_tmp <label> <dir> — the staging file must never outlive a run.
+assert_no_staged_tmp() {
+	no_tmp=1
+	for staged in "$2"/.prview.*.tmp; do
+		[ -e "${staged}" ] && no_tmp=0
+	done
+	assert_true "$1" "${no_tmp}"
+}
+
 printf 'install.sh offline contract tests (host %s/%s)\n\n' "${HOST_OS}" "${HOST_ARCH}"
 
 # --- 1. happy path, `latest` resolved from the tag marker ---------------------
@@ -224,6 +250,22 @@ sha_reported=0
 grep -qF "source commit: ${GOOD_SHA}" "${WORK}/out.1" && sha_reported=1
 assert_true "happy path: reports the 40-hex build source commit" "${sha_reported}"
 
+assert_no_staged_tmp "happy path: no staged .prview.*.tmp left behind" "${dest}"
+
+# --- 1b. a staging leftover from an earlier crashed run is never installed ----
+stale_dir="${WORK}/dest-stale"
+mkdir -p "${stale_dir}"
+write_fake_prview "${stale_dir}/.prview.999999.tmp" "6.6.6" "2222222222222222222222222222222222222222"
+run_case "stale .prview.*.tmp in the install dir is ignored" 0 "prview 9.9.9 installed to" \
+	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${stale_dir}"
+
+stale_unused=0
+if [ -x "${stale_dir}/prview" ] && [ "$("${stale_dir}/prview" --version)" = "prview ${VERSION}" ]; then
+	stale_unused=1
+fi
+assert_true "stale staging file was not the binary installed" "${stale_unused}"
+
 # --- 2. explicit version ------------------------------------------------------
 run_case "explicit PRVIEW_VERSION=9.9.9 installs without resolving latest" 0 "prview 9.9.9 installed to" \
 	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
@@ -238,6 +280,7 @@ run_case "checksum mismatch is rejected" 4 "checksum mismatch for prview-${LINUX
 badsum_absent=0
 [ ! -e "${WORK}/dest-badsum/prview" ] && badsum_absent=1
 assert_true "checksum mismatch installs nothing" "${badsum_absent}"
+assert_no_staged_tmp "checksum mismatch leaves no staged .prview.*.tmp" "${WORK}/dest-badsum"
 
 # --- 4. missing archive -------------------------------------------------------
 fx=$(make_fixture noarchive "${LINUX_TARGET}" noarchive)
@@ -296,6 +339,7 @@ run_case "binary reporting the wrong version is rejected" 6 "version mismatch" \
 badversion_absent=0
 [ ! -e "${WORK}/dest-badversion/prview" ] && badversion_absent=1
 assert_true "version mismatch installs nothing" "${badversion_absent}"
+assert_no_staged_tmp "version mismatch leaves no staged .prview.*.tmp" "${WORK}/dest-badversion"
 
 # --- 12. unknown build provenance --------------------------------------------
 fx=$(make_fixture unknownsha "${LINUX_TARGET}" unknownsha)
@@ -308,6 +352,36 @@ run_case "multi-line --build-source-sha hiding a 40-hex line is rejected" 6 "bui
 	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
 	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${WORK}/dest-multilinesha"
 
+# --- 12b. a rejection never disturbs the binary already installed -------------
+# The checks that execute the binary run from a staging file inside the install
+# directory, so a rejection must leave an existing prview byte-identical.
+# Re-seeded per case, so one failure cannot cascade into the next assertion.
+preserve_dir="${WORK}/dest-preserve"
+
+preserve_sha=$(seed_install_dir "${preserve_dir}")
+fx=$(make_fixture preserve-badversion "${LINUX_TARGET}" badversion)
+run_case "version mismatch spares the prview already installed" 6 "version mismatch" \
+	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${preserve_dir}"
+assert_preserved "version mismatch: previous binary byte-identical" "${preserve_dir}" "${preserve_sha}"
+assert_no_staged_tmp "version mismatch: no staged .prview.*.tmp left behind" "${preserve_dir}"
+
+preserve_sha=$(seed_install_dir "${preserve_dir}")
+fx=$(make_fixture preserve-unknownsha "${LINUX_TARGET}" unknownsha)
+run_case "missing provenance spares the prview already installed" 6 "build provenance missing" \
+	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${preserve_dir}"
+assert_preserved "missing provenance: previous binary byte-identical" "${preserve_dir}" "${preserve_sha}"
+assert_no_staged_tmp "missing provenance: no staged .prview.*.tmp left behind" "${preserve_dir}"
+
+preserve_sha=$(seed_install_dir "${preserve_dir}")
+fx=$(make_fixture preserve-badsum "${LINUX_TARGET}" badsum)
+run_case "checksum mismatch spares the prview already installed" 4 "checksum mismatch" \
+	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${preserve_dir}"
+assert_preserved "checksum mismatch: previous binary byte-identical" "${preserve_dir}" "${preserve_sha}"
+assert_no_staged_tmp "checksum mismatch: no staged .prview.*.tmp left behind" "${preserve_dir}"
+
 # --- 13. macOS: unsigned binary must be rejected ------------------------------
 case "${HOST_OS}/${HOST_ARCH}" in
 	Darwin/arm64 | Darwin/aarch64)
@@ -319,6 +393,15 @@ case "${HOST_OS}/${HOST_ARCH}" in
 		macos_absent=0
 		[ ! -e "${WORK}/dest-macos/prview" ] && macos_absent=1
 		assert_true "macOS: unsigned binary installs nothing" "${macos_absent}"
+		assert_no_staged_tmp "macOS: unsigned binary leaves no staged .prview.*.tmp" "${WORK}/dest-macos"
+
+		macos_preserve_dir="${WORK}/dest-macos-preserve"
+		macos_preserve_sha=$(seed_install_dir "${macos_preserve_dir}")
+		run_case "macOS: unsigned binary spares the prview already installed" 5 "macOS code signature verification failed" \
+			PRVIEW_VERSION="${VERSION}" \
+			PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${macos_preserve_dir}"
+		assert_preserved "macOS: previous binary byte-identical" "${macos_preserve_dir}" "${macos_preserve_sha}"
+		assert_no_staged_tmp "macOS: no staged .prview.*.tmp left behind" "${macos_preserve_dir}"
 		;;
 	*)
 		skip_case "macOS: unsigned binary is rejected (no bypass)" "host is not arm64 macOS"
@@ -378,7 +461,48 @@ else
 	skip_case "latest resolved through an HTTP 302 redirect" "python3 not available"
 fi
 
-# --- 15. static audit: nothing builds from source -----------------------------
+# --- 15. uname test hooks are ignored on the official release base -------------
+# Network-free: a curl/wget that always fails sits first on PATH, so the run
+# stops at the first fetch without ever dialling out, and PRVIEW_VERSION is
+# pinned so `latest` is never resolved. The assertion is which platform the
+# failure names — the real host's, not the override's.
+OFFLINE_BIN="${WORK}/offlinebin"
+mkdir -p "${OFFLINE_BIN}"
+for tool in curl wget; do
+	printf '#!/bin/sh\nexit 7\n' >"${OFFLINE_BIN}/${tool}"
+	chmod 755 "${OFFLINE_BIN}/${tool}"
+done
+
+case "${HOST_OS}/${HOST_ARCH}" in
+	Darwin/arm64 | Darwin/aarch64) host_target="${DARWIN_TARGET}" ;;
+	Linux/x86_64 | Linux/amd64) host_target="${LINUX_TARGET}" ;;
+	*) host_target="" ;;
+esac
+
+hook_out="${WORK}/out.$((CASE_N + 1))"
+if [ -n "${host_target}" ]; then
+	# Honoured, the overrides would have failed closed as Linux/riscv64 (exit 2);
+	# ignored, the run asks for the host's own asset and dies on the fetch.
+	run_case "default base URL ignores PRVIEW_TEST_UNAME_S/M" 3 "no official artifact for ${host_target}" \
+		PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=riscv64 PRVIEW_VERSION="${VERSION}" \
+		PATH="${OFFLINE_BIN}:${PATH}" PRVIEW_INSTALL_DIR="${WORK}/dest-hookguard"
+else
+	# This host has no official binary; overrides claiming a supported platform
+	# must not rescue it.
+	run_case "default base URL ignores PRVIEW_TEST_UNAME_S/M" 2 "unsupported platform ${HOST_OS}/${HOST_ARCH}" \
+		PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
+		PATH="${OFFLINE_BIN}:${PATH}" PRVIEW_INSTALL_DIR="${WORK}/dest-hookguard"
+fi
+
+hook_announced=0
+grep -qF "ignoring PRVIEW_TEST_UNAME_S/PRVIEW_TEST_UNAME_M" "${hook_out}" && hook_announced=1
+assert_true "default base URL: the ignored hooks are announced" "${hook_announced}"
+
+hookguard_clean=0
+[ ! -e "${WORK}/dest-hookguard/prview" ] && hookguard_clean=1
+assert_true "default base URL: the hook-guard run installs nothing" "${hookguard_clean}"
+
+# --- 16. static audit: nothing builds from source -----------------------------
 # `cargo`/`rustup`/`git clone` may appear only inside comments or message
 # strings, never in command position.
 if grep -nE '(^|[;&|(]|\$\()[[:space:]]*(cargo|rustup|rustc)[[:space:]]' "${INSTALL_SH}" >"${WORK}/cargo-audit.txt"; then
