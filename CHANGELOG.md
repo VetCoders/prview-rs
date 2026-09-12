@@ -11,7 +11,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-13
+
+### Added
+
+- The macOS release binary is now signed with a Developer ID Application
+  certificate (Team ID `MW223P3NPX`) and notarized by Apple. The release
+  workflow verifies the signature strictly, asserts the `TeamIdentifier`,
+  requires notarization to reach `Accepted`, requires Gatekeeper to report
+  `source=Notarized Developer ID` via
+  `spctl -a -t open --context context:primary-signature`, and proves the
+  archived binary is the notarized one by comparing code directory hashes after
+  extraction. A
+  credentials preflight job fails the whole run when a signing or notarization
+  secret is missing, so no release can be produced unsigned.
+- The release workflow accepts `workflow_dispatch` as a dry run. It executes the
+  identical preflight, validate, build, sign, notarize and checksum jobs and
+  uploads the archives plus `SHA256SUMS` as workflow artifacts; GitHub Release
+  creation and the crates.io publish remain gated on a pushed `v*` tag.
+- Release archives and `SHA256SUMS` carry a signed GitHub build provenance
+  attestation, verifiable with
+  `gh attestation verify <file> --repo vetcoders/prview-rs`.
+
+### Fixed
+
+- Release binaries no longer link Homebrew or system OpenSSL. `git2` is now
+  built without its default `https`/`ssh` features — which drops `openssl-sys`
+  and `libssh2-sys` — and with `vendored-libgit2`, so libgit2 is bundled rather
+  than picked up from the build host. prview only reads local repositories
+  through libgit2; every network operation already went through the `git` CLI.
+  The previous macOS binaries linked `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`
+  and aborted on launch on any Mac without that exact Homebrew install: under
+  the hardened runtime dyld refuses a non-platform dylib with a different Team
+  ID, so even `prview --version` died with SIGABRT despite a valid signature,
+  notarization and Gatekeeper acceptance.
+- The release workflow now executes the *signed* macOS binary — not just the
+  pre-signing one — and fails unless it prints the expected version and source
+  commit, and unless `otool -L` shows only libraries under `/usr/lib` or
+  `/System`. The Linux build asserts the same shape with `ldd`, rejecting any
+  `libssl`, `libcrypto`, `libssh2`, `libgit2` or `libcurl` linkage.
+- Official release binaries no longer report `unknown` from
+  `prview --build-source-sha`. The workflow builds with `PRVIEW_SOURCE_SHA` set
+  to the released commit and fails the job unless the built binary reports
+  exactly that commit and the Cargo.toml version.
+
 ### Changed
+
+- `SHA256SUMS` is regenerated deterministically from the downloaded archives in
+  a byte-sorted order, verified with `sha256sum -c`, and every archive is
+  required to have an entry. The per-build `prview-*.tar.gz.sha256` files are no
+  longer uploaded; the manifest format is unchanged. The release also pins the
+  published target set to the two documented platforms, so a release that is
+  missing a target archive — or carries an undocumented one — fails instead of
+  publishing a partial set.
 
 - `report.json` schema 3.0 makes `quality.breaking_changes.md_path` nullable.
   Missing Markdown reports no longer advertise a dead link; existing Rust API
@@ -2475,7 +2527,8 @@ v0.1.2, consolidated from 183 commits on the development branch.
 - Cargo-geiger PascalCase output format for v0.13.0
 - Watch mode change detection using full git status hash
 
-[Unreleased]: https://github.com/vetcoders/prview-rs/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/vetcoders/prview-rs/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/vetcoders/prview-rs/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/vetcoders/prview-rs/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/vetcoders/prview-rs/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/vetcoders/prview-rs/compare/v0.4.0...v0.5.0
