@@ -169,6 +169,13 @@ A release binary that prints `unknown` did not come from the release workflow.
 The workflow asserts on both runners that the built binary reports exactly the
 commit being released before anything is packaged.
 
+Each published archive and `SHA256SUMS` also carries a signed GitHub build
+provenance attestation:
+
+```bash
+gh attestation verify prview-aarch64-apple-darwin.tar.gz --repo vetcoders/prview-rs
+```
+
 ### Local build health
 
 To confirm the state of a local checkout before tagging:

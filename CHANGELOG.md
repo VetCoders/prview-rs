@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identical preflight, validate, build, sign, notarize and checksum jobs and
   uploads the archives plus `SHA256SUMS` as workflow artifacts; GitHub Release
   creation and the crates.io publish remain gated on a pushed `v*` tag.
+- Release archives and `SHA256SUMS` carry a signed GitHub build provenance
+  attestation, verifiable with
+  `gh attestation verify <file> --repo vetcoders/prview-rs`.
 
 ### Fixed
 
