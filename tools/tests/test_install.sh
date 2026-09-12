@@ -97,6 +97,19 @@ make_fixture() {
 	case "${variant}" in
 		badversion) write_fake_prview "${stage}/prview" "1.2.3" "${GOOD_SHA}" ;;
 		unknownsha) write_fake_prview "${stage}/prview" "${VERSION}" "unknown" ;;
+		multilinesha)
+			# grep is line-oriented: a 40-hex line hidden behind "unknown" must
+			# not satisfy the provenance check.
+			cat >"${stage}/prview" <<EOF
+#!/bin/sh
+case "\$1" in
+	--version) printf 'prview %s\n' '${VERSION}' ;;
+	--build-source-sha) printf 'unknown\n%s\n' '${GOOD_SHA}' ;;
+	*) printf 'fake prview\n' ;;
+esac
+EOF
+			chmod 755 "${stage}/prview"
+			;;
 		*) write_fake_prview "${stage}/prview" "${VERSION}" "${GOOD_SHA}" ;;
 	esac
 
@@ -289,6 +302,11 @@ fx=$(make_fixture unknownsha "${LINUX_TARGET}" unknownsha)
 run_case "binary with --build-source-sha=unknown is rejected" 6 "build provenance missing" \
 	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
 	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${WORK}/dest-unknownsha"
+
+fx=$(make_fixture multilinesha "${LINUX_TARGET}" multilinesha)
+run_case "multi-line --build-source-sha hiding a 40-hex line is rejected" 6 "build provenance missing" \
+	PRVIEW_TEST_UNAME_S=Linux PRVIEW_TEST_UNAME_M=x86_64 PRVIEW_VERSION="${VERSION}" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${WORK}/dest-multilinesha"
 
 # --- 13. macOS: unsigned binary must be rejected ------------------------------
 case "${HOST_OS}/${HOST_ARCH}" in

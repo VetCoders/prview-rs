@@ -321,7 +321,10 @@ verify_binary() {
 
 	source_sha="$("${binary}" --build-source-sha 2>/dev/null)" ||
 		fail 6 "${stage}: ${binary} --build-source-sha did not run successfully"
-	if ! printf '%s' "${source_sha}" | grep -Eq '^[0-9a-f]{40}$'; then
+	# grep is line-oriented, so reject multi-line output before matching: a
+	# binary printing "unknown\n<40 hex>" must not satisfy this check.
+	if [ "$(printf '%s\n' "${source_sha}" | wc -l | tr -d ' ')" != "1" ] ||
+		! printf '%s' "${source_sha}" | grep -Eq '^[0-9a-f]{40}$'; then
 		fail 6 "${stage}: build provenance missing — --build-source-sha reported '${source_sha}' instead of a 40-hex commit.
 Releases published before build provenance was recorded are rejected by design; see ${DOCS_URL}."
 	fi
