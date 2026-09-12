@@ -315,7 +315,8 @@ verify_macos_identity() {
 	if ! codesign --verify --strict --verbose=2 "${binary}" >/dev/null 2>&1; then
 		fail 5 "macOS code signature verification failed for ${TAG} (codesign --verify --strict).
 Releases up to and including v0.7.0 are unsigned and are rejected by design.
-Install v0.7.1 or later, or see ${DOCS_URL}."
+Install the first signed, provenance-bearing release (newer than v0.7.0), or
+see ${DOCS_URL}."
 	fi
 	signing_info="$(codesign -dv --verbose=2 "${binary}" 2>&1 || true)"
 	if ! printf '%s\n' "${signing_info}" | grep -q "^TeamIdentifier=${PRVIEW_MACOS_TEAM_ID}$"; then
