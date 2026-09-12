@@ -11,7 +11,8 @@
 #   3. the archive and SHA256SUMS both download;
 #   4. the archive matches its exact SHA256SUMS entry;
 #   5. the archive contains exactly one regular file named `prview`;
-#   6. on macOS: Developer ID signature, Team ID, and notarization (spctl);
+#   6. on macOS: Developer ID signature, Team ID, and notarization — Gatekeeper
+#      must report `source=Notarized Developer ID` for the binary;
 #   7. the binary reports the expected version and a 40-hex build source SHA.
 #
 # Checks 6 and 7 execute the binary, so it is first staged inside the install
@@ -325,8 +326,23 @@ see ${DOCS_URL}."
 	if ! have spctl; then
 		fail 5 "spctl is not available; cannot verify notarization of ${BIN}"
 	fi
-	if ! spctl --assess --type execute "${binary}" >/dev/null 2>&1; then
-		fail 5 "notarization assessment failed for ${TAG} (spctl --assess --type execute rejected the binary)"
+	# `spctl --assess --type execute` cannot answer this question: it rejects
+	# every standalone executable, Apple's own /bin/ls included, with "the code
+	# is valid but does not seem to be an app". The assessment that does is the
+	# primary-signature one, whose `source=` line names where the verdict comes
+	# from: a notarized Developer ID build reports `source=Notarized Developer
+	# ID`, one signed with a Developer ID but never notarized reports plain
+	# `source=Developer ID`, and an ad-hoc or unsigned binary is rejected with no
+	# `source=` line at all. Only the first is accepted. The verdict lines go to
+	# stderr, so stdout and stderr are captured together.
+	notarization_status=0
+	notarization_info="$(spctl -a -t open --context context:primary-signature -vv "${binary}" 2>&1)" ||
+		notarization_status=$?
+	notarization_source="$(printf '%s\n' "${notarization_info}" | grep '^source=' || true)"
+	if [ "${notarization_status}" != "0" ] || [ "${notarization_source}" != "source=Notarized Developer ID" ]; then
+		fail 5 "notarization check failed for ${TAG}: Gatekeeper reported '${notarization_source:-no source line}', expected 'source=Notarized Developer ID'.
+Only a notarized Developer ID build is accepted; a signed-but-not-notarized or
+ad-hoc binary is rejected by design. See ${DOCS_URL}."
 	fi
 }
 

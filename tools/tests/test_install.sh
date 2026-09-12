@@ -412,6 +412,85 @@ case "${HOST_OS}/${HOST_ARCH}" in
 		;;
 esac
 
+# --- 13b. macOS: the notarization verdict decides, on every host --------------
+# The macOS branch is selected by the resolved target, so the uname hooks reach
+# it from Linux too. `codesign` and `spctl` are looked up with `command -v`, so
+# shims first on PATH stand in for them and no case here depends on the host's
+# real Gatekeeper: the fake `codesign` always accepts and reports the expected
+# Team ID, and the fake `spctl` replays the verdict the case asks for. Only that
+# verdict varies, which is exactly the stage under test. Real Gatekeeper writes
+# its verdict lines to stderr, so the fake does too.
+MACOS_BIN="${WORK}/macosbin"
+mkdir -p "${MACOS_BIN}"
+cat >"${MACOS_BIN}/codesign" <<'EOF'
+#!/bin/sh
+# --verify --strict accepts; -dv prints the signing info on stderr.
+if [ "$1" = "-dv" ]; then
+	printf 'TeamIdentifier=MW223P3NPX\n' >&2
+fi
+exit 0
+EOF
+cat >"${MACOS_BIN}/spctl" <<'EOF'
+#!/bin/sh
+if [ -n "${FAKE_SPCTL_SOURCE:-}" ]; then
+	printf 'origin=Fake Signer\n%s\n' "${FAKE_SPCTL_SOURCE}" >&2
+else
+	printf 'rejected\n' >&2
+fi
+exit "${FAKE_SPCTL_EXIT:-1}"
+EOF
+chmod 755 "${MACOS_BIN}/codesign" "${MACOS_BIN}/spctl"
+
+fx=$(make_fixture macos-notarization "${DARWIN_TARGET}" good)
+
+# (a) the only accepted verdict.
+notarized_dest="${WORK}/dest-notarized"
+run_case "macOS: source=Notarized Developer ID passes the notarization stage" 0 "prview 9.9.9 installed to" \
+	PRVIEW_TEST_UNAME_S=Darwin PRVIEW_TEST_UNAME_M=arm64 PRVIEW_VERSION="${VERSION}" \
+	PATH="${MACOS_BIN}:${PATH}" FAKE_SPCTL_EXIT=0 FAKE_SPCTL_SOURCE="source=Notarized Developer ID" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${notarized_dest}"
+
+notarized_ok=0
+if [ -x "${notarized_dest}/prview" ] && [ "$("${notarized_dest}/prview" --version)" = "prview ${VERSION}" ]; then
+	notarized_ok=1
+fi
+assert_true "macOS: notarized verdict installs the verified binary" "${notarized_ok}"
+assert_no_staged_tmp "macOS: notarized run leaves no staged .prview.*.tmp" "${notarized_dest}"
+
+# (b) signed with a Developer ID but never notarized: accepted by Gatekeeper's
+# own exit status, rejected here because the ticket is missing.
+devid_dest="${WORK}/dest-notarize-devid"
+run_case "macOS: plain source=Developer ID (not notarized) is rejected" 5 "Gatekeeper reported 'source=Developer ID'" \
+	PRVIEW_TEST_UNAME_S=Darwin PRVIEW_TEST_UNAME_M=arm64 PRVIEW_VERSION="${VERSION}" \
+	PATH="${MACOS_BIN}:${PATH}" FAKE_SPCTL_EXIT=0 FAKE_SPCTL_SOURCE="source=Developer ID" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${devid_dest}"
+
+devid_absent=0
+[ ! -e "${devid_dest}/prview" ] && devid_absent=1
+assert_true "macOS: a non-notarized Developer ID build installs nothing" "${devid_absent}"
+assert_no_staged_tmp "macOS: non-notarized run leaves no staged .prview.*.tmp" "${devid_dest}"
+
+devid_preserve_dir="${WORK}/dest-notarize-devid-preserve"
+devid_preserve_sha=$(seed_install_dir "${devid_preserve_dir}")
+run_case "macOS: a non-notarized build spares the prview already installed" 5 "Gatekeeper reported 'source=Developer ID'" \
+	PRVIEW_TEST_UNAME_S=Darwin PRVIEW_TEST_UNAME_M=arm64 PRVIEW_VERSION="${VERSION}" \
+	PATH="${MACOS_BIN}:${PATH}" FAKE_SPCTL_EXIT=0 FAKE_SPCTL_SOURCE="source=Developer ID" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${devid_preserve_dir}"
+assert_preserved "macOS: non-notarized: previous binary byte-identical" "${devid_preserve_dir}" "${devid_preserve_sha}"
+assert_no_staged_tmp "macOS: non-notarized: no staged .prview.*.tmp left behind" "${devid_preserve_dir}"
+
+# (c) outright rejection: non-zero status and no `source=` line at all.
+rejected_dest="${WORK}/dest-notarize-rejected"
+run_case "macOS: a rejecting spctl fails closed" 5 "Gatekeeper reported 'no source line'" \
+	PRVIEW_TEST_UNAME_S=Darwin PRVIEW_TEST_UNAME_M=arm64 PRVIEW_VERSION="${VERSION}" \
+	PATH="${MACOS_BIN}:${PATH}" FAKE_SPCTL_EXIT=3 FAKE_SPCTL_SOURCE="" \
+	PRVIEW_BASE_URL="file://${fx}" PRVIEW_INSTALL_DIR="${rejected_dest}"
+
+rejected_absent=0
+[ ! -e "${rejected_dest}/prview" ] && rejected_absent=1
+assert_true "macOS: a rejected binary installs nothing" "${rejected_absent}"
+assert_no_staged_tmp "macOS: rejected run leaves no staged .prview.*.tmp" "${rejected_dest}"
+
 # --- 14. `latest` resolved through a real HTTP redirect -----------------------
 if command -v python3 >/dev/null 2>&1; then
 	fx=$(make_fixture redirect "${LINUX_TARGET}" good)

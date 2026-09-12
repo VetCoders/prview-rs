@@ -101,7 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file named `prview`, unpacking happens in a temporary directory, and the
   binary is installed atomically with `install -m 755`. On macOS the binary must
   pass `codesign --verify --strict`, report Team ID `MW223P3NPX`, and be accepted
-  by `spctl --assess --type execute`, with no bypass environment variable. The
+  by Gatekeeper's primary-signature assessment
+  (`spctl -a -t open --context context:primary-signature -vv`), which must
+  report `source=Notarized Developer ID`; a Developer ID signature without a
+  notarization ticket reports plain `source=Developer ID` and is rejected. There
+  is no bypass environment variable. The
   installed binary is then executed: `--version` must match the resolved tag and
   `--build-source-sha` must be a 40-hex commit. Consequences by design: on macOS,
   unsigned releases up to and including v0.7.0 are rejected (exit 5), and any

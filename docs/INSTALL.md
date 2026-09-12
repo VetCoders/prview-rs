@@ -23,7 +23,8 @@ sudo.
 > first such release is published, this quick-install command fails for
 > everyone — so it must not be advertised before then.
 
-On macOS, the notarization check (`spctl --assess`) needs network access to
+On macOS, the notarization check
+(`spctl -a -t open --context context:primary-signature`) needs network access to
 Apple's notarization service: the ticket is published by Apple rather than
 stapled to a bare binary, so the assessment is an online lookup.
 
@@ -46,8 +47,14 @@ stapled to a bare binary, so the assessment is an online lookup.
    you already have.
 6. **macOS identity** — on macOS the binary must pass
    `codesign --verify --strict`, report Team ID `MW223P3NPX`, and be accepted by
-   `spctl --assess --type execute` (notarization). There is no bypass
-   environment variable.
+   Gatekeeper's primary-signature assessment,
+   `spctl -a -t open --context context:primary-signature -vv`, which has to
+   report exactly `source=Notarized Developer ID`. A binary signed with a
+   Developer ID but never notarized reports plain `source=Developer ID` and is
+   rejected, as is any binary Gatekeeper rejects outright. (`spctl --assess
+   --type execute` is *not* the check: it rejects every standalone executable,
+   Apple's own `/bin/ls` included, so it can never confirm a bare binary.) There
+   is no bypass environment variable.
 7. **Identity of the build** — the binary is executed: `--version` must match
    the resolved tag, and `--build-source-sha` must print a 40-hex commit rather
    than `unknown`.
